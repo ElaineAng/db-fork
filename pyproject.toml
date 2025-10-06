@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "db-fork"
+version = "0.1.0"
+description = "Agent that creates and manages branches in a database"
+authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
+requires-python = ">=3.8"
+dependencies = [
+    "coolname",
+    "microbench",
+    "neon-api",
+    "psycopg2-binary",
+    "python-dotenv",
+    "langchain",
+    "langgraph",
+    "langchain-google-genai",
+]
+
+[tool.setuptools]
+packages = ["dblib"]
+
+[tool.setuptools.package-data]
+lib = ["*.py"]
