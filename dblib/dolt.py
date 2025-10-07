@@ -1,5 +1,5 @@
 from psycopg2.extensions import connection as pgconn
-from lib.db_api import DBToolSuite
+from dblib.db_api import DBToolSuite
 
 
 class DoltToolSuite(DBToolSuite):
