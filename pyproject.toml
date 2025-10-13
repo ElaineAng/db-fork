@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["dblib"]
+packages = ["dblib", "microbench"]
 
 [tool.setuptools.package-data]
 lib = ["*.py"]
