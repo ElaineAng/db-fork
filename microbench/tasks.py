@@ -8,9 +8,8 @@ from microbench import sampling
 
 
 class DatabaseTask:
-    def __init__(self, timed_tools: DBToolSuite, regular_tools: DBToolSuite):
-        self.timed_db_tools = timed_tools
-        self.db_tools = regular_tools
+    def __init__(self, db_tools: DBToolSuite):
+        self.db_tools = db_tools
 
         self.all_pks = {}  # Cache of all primary keys per table, lazy init.
 
@@ -49,11 +48,10 @@ class DatabaseTask:
         return loaded_tables
 
     def create_branch(self, branch_name: str):
-        self.timed_db_tools.create_db_branch(branch_name)
+        self.db_tools.create_db_branch(branch_name, timed=True)
 
     def connect_branch(self, branch_name: str):
-        self.timed_db_tools.connect_db_branch(branch_name)
-        self.db_tools.connect_db_branch(branch_name)
+        self.db_tools.connect_db_branch(branch_name, timed=True)
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -187,11 +185,11 @@ class DatabaseTask:
             if pk_tuple not in self.all_pks[table_name]:
                 # Add the new pk to set.
                 self.all_pks[table_name].add(pk_tuple)
-                self.timed_db_tools.run_sql_query(insert_sql, row_data)
+                self.db_tools.run_sql_query(insert_sql, row_data, timed=True)
                 inserted_count += 1
 
         # Commit all insertions at once.
-        self.timed_db_tools.commit_changes("Inserted new rows.")
+        self.db_tools.commit_changes("Inserted new rows.", timed=True)
         if inserted_count < num_rows:
             print(
                 f"Warning: Only generated {inserted_count} unique rows due "
@@ -267,8 +265,8 @@ class DatabaseTask:
                 f"WHERE {' AND '.join(where_clauses)};"
             )
 
-            self.timed_db_tools.run_sql_query(update_sql, update_data)
+            self.db_tools.run_sql_query(update_sql, update_data, timed=True)
 
         # Commit all updates at once.
-        self.timed_db_tools.commit_changes("Updated existing rows.")
+        self.db_tools.commit_changes("Updated existing rows.")
         print(f"Update commands executed for {len(skewed_indices)} rows.")

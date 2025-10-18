@@ -3,9 +3,9 @@ from time import time
 from typing import Callable
 
 import psycopg2
-from psycopg2.extensions import cursor as _pgcursor
+
 from tasks import DatabaseTask
-from microbench.timer import Timer
+from dblib import timer
 from microbench import sampling
 from dblib.dolt import DoltToolSuite
 
@@ -18,22 +18,6 @@ def format_db_uri(
 
 def BETA_DIST(sample_size):
     return sampling.beta_distribution(sample_size, alpha=2.0, beta=5.0)
-
-
-# TODO: Allow reporting the query which the current elapsed time was collected for.
-class TimerCursor(_pgcursor):
-    def __init__(self, *args, **kwargs):
-        self.timer = kwargs.pop("timer", None)
-        super(TimerCursor, self).__init__(*args, **kwargs)
-
-    def execute(self, query: str, vars=None):
-        start_timestamp = time()
-        try:
-            super(TimerCursor, self).execute(query, vars)
-        finally:
-            end_timestamp = time()
-            if self.timer:
-                self.timer.collect_elapsed(end_timestamp - start_timestamp)
 
 
 class BenchmarkSuite:
@@ -52,10 +36,8 @@ class BenchmarkSuite:
         self.preload_data_dir = preload_data_dir
         self.preloaded_tables = set()
 
-        self.timer = Timer()
-        self.timer_cursor = lambda *args, **kwargs: TimerCursor(
-            *args, **kwargs, timer=self.timer
-        )
+        self.timer = timer.Timer()
+
         timed_tools, regular_tools = None, None
         if backend == "dolt":
             # TODO: Consider making these parameters configurable.
@@ -63,14 +45,14 @@ class BenchmarkSuite:
                 "postgres", "password", "localhost", 5432, self._db_name
             )
 
-            # Timed connection and tools to measure timing.
-            timed_conn = psycopg2.connect(uri, cursor_factory=self.timer_cursor)
-            timed_tools = DoltToolSuite(connection=timed_conn)
-
-            # Regular connection to perform all other misc queries and get stats
-            # of the database.
-            regular_conn = psycopg2.connect(uri)
-            regular_tools = DoltToolSuite(connection=regular_conn)
+        # Timed connection and tools to measure timing.
+        conn = psycopg2.connect(uri)
+        timed_tools = DoltToolSuite(
+            connection=conn,
+            timed_cursor=lambda *args, **kwargs: timer.TimerCursor(
+                *args, **kwargs, timer=self.timer
+            ),
+        )
 
         if not timed_tools or not regular_tools:
             raise ValueError(f"Unsupported backend: {backend}")
