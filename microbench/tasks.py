@@ -24,9 +24,9 @@ class DatabaseTask:
     def delete_db(self, db_name: str) -> None:
         self.db_tools.delete_db(db_name)
 
-    def preload_db_data(self, dir_path: str) -> set[str]:
+    def preload_db_data(self, dir_path: str) -> list[str]:
         all_tables = self.db_tools.get_all_tables()
-        loaded_tables = set()
+        loaded_tables = []
         for table in all_tables:
             file_path = Path(dir_path) / f"{table}.csv"
             if not file_path.exists():
@@ -36,9 +36,10 @@ class DatabaseTask:
                 f" Bulk copying data into table '{table}' from '{file_path}'..."
             )
             self.db_tools.bulk_copy_from_file(table, str(file_path))
-            loaded_tables.add(table)
+            loaded_tables.append(table)
 
         self.db_tools.commit_changes("Preloaded data into database.")
+        return loaded_tables
 
     def create_branch(self, branch_name: str):
         self.timed_db_tools.create_db_branch(branch_name)

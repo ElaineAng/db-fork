@@ -1,10 +1,23 @@
-# TODO: Use histograms to track distribution of times.
+import numpy as np
+
+
 class Timer:
     def __init__(self):
-        self.total_elapsed = 0.0
+        self.reset()
+
+    def reset(self):
+        self.each_elapsed = []
 
     def collect_elapsed(self, duration: float):
-        self.total_elapsed += duration
+        self.each_elapsed.append(duration)
 
     def report_total_time(self):
-        return self.total_elapsed
+        return sum(self.each_elapsed)
+
+    def report_average_time(self):
+        if not self.each_elapsed:
+            return 0.0
+        return np.mean(self.each_elapsed)
+
+    def report_each_elapsed(self):
+        return np.sort(self.each_elapsed)
