@@ -1,11 +1,12 @@
 import sys
 from time import time
+from typing import Callable
 
 import psycopg2
 from psycopg2.extensions import cursor as _pgcursor
 from tasks import DatabaseTask
 from microbench.timer import Timer
-from microbench.sampling import beta_distribution
+from microbench import sampling
 from dblib.dolt import DoltToolSuite
 
 
@@ -13,6 +14,10 @@ def format_db_uri(
     user: str, password: str, host: str, port: int, db_name: str
 ) -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
+
+
+def BETA_DIST(sample_size):
+    return sampling.beta_distribution(sample_size, alpha=2.0, beta=5.0)
 
 
 # TODO: Allow reporting the query which the current elapsed time was collected for.
@@ -100,7 +105,14 @@ class BenchmarkSuite:
         if self.delete_db_after_done:
             self.db_task.delete_db(self._db_name)
 
-    def read_bench(self, table_names: list[str] = []):
+    def read_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_rate: float = 0.01,
+        dist_lambda: Callable[..., list[float]] = BETA_DIST,
+        sort_idx: int = 0,
+        max_sample_size: int = 500,
+    ) -> None:
         # Simple read bench requires pre-loaded data.
         if not self.preload_data_dir:
             return
@@ -111,25 +123,56 @@ class BenchmarkSuite:
             print(f"Table {table} has {total_rows} rows.")
             self.db_task.point_read(
                 table,
-                sampling_rate=0.05,
-                max_sampling_size=500,
-                dist_lambda=lambda sample_size: beta_distribution(
-                    sample_size, alpha=2.0, beta=5.0
-                ),
-                sort_idx=0,
+                sampling_rate=sampling_rate,
+                max_sampling_size=max_sample_size,
+                dist_lambda=dist_lambda,
+                sort_idx=sort_idx,
             )
             print(
-                f"Average read time for table {table}: {self.timer.report_average_time():.6f} seconds\n"
+                f"Average read time for table {table}: "
+                f"{self.timer.report_average_time():.6f} seconds\n"
             )
             self.timer.reset()
 
-    def insert_bench(self):
-        pass
+    def insert_bench(self, num_inserted: int = 100) -> None:
+        for table in self.db_task.get_all_tables():
+            self.db_task.insert(table, num_rows=num_inserted)
+            print(
+                f"Average insert time for table {table}: "
+                f"{self.timer.report_average_time():.6f} seconds\n"
+            )
+            self.timer.reset()
 
-    def update_bench(self):
-        pass
+    def update_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_rate: float = 0.01,
+        dist_lambda: Callable[..., list[float]] = BETA_DIST,
+        sort_idx: int = 0,
+        max_sample_size: int = 500,
+    ) -> None:
+        # Simple update bench requires pre-loaded data.
+        if not self.preload_data_dir:
+            return
 
-    def branch_bench(self):
+        benchmark_tables = table_names if table_names else self.preloaded_tables
+        for table in benchmark_tables:
+            total_rows = self.db_task.get_table_row_count(table)
+            print(f"Table {table} has {total_rows} rows.")
+            self.db_task.update(
+                table,
+                sampling_rate=sampling_rate,
+                max_sampling_size=max_sample_size,
+                dist_lambda=dist_lambda,
+                sort_idx=sort_idx,
+            )
+            print(
+                f"Average read time for table {table}: "
+                f"{self.timer.report_average_time():.6f} seconds\n"
+            )
+            self.timer.reset()
+
+    def branch_bench(self, tree_depth: int = 10, degree: int = 5) -> None:
         pass
 
     def branch_insert_read_bench(self):
@@ -148,10 +191,13 @@ if __name__ == "__main__":
         print("Supported backend list: ", supported_backends)
         sys.exit(1)
 
-    benchmark_suite = BenchmarkSuite(
+    single_task_bench = BenchmarkSuite(
         backend=backend,
         db_name="microbench",
         db_schema_path="db_setup/tpcc_schema.sql",
     )
 
-    benchmark_suite.read_bench()
+    single_task_bench.read_bench()
+    single_task_bench.insert_bench()
+    single_task_bench.update_bench()
+    single_task_bench.branch_bench()

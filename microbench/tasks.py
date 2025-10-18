@@ -16,6 +16,8 @@ class DatabaseTask:
 
         self.all_datagen = {}  # Cache of data generators per table, lazy init.
 
+        self.all_tables = []  # Cache of all tables, lazy init.
+
     def setup_db(self, db_name: str, db_schema: str) -> None:
         self.db_tools.create_db(db_name)
         self.db_tools.initialize_schema(db_schema)
@@ -24,8 +26,13 @@ class DatabaseTask:
     def delete_db(self, db_name: str) -> None:
         self.db_tools.delete_db(db_name)
 
+    def get_all_tables(self) -> list[str]:
+        if not self.all_tables:
+            self.all_tables = self.db_tools.get_all_tables()
+        return self.all_tables
+
     def preload_db_data(self, dir_path: str) -> list[str]:
-        all_tables = self.db_tools.get_all_tables()
+        all_tables = self.get_all_tables()
         loaded_tables = []
         for table in all_tables:
             file_path = Path(dir_path) / f"{table}.csv"
@@ -105,7 +112,7 @@ class DatabaseTask:
         table_name: str,
         sampling_rate: float,
         max_sampling_size: int,
-        dist_lambda: Callable[..., Any],  # The distribution to call,
+        dist_lambda: Callable[..., list[float]],  # The distribution to call,
         sort_idx: int,
     ) -> None:
         """
@@ -183,6 +190,8 @@ class DatabaseTask:
                 self.timed_db_tools.run_sql_query(insert_sql, row_data)
                 inserted_count += 1
 
+        # Commit all insertions at once.
+        self.timed_db_tools.commit_changes("Inserted new rows.")
         if inserted_count < num_rows:
             print(
                 f"Warning: Only generated {inserted_count} unique rows due "
@@ -260,4 +269,6 @@ class DatabaseTask:
 
             self.timed_db_tools.run_sql_query(update_sql, update_data)
 
-            print(f" Update commands executed for {len(skewed_indices)} rows.")
+        # Commit all updates at once.
+        self.timed_db_tools.commit_changes("Updated existing rows.")
+        print(f"Update commands executed for {len(skewed_indices)} rows.")

@@ -16,6 +16,7 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
         super().run_sql_query(cmd)
+        super().commit_changes()
 
     def connect_db_branch(self, branch_name: str) -> None:
         """
@@ -24,13 +25,15 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"call dolt_checkout('{branch_name}');"
         super().run_sql_query(cmd)
+        super().commit_changes()
 
     def list_db_branches(self) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"
         return [branch[0] for branch in super().run_sql_query(cmd)]
 
-    def commit_changes(self, message=""):
+    def commit_changes(self, message: str = "") -> None:
         cmd = "call dolt_add('.');"
         super().run_sql_query(cmd)
         cmd = f"call dolt_commit('-m', '{message}');"
         super().run_sql_query(cmd)
+        super().commit_changes()

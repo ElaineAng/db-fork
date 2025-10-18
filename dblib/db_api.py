@@ -32,12 +32,11 @@ class DBToolSuite(ABC):
         """
         pass
 
-    @abstractmethod
     def commit_changes(self, message: str = "") -> None:
         """
-        Commits changes to the current branch with an optional message.
+        Commits any pending changes to the database with an optional message.
         """
-        pass
+        self.conn.commit()
 
     def create_db(self, db_name: str):
         """
