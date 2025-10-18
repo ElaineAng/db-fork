@@ -1,24 +1,26 @@
 from abc import ABC, abstractmethod
-from psycopg2.extensions import connection as pgconn
+from psycopg2.extensions import connection as _pgconn
+from psycopg2.extensions import cursor as _pgcursor
 
 
 class DBToolSuite(ABC):
     """
-    An API for interacting with Postgres via a shared connection.
+    An API for interacting with Postgres via a single connection.
     """
 
-    def __init__(self, connection: pgconn):
+    def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
         self.conn = connection
+        self.timed_cursor = timed_cursor
 
     @abstractmethod
-    def create_db_branch(self, branch_name: str) -> str:
+    def create_db_branch(self, branch_name: str, timed: bool = False) -> str:
         """
         Creates a new branch in the underlying database.
         """
         pass
 
     @abstractmethod
-    def connect_db_branch(self, branch_name: str) -> str:
+    def connect_db_branch(self, branch_name: str, timed: bool = False) -> str:
         """
         Connects to an existing branch in the underlying database to allow
         reading and writing data to that branch.
@@ -26,26 +28,27 @@ class DBToolSuite(ABC):
         pass
 
     @abstractmethod
-    def list_db_branches(self) -> set[str]:
+    def list_db_branches(self, timed: bool = False) -> set[str]:
         """
         Lists all branches in the underlying database.
         """
         pass
 
+    @abstractmethod
     def commit_changes(self, message: str = "") -> None:
         """
         Commits any pending changes to the database with an optional message.
         """
         self.conn.commit()
 
-    def create_db(self, db_name: str):
+    def create_db(self, db_name: str) -> None:
         """
         Creates a new database in the underlying Postgres server.
         """
         query = f"CREATE DATABASE {db_name};"
         self.run_sql_query(query)
 
-    def delete_db(self, db_name: str):
+    def delete_db(self, db_name: str) -> None:
         """
         Deletes a database from the underlying Postgres server.
         """
@@ -155,13 +158,17 @@ class DBToolSuite(ABC):
         columns = self.run_sql_query(query, (table_name,))
         return [col[0] for col in columns]
 
-    def run_sql_query(self, query: str, vars=None) -> list[tuple]:
+    def run_sql_query(
+        self, query: str, vars=None, timed: bool = False
+    ) -> list[tuple]:
         """
         Runs an SQL query in the postgres database on the current branch. The
         query could be anything supported by the underlying database.
         """
         try:
-            with self.conn.cursor() as cur:
+            with self.conn.cursor(
+                cursor_factory=self.timed_cursor if timed else None
+            ) as cur:
                 cur.execute(query, vars)
                 return cur.fetchall()
         except Exception as e:
