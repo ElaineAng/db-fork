@@ -10,37 +10,27 @@ class DoltToolSuite(DBToolSuite):
     def __init__(self, connection: pgconn):
         super().__init__(connection)
 
-    def create_db_branch(self, branch_name: str) -> str:
+    def create_db_branch(self, branch_name: str) -> None:
         """
-        Creates a new branch in the Dolt database and allow reading and writing
-        data to that branch.
+        Creates a new branch in the Dolt database.
         """
-        cur = self.conn.cursor()
-        try:
-            cur.execute(f"call dolt_checkout('-b', '{branch_name}');")
-            return f"Branch '{branch_name}' created successfully."
-        except Exception as e:
-            return f"Failed to create branch: {str(e)}"
-        finally:
-            cur.close()
+        cmd = f"call dolt_checkout('-b', '{branch_name}');"
+        super().run_sql_query(cmd)
 
-    def connect_db_branch(self, branch_name: str) -> str:
-        cur = self.conn.cursor()
-        try:
-            cur.execute(f"call dolt_checkout('{branch_name}');")
-            return f"Switched to branch '{branch_name}' successfully."
-        except Exception as e:
-            return f"Failed to switch branch: {str(e)}"
-        finally:
-            cur.close()
+    def connect_db_branch(self, branch_name: str) -> None:
+        """
+        Connects to an existing branch in the Dolt database to allow reads and
+        writes on that branch.
+        """
+        cmd = f"call dolt_checkout('{branch_name}');"
+        super().run_sql_query(cmd)
 
     def list_db_branches(self) -> list[str]:
-        cur = self.conn.cursor()
-        try:
-            cur.execute("SELECT name FROM dolt_branches;")
-            branches = cur.fetchall()
-            return {branch[0] for branch in branches}
-        except Exception as e:
-            return {f"Failed to list branches: {str(e)}"}
-        finally:
-            cur.close()
+        cmd = "SELECT name FROM dolt_branches;"
+        return [branch[0] for branch in super().run_sql_query(cmd)]
+
+    def commit_changes(self, message=""):
+        cmd = "call dolt_add('.');"
+        super().run_sql_query(cmd)
+        cmd = f"call dolt_commit('-m', '{message}');"
+        super().run_sql_query(cmd)

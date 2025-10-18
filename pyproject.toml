@@ -10,13 +10,16 @@ authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
 requires-python = ">=3.8"
 dependencies = [
     "coolname",
+    "faker",
     "microbench",
     "neon-api",
+    "numpy",
     "psycopg2-binary",
     "python-dotenv",
     "langchain",
     "langgraph",
     "langchain-google-genai",
+    "langchain-openai",
 ]
 
 [tool.setuptools]
