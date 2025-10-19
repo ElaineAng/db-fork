@@ -71,8 +71,8 @@ class DynamicDataGenerator:
             f"✅ Schema parsed for table '{self.table_name}' with {len(self.columns)} columns."
         )
 
-        for col_name, col_def in self.columns.items():
-            print(f" - Column: {col_name}, Definition: {col_def}")
+        # for col_name, col_def in self.columns.items():
+        #     print(f" - Column: {col_name}, Definition: {col_def}")
 
     def generate_value(self, column_name: str) -> Any:
         """Generates a single fake value based on column type and name."""
@@ -82,7 +82,7 @@ class DynamicDataGenerator:
 
         # Heuristics for realistic data
         if "city" in name:
-            return self.fake.city()
+            return self.fake.city()[: length or 20]
         if "state" in name:
             return self.fake.state_abbr()
         if "zip" in name or "postal" in name:
@@ -90,12 +90,11 @@ class DynamicDataGenerator:
         if "phone" in name:
             return self.fake.phone_number()[: length or 16]
         if "first" in name:
-            return self.fake.first_name()
+            return self.fake.first_name()[: length or 40]
         if "last" in name:
-            return self.fake.last_name()
+            return self.fake.last_name()[: length or 40]
         if "email" in name:
-            return self.fake.email()
-
+            return self.fake.email()[: length or 40]
         # Type-based generation
         if col_type in ["varchar", "char", "text", "bpchar"]:
             if length <= 2:

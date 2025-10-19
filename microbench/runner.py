@@ -273,6 +273,24 @@ if __name__ == "__main__":
         help="Keep the database after benchmarks are done.",
     )
 
+    parser.add_argument(
+        "--branch_only",
+        action="store_true",
+        help="Only run the branch benchmark.",
+    )
+
+    parser.add_argument(
+        "--read_only",
+        action="store_true",
+        help="Only run the read benchmark after preloading data.",
+    )
+
+    parser.add_argument(
+        "--insert_only",
+        action="store_true",
+        help="Only run the insert benchmark.",
+    )
+
     args = parser.parse_args()
 
     with BenchmarkSuite(
@@ -283,4 +301,7 @@ if __name__ == "__main__":
         single_task_bench.setup_benchmark_database(
             db_schema_path=args.db_schema_path
         )
-        single_task_bench.branch_bench(200, 1)
+        if args.branch_only:
+            single_task_bench.branch_bench(200, 1)
+        elif args.insert_only:
+            single_task_bench.insert_bench(num_inserted=1000)
