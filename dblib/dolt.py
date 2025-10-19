@@ -1,4 +1,5 @@
-from psycopg2.extensions import connection as pgconn
+from psycopg2.extensions import connection as _pgconn
+from psycopg2.extensions import cursor as _pgcursor
 from dblib.db_api import DBToolSuite
 
 
@@ -7,8 +8,8 @@ class DoltToolSuite(DBToolSuite):
     A suite of tools for interacting with a Dolt database on a shared connection.
     """
 
-    def __init__(self, connection: pgconn):
-        super().__init__(connection)
+    def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
+        super().__init__(connection, timed_cursor=timed_cursor)
 
     def create_db_branch(self, branch_name: str, timed: bool = False) -> None:
         """

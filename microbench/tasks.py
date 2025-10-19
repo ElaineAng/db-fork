@@ -18,7 +18,6 @@ class DatabaseTask:
         self.all_tables = []  # Cache of all tables, lazy init.
 
     def setup_db(self, db_name: str, db_schema: str) -> None:
-        self.db_tools.create_db(db_name)
         self.db_tools.initialize_schema(db_schema)
         self.db_tools.commit_changes("Initialized database schema.")
 

@@ -9,6 +9,7 @@ description = "Agent that creates and manages branches in a database"
 authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
 requires-python = ">=3.8"
 dependencies = [
+    "anytree",
     "coolname",
     "faker",
     "microbench",

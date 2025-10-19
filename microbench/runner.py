@@ -1,13 +1,15 @@
-import sys
-from time import time
+import argparse
+import random
 from typing import Callable
 
 import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from anytree import Node
 
-from tasks import DatabaseTask
 from dblib import timer
-from microbench import sampling
 from dblib.dolt import DoltToolSuite
+from microbench import sampling
+from tasks import DatabaseTask
 
 
 def format_db_uri(
@@ -18,6 +20,22 @@ def format_db_uri(
 
 def BETA_DIST(sample_size):
     return sampling.beta_distribution(sample_size, alpha=2.0, beta=5.0)
+
+
+def build_branch_tree(root_branch: str, tree_depth: int, degree: int) -> Node:
+    root_node = Node(root_branch)
+
+    current_level_nodes = [root_node]
+    for d in range(tree_depth):
+        next_level_nodes = []
+        for parent_node in current_level_nodes:
+            for i in range(degree):
+                branch_name = f"branch_d{d + 1}_n{i + 1}"
+                child_node = Node(branch_name, parent=parent_node)
+                next_level_nodes.append(child_node)
+        current_level_nodes = next_level_nodes
+
+    return root_node
 
 
 class BenchmarkSuite:
@@ -39,6 +57,8 @@ class BenchmarkSuite:
         self.timer = timer.Timer()
 
         timed_tools, regular_tools = None, None
+        self.setup_benchmark_database()
+
         if backend == "dolt":
             # TODO: Consider making these parameters configurable.
             uri = format_db_uri(
@@ -46,20 +66,16 @@ class BenchmarkSuite:
             )
 
         # Timed connection and tools to measure timing.
-        conn = psycopg2.connect(uri)
+        self.conn = psycopg2.connect(uri)
         timed_tools = DoltToolSuite(
-            connection=conn,
+            connection=self.conn,
             timed_cursor=lambda *args, **kwargs: timer.TimerCursor(
                 *args, **kwargs, timer=self.timer
             ),
         )
 
-        if not timed_tools or not regular_tools:
-            raise ValueError(f"Unsupported backend: {backend}")
-
         self.db_task = DatabaseTask(
-            timed_tools=timed_tools,
-            regular_tools=regular_tools,
+            db_tools=timed_tools,
         )
 
         # Setup the database and initialize the schema.
@@ -86,6 +102,31 @@ class BenchmarkSuite:
     def __del__(self):
         if self.delete_db_after_done:
             self.db_task.delete_db(self._db_name)
+        self.conn.close()
+
+    def setup_benchmark_database(self):
+        try:
+            # Create a new database over a separate connection.
+            uri = format_db_uri(
+                "postgres", "password", "localhost", 5432, "postgres"
+            )
+            conn = psycopg2.connect(uri)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+
+            cur = conn.cursor()
+            create_db_command = f"CREATE DATABASE {self._db_name};"
+            try:
+                cur.execute(create_db_command)
+                print("Database created successfully.")
+            except psycopg2.errors.DuplicateDatabase:
+                print(f"Database '{self._db_name}' already exists.")
+        except Exception as e:
+            print(f"Error creating database: {e}")
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
     def read_bench(
         self,
@@ -98,6 +139,8 @@ class BenchmarkSuite:
         # Simple read bench requires pre-loaded data.
         if not self.preload_data_dir:
             return
+
+        print("Running read benchmark...")
 
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
@@ -117,6 +160,7 @@ class BenchmarkSuite:
             self.timer.reset()
 
     def insert_bench(self, num_inserted: int = 100) -> None:
+        print("Running insert benchmark...")
         for table in self.db_task.get_all_tables():
             self.db_task.insert(table, num_rows=num_inserted)
             print(
@@ -137,6 +181,8 @@ class BenchmarkSuite:
         if not self.preload_data_dir:
             return
 
+        print("Running update benchmark...")
+
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
             total_rows = self.db_task.get_table_row_count(table)
@@ -155,7 +201,26 @@ class BenchmarkSuite:
             self.timer.reset()
 
     def branch_bench(self, tree_depth: int = 10, degree: int = 5) -> None:
-        pass
+        root = build_branch_tree(
+            root_branch="main", tree_depth=tree_depth, degree=degree
+        )
+
+        print("Running branch benchmark...")
+        # pick a random table to do minimal inserts
+        all_tables = self.db_task.get_all_tables()
+        insert_table = random.choice(all_tables)
+
+        current_level_nodes = [root]
+        for node in current_level_nodes:
+            self.db_task.connect_branch(node.name, timed=False)
+            self.db_task.insert(insert_table, num_rows=2, timed=False)
+            for child in node.children:
+                self.db_task.create_branch(child.name, timed=True)
+            current_level_nodes.extend(node.children)
+        print(
+            f"Average branch creation time: {self.timer.report_average_time():.6f} seconds\n"
+        )
+        self.timer.reset()
 
     def branch_insert_read_bench(self):
         pass
@@ -165,21 +230,36 @@ class BenchmarkSuite:
 
 
 if __name__ == "__main__":
-    # Args:
-    #   backend: The database backend to use. Supported backends: dolt
-    backend = sys.argv[1]
-    supported_backends = ["dolt"]
-    if backend not in supported_backends:
-        print("Supported backend list: ", supported_backends)
-        sys.exit(1)
-
-    single_task_bench = BenchmarkSuite(
-        backend=backend,
-        db_name="microbench",
-        db_schema_path="db_setup/tpcc_schema.sql",
+    parser = argparse.ArgumentParser(description="Run database benchmarks.")
+    parser.add_argument(
+        "--backend",
+        default="dolt",
+        choices=["dolt"],
+        help="The database backend to use.",
     )
 
-    single_task_bench.read_bench()
-    single_task_bench.insert_bench()
-    single_task_bench.update_bench()
+    parser.add_argument(
+        "--db_schema_path",
+        default="db_setup/tpcc_schema.sql",
+        help="Path to the database schema SQL file.",
+    )
+
+    parser.add_argument(
+        "--preload_data_dir",
+        default="/tmp/db-fork/",
+        help="Path to the directory with data files to preload.",
+    )
+
+    args = parser.parse_args()
+
+    single_task_bench = BenchmarkSuite(
+        backend=args.backend,
+        db_name="microbench",
+        db_schema_path=args.db_schema_path,
+        preload_data_dir=args.preload_data_dir,
+    )
+
+    # single_task_bench.read_bench()
+    # single_task_bench.insert_bench()
+    # single_task_bench.update_bench()
     single_task_bench.branch_bench()
