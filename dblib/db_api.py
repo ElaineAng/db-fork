@@ -35,7 +35,7 @@ class DBToolSuite(ABC):
         pass
 
     @abstractmethod
-    def commit_changes(self, message: str = "") -> None:
+    def commit_changes(self, message: str = "", timed: bool = False) -> None:
         """
         Commits any pending changes to the database with an optional message.
         """

@@ -47,11 +47,11 @@ class DatabaseTask:
         self.db_tools.commit_changes("Preloaded data into database.")
         return loaded_tables
 
-    def create_branch(self, branch_name: str):
-        self.db_tools.create_db_branch(branch_name, timed=True)
+    def create_branch(self, branch_name: str, timed: bool = True):
+        self.db_tools.create_db_branch(branch_name, timed=timed)
 
-    def connect_branch(self, branch_name: str):
-        self.db_tools.connect_db_branch(branch_name, timed=True)
+    def connect_branch(self, branch_name: str, timed: bool = True):
+        self.db_tools.connect_db_branch(branch_name, timed=timed)
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -152,11 +152,13 @@ class DatabaseTask:
 
         for idx in skewed_indices:
             pk_to_read = pk_list[idx]
-            self.db_tools.run_sql_query(select_sql, pk_to_read)
+            self.db_tools.run_sql_query(select_sql, pk_to_read, timed=True)
 
         print(f" Read operations completed, {len(skewed_indices)} rows read.")
 
-    def insert(self, table_name: str, num_rows: int) -> None:
+    def insert(
+        self, table_name: str, num_rows: int, timed: bool = True
+    ) -> None:
         """
         Inserts unique rows into the database using a provided connection.
         """
@@ -185,11 +187,11 @@ class DatabaseTask:
             if pk_tuple not in self.all_pks[table_name]:
                 # Add the new pk to set.
                 self.all_pks[table_name].add(pk_tuple)
-                self.db_tools.run_sql_query(insert_sql, row_data, timed=True)
+                self.db_tools.run_sql_query(insert_sql, row_data, timed=timed)
                 inserted_count += 1
 
         # Commit all insertions at once.
-        self.db_tools.commit_changes("Inserted new rows.", timed=True)
+        self.db_tools.commit_changes("Inserted new rows.", timed=timed)
         if inserted_count < num_rows:
             print(
                 f"Warning: Only generated {inserted_count} unique rows due "
@@ -204,6 +206,7 @@ class DatabaseTask:
         max_updates: int,
         sort_idx: int,
         dist_lambda: Callable[..., Any],
+        timed: bool = True,
     ) -> None:
         """
         Updates a specified number of random rows in the table.
@@ -265,8 +268,8 @@ class DatabaseTask:
                 f"WHERE {' AND '.join(where_clauses)};"
             )
 
-            self.db_tools.run_sql_query(update_sql, update_data, timed=True)
+            self.db_tools.run_sql_query(update_sql, update_data, timed=timed)
 
         # Commit all updates at once.
-        self.db_tools.commit_changes("Updated existing rows.")
+        self.db_tools.commit_changes("Updated existing rows.", timed=timed)
         print(f"Update commands executed for {len(skewed_indices)} rows.")
