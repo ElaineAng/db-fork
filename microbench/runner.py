@@ -4,12 +4,18 @@ from typing import Callable
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from anytree import Node
+from anytree import Node, RenderTree
 
 from dblib import timer
 from dblib.dolt import DoltToolSuite
 from microbench import sampling
 from tasks import DatabaseTask
+
+
+PG_USER = "postgres"
+PG_PASSWORD = "password"
+PG_HOST = "localhost"
+PG_PORT = 5432
 
 
 def format_db_uri(
@@ -28,9 +34,9 @@ def build_branch_tree(root_branch: str, tree_depth: int, degree: int) -> Node:
     current_level_nodes = [root_node]
     for d in range(tree_depth):
         next_level_nodes = []
-        for parent_node in current_level_nodes:
+        for idx, parent_node in enumerate(current_level_nodes):
             for i in range(degree):
-                branch_name = f"branch_d{d + 1}_n{i + 1}"
+                branch_name = f"branch_d{d + 1}_n{idx * degree + i + 1}"
                 child_node = Node(branch_name, parent=parent_node)
                 next_level_nodes.append(child_node)
         current_level_nodes = next_level_nodes
@@ -43,26 +49,24 @@ class BenchmarkSuite:
         self,
         backend: str,
         db_name: str = "microbench",
-        db_schema_str: str = "",
-        db_schema_path: str = "",
         delete_db_after_done: bool = True,
-        preload_data_dir: str = "",
     ):
         self.backend = backend
         self._db_name = db_name
         self.delete_db_after_done = delete_db_after_done
-        self.preload_data_dir = preload_data_dir
+
+        self.preload_data_dir = ""
         self.preloaded_tables = set()
 
         self.timer = timer.Timer()
 
-        timed_tools, regular_tools = None, None
-        self.setup_benchmark_database()
+        self.create_benchmark_database()
 
-        if backend == "dolt":
+    def __enter__(self):
+        if self.backend == "dolt":
             # TODO: Consider making these parameters configurable.
             uri = format_db_uri(
-                "postgres", "password", "localhost", 5432, self._db_name
+                PG_USER, PG_PASSWORD, PG_HOST, PG_PORT, self._db_name
             )
 
         # Timed connection and tools to measure timing.
@@ -77,38 +81,24 @@ class BenchmarkSuite:
         self.db_task = DatabaseTask(
             db_tools=timed_tools,
         )
+        return self
 
-        # Setup the database and initialize the schema.
-        if not db_schema_str and not db_schema_path:
-            raise ValueError(
-                "Database schema must be provided via string or path."
-            )
-
-        if db_schema_str:
-            print("Setting up database schema from string...")
-            self.db_task.setup_db(self._db_name, db_schema_str)
-        elif db_schema_path:
-            print("Setting up database schema from file...")
-            with open(db_schema_path, "r") as f:
-                db_schema_str = f.read()
-            self.db_task.setup_db(self._db_name, db_schema_str)
-
-        if self.preload_data_dir:
-            print("Preloading data for benchmarks...")
-            self.preloaded_tablesself.db_task.preload_db_data(
-                self.preload_data_dir
-            )
-
-    def __del__(self):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         if self.delete_db_after_done:
-            self.db_task.delete_db(self._db_name)
+            try:
+                self.db_task.delete_db(self._db_name)
+            except Exception as e:
+                if "database not found" in str(e):  # Database does not exist
+                    print("DB deleted successfully.")
+                else:
+                    print(f"Error deleting database: {e}")
         self.conn.close()
 
-    def setup_benchmark_database(self):
+    def create_benchmark_database(self):
         try:
             # Create a new database over a separate connection.
             uri = format_db_uri(
-                "postgres", "password", "localhost", 5432, "postgres"
+                PG_USER, PG_PASSWORD, PG_HOST, PG_PORT, "postgres"
             )
             conn = psycopg2.connect(uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -128,6 +118,32 @@ class BenchmarkSuite:
             if conn:
                 conn.close()
 
+    def setup_benchmark_database(
+        self,
+        db_schema_str: str = "",
+        db_schema_path: str = "",
+        preload_data_dir: str = "",
+    ) -> None:
+        # Setup the database and initialize the schema.
+        if not db_schema_str and not db_schema_path:
+            raise ValueError(
+                "Database schema must be provided via string or path."
+            )
+
+        if db_schema_str:
+            print("Setting up database schema from string...")
+            self.db_task.setup_db(self._db_name, db_schema_str)
+        elif db_schema_path:
+            print("Setting up database schema from file...")
+            with open(db_schema_path, "r") as f:
+                db_schema_str = f.read()
+            self.db_task.setup_db(self._db_name, db_schema_str)
+
+        if preload_data_dir:
+            print("Preloading data for benchmarks...")
+            self.preload_data_dir = preload_data_dir
+            self.db_task.preload_db_data(self.preload_data_dir)
+
     def read_bench(
         self,
         table_names: list[str] = [],
@@ -140,7 +156,7 @@ class BenchmarkSuite:
         if not self.preload_data_dir:
             return
 
-        print("Running read benchmark...")
+        print("\n ====== Running read benchmark...\n", flush=True)
 
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
@@ -160,7 +176,7 @@ class BenchmarkSuite:
             self.timer.reset()
 
     def insert_bench(self, num_inserted: int = 100) -> None:
-        print("Running insert benchmark...")
+        print("\n ====== Running insert benchmark...\n", flush=True)
         for table in self.db_task.get_all_tables():
             self.db_task.insert(table, num_rows=num_inserted)
             print(
@@ -181,7 +197,7 @@ class BenchmarkSuite:
         if not self.preload_data_dir:
             return
 
-        print("Running update benchmark...")
+        print("\n ====== Running update benchmark...\n", flush=True)
 
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
@@ -204,8 +220,9 @@ class BenchmarkSuite:
         root = build_branch_tree(
             root_branch="main", tree_depth=tree_depth, degree=degree
         )
+        print("\n ====== Running branch benchmark...\n", flush=True)
+        # print(RenderTree(root))
 
-        print("Running branch benchmark...")
         # pick a random table to do minimal inserts
         all_tables = self.db_task.get_all_tables()
         insert_table = random.choice(all_tables)
@@ -213,7 +230,7 @@ class BenchmarkSuite:
         current_level_nodes = [root]
         for node in current_level_nodes:
             self.db_task.connect_branch(node.name, timed=False)
-            self.db_task.insert(insert_table, num_rows=2, timed=False)
+            self.db_task.insert(insert_table, num_rows=1, timed=False)
             for child in node.children:
                 self.db_task.create_branch(child.name, timed=True)
             current_level_nodes.extend(node.children)
@@ -250,16 +267,20 @@ if __name__ == "__main__":
         help="Path to the directory with data files to preload.",
     )
 
-    args = parser.parse_args()
-
-    single_task_bench = BenchmarkSuite(
-        backend=args.backend,
-        db_name="microbench",
-        db_schema_path=args.db_schema_path,
-        preload_data_dir=args.preload_data_dir,
+    parser.add_argument(
+        "--no_cleanup",
+        action="store_true",
+        help="Keep the database after benchmarks are done.",
     )
 
-    # single_task_bench.read_bench()
-    # single_task_bench.insert_bench()
-    # single_task_bench.update_bench()
-    single_task_bench.branch_bench()
+    args = parser.parse_args()
+
+    with BenchmarkSuite(
+        backend=args.backend,
+        db_name="microbench",
+        delete_db_after_done=not args.no_cleanup,
+    ) as single_task_bench:
+        single_task_bench.setup_benchmark_database(
+            db_schema_path=args.db_schema_path
+        )
+        single_task_bench.branch_bench(200, 1)

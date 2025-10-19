@@ -48,9 +48,11 @@ class DatabaseTask:
 
     def create_branch(self, branch_name: str, timed: bool = True):
         self.db_tools.create_db_branch(branch_name, timed=timed)
+        print(f"   -> Created branch '{branch_name}'.")
 
     def connect_branch(self, branch_name: str, timed: bool = True):
         self.db_tools.connect_db_branch(branch_name, timed=timed)
+        print(f"   -> Connected to branch '{branch_name}'.")
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -166,12 +168,15 @@ class DatabaseTask:
         insert_sql = f"INSERT INTO {table_name} ({', '.join(col_names)}) VALUES ({placeholders});"
 
         pk_columns = self.get_pk_columns_name(table_name)
+        # print(
+        #     f" Inserting into table '{table_name}' with PK columns {pk_columns}."
+        # )
         self.load_pk_values_for_table(table_name, pk_columns)
         self.load_datagen_for_table(table_name)
 
-        print(
-            f"Generating and inserting {num_rows} unique rows into '{table_name}'..."
-        )
+        # print(
+        #     f"Generating and inserting {num_rows} unique rows into '{table_name}'..."
+        # )
 
         inserted_count = 0
         # Safety break to prevent infinite loops on high PK collision rates.
@@ -196,7 +201,7 @@ class DatabaseTask:
                 f"Warning: Only generated {inserted_count} unique rows due "
                 f"to PK collisions."
             )
-        print(f"Insertion commands executed for {inserted_count} rows.")
+        print(f"   -> Insertion commands executed for {inserted_count} rows.")
 
     def update(
         self,

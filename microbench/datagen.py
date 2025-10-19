@@ -1,6 +1,6 @@
 import random
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 from faker import Faker
 
 ColumnDef = Dict[str, Any]
@@ -16,11 +16,11 @@ class DynamicDataGenerator:
         self.fake: Faker = Faker()
         self.table_name: str = ""
         self.columns: Dict[str, ColumnDef] = {}
-        self.primary_keys: List[str] = []
         self._parse_ddl()
 
     def _parse_ddl(self) -> None:
         """Parses DDL to extract table name, columns, and primary keys."""
+        print(f"Parsing DDL schema...\n{self.ddl}\n")
         # Extract table name
         table_match = re.search(
             r"CREATE TABLE\s+([\w\.]+)\s*\(", self.ddl, re.IGNORECASE
@@ -34,15 +34,6 @@ class DynamicDataGenerator:
         if not content_match:
             raise ValueError("Could not parse column definitions from DDL.")
         content = content_match.group(1).strip()
-
-        # Extract primary keys
-        pk_match = re.search(
-            r"PRIMARY KEY\s*\((.*?)\)", content, re.IGNORECASE | re.DOTALL
-        )
-        if pk_match:
-            self.primary_keys = [
-                pk.strip() for pk in pk_match.group(1).split(",")
-            ]
 
         # Extract individual column definitions
         for line in content.split(",\n"):
@@ -69,24 +60,24 @@ class DynamicDataGenerator:
                     else:
                         length = int(params_match.group(1))
 
-                self.columns.append(
-                    {
-                        "name": name,
-                        "type": type_base,
-                        "length": length,
-                        "precision": precision,
-                    }
-                )
+                self.columns[name] = {
+                    "name": name,
+                    "type": type_base,
+                    "length": length,
+                    "precision": precision,
+                }
 
         print(
             f"✅ Schema parsed for table '{self.table_name}' with {len(self.columns)} columns."
         )
-        print(f"   Primary Key(s): {self.primary_keys}")
+
+        for col_name, col_def in self.columns.items():
+            print(f" - Column: {col_name}, Definition: {col_def}")
 
     def generate_value(self, column_name: str) -> Any:
         """Generates a single fake value based on column type and name."""
         column = self.columns[column_name]
-        name, col_type = column["name"].lower(), column["type"]
+        name, col_type = column["name"].lower(), column["type"].split()[0]
         length, precision = column["length"], column["precision"]
 
         # Heuristics for realistic data
@@ -106,10 +97,14 @@ class DynamicDataGenerator:
             return self.fake.email()
 
         # Type-based generation
-        if col_type in ["varchar", "char", "text"]:
+        if col_type in ["varchar", "char", "text", "bpchar"]:
+            if length <= 2:
+                return self.fake.lexify(text="x" * (length or 1)).upper()
             return self.fake.text(max_nb_chars=length or 30)
-        if col_type in ["int", "integer", "smallint", "bigint"]:
-            return random.randint(1, 1_000_000)
+        if col_type in ["smallint", "int2"]:
+            return random.randint(-32768, 32767)
+        if col_type in ["int", "integer", "bigint", "int4", "int8"]:
+            return random.randint(1, 1000000)
         if col_type in ["decimal", "numeric"]:
             if precision:
                 max_val = (10 ** (precision[0] - precision[1])) - 1
@@ -123,4 +118,4 @@ class DynamicDataGenerator:
 
     def generate_row(self) -> Dict[str, Any]:
         """Generates a dictionary representing one row."""
-        return {col["name"]: self._generate_value(col) for col in self.columns}
+        return {col: self.generate_value(col) for col in self.columns.keys()}

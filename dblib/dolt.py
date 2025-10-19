@@ -33,8 +33,12 @@ class DoltToolSuite(DBToolSuite):
         return [branch[0] for branch in super().run_sql_query(cmd, timed=timed)]
 
     def commit_changes(self, message: str = "", timed: bool = False) -> None:
-        cmd = "call dolt_add('.');"
-        super().run_sql_query(cmd, timed=timed)
-        cmd = f"call dolt_commit('-m', '{message}');"
-        super().run_sql_query(cmd, timed=timed)
-        super().commit_changes()
+        try:
+            cmd = "call dolt_add('.');"
+            super().run_sql_query(cmd, timed=timed)
+            cmd = f"call dolt_commit('-m', '{message}');"
+            super().run_sql_query(cmd, timed=timed)
+            super().commit_changes()
+        except Exception as e:
+            # Ignore commit errors (e.g., no changes to commit).
+            print(f"Commit failed: {e}")

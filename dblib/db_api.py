@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from psycopg2.extensions import cursor as _pgcursor
 
@@ -78,36 +79,67 @@ class DBToolSuite(ABC):
         """
         Initializes the database schema using the provided DDL statements.
         """
-        print(f"Initializing database schema...\n\n{schema_ddl}")
-        self.run_sql_query(schema_ddl)
+        print("Initializing database schema...")
+        sql_statements = [
+            stmt.strip() for stmt in schema_ddl.split(";") if stmt.strip()
+        ]
+        for stmt in sql_statements:
+            print(f"Executing DDL statement:\n{stmt}\n")
+            self.run_sql_query(stmt)
 
     def get_table_schema(self, table_name: str) -> str:
         """
-        Returns the schema of a specific table in a simplified CREATE TABLE
-        format. This is used to understand the structure of a table before
-        trying to insert data.
+        Returns the schema of a specific table in a CREATE TABLE format.
         """
-        # Query to get column name, data type, and if it's nullable
+        # Query for column details, including length and precision/scale
         query = """
-        SELECT column_name, data_type, is_nullable
-        FROM information_schema.columns
-        WHERE table_name = %s;
+        SELECT
+            column_name,
+            udt_name,
+            is_nullable,
+            character_maximum_length,
+            numeric_precision,
+            numeric_scale
+        FROM
+            information_schema.columns
+        WHERE
+            table_name = %s
+        ORDER BY
+            ordinal_position;
         """
         columns = self.run_sql_query(query, (table_name,))
 
         if not columns:
             return f"Error: Table '{table_name}' not found."
 
-        # Format the schema into a readable string for the LLM
-        schema_parts = [f"CREATE TABLE {table_name} ("]
-        for col_name, data_type, is_nullable in columns:
-            part = f"  {col_name} {data_type}"
-            if is_nullable == "NO":
-                part += " NOT NULL"
-            schema_parts.append(part + ",")
+        column_definitions = []
+        for (
+            col_name,
+            udt_name,
+            is_nullable,
+            char_len,
+            num_prec,
+            num_scale,
+        ) in columns:
+            data_type = udt_name
 
-        schema_parts.append(");")
-        return "\n".join(schema_parts)
+            # Append length for character types
+            if char_len is not None:
+                data_type += f"({char_len})"
+            # Append precision and scale for numeric types
+            elif udt_name in ("numeric", "decimal") and num_prec is not None:
+                data_type += f"({num_prec}, {num_scale})"
+
+            # Construct the column definition line
+            definition = f"  {col_name} {data_type}"
+            if is_nullable == "NO":
+                definition += " NOT NULL"
+            column_definitions.append(definition)
+
+        # Assemble the final CREATE TABLE string
+        return "CREATE TABLE {} (\n{}\n);".format(
+            table_name, ",\n".join(column_definitions)
+        )
 
     def get_primary_key_columns(self, table_name: str) -> list[(str, int)]:
         """
@@ -171,5 +203,8 @@ class DBToolSuite(ABC):
             ) as cur:
                 cur.execute(query, vars)
                 return cur.fetchall()
+        except psycopg2.ProgrammingError:
+            # No results to fetch (e.g., for INSERT/UPDATE statements).
+            return []
         except Exception as e:
-            raise Exception(f"Error executing sql query: {e}")
+            raise Exception(f"Error executing sql query: {query}; {vars}; {e}")

@@ -1,5 +1,5 @@
 import numpy as np
-import time
+from time import time
 from psycopg2.extensions import cursor as _pgcursor
 
 
