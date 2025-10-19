@@ -1,3 +1,15 @@
+-- HISTORY table
+CREATE TABLE history (
+  h_c_id   INT,
+  h_c_d_id SMALLINT,
+  h_c_w_id SMALLINT,
+  h_d_id   SMALLINT,
+  h_w_id   SMALLINT,
+  h_date   TIMESTAMP,
+  h_amount DECIMAL(6, 2),
+  h_data   VARCHAR(24)
+);
+
 -- Foreign Keys
 ALTER TABLE district ADD FOREIGN KEY (d_w_id) REFERENCES warehouse (w_id) ON DELETE CASCADE;
 ALTER TABLE customer ADD FOREIGN KEY (c_w_id, c_d_id) REFERENCES district (d_w_id, d_id) ON DELETE CASCADE;

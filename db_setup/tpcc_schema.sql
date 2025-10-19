@@ -62,18 +62,6 @@ CREATE TABLE customer (
   c_data         VARCHAR(500)
 );
 
--- HISTORY table
-CREATE TABLE history (
-  h_c_id   INT,
-  h_c_d_id SMALLINT,
-  h_c_w_id SMALLINT,
-  h_d_id   SMALLINT,
-  h_w_id   SMALLINT,
-  h_date   TIMESTAMP,
-  h_amount DECIMAL(6, 2),
-  h_data   VARCHAR(24)
-);
-
 -- ITEM table
 CREATE TABLE item (
   i_id     INT NOT NULL,
