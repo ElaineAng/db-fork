@@ -84,7 +84,7 @@ class DBToolSuite(ABC):
             stmt.strip() for stmt in schema_ddl.split(";") if stmt.strip()
         ]
         for stmt in sql_statements:
-            print(f"Executing DDL statement:\n{stmt}\n")
+            # print(f"Executing DDL statement:\n{stmt}\n")
             self.run_sql_query(stmt)
 
     def get_table_schema(self, table_name: str) -> str:

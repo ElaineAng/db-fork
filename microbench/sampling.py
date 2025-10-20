@@ -33,7 +33,9 @@ def sort_population(population: list[tuple], idx: int) -> None:
     population.sort(key=lambda x: x[idx])
 
 
-def get_sampled_indices(population_size, sampling_rate, dist_lambda):
+def get_sampled_indices(
+    population_size, sampling_rate, max_sampling_size, dist_lambda
+):
     """
     Generates skewed sample indices based on the provided distribution function.
 
@@ -50,7 +52,9 @@ def get_sampled_indices(population_size, sampling_rate, dist_lambda):
         raise ValueError("Sampling rate must be between 0.0 and 1.0.")
 
     # Create the sampling pool based on the sampling rate.
-    sampling_size = max(1, int(population_size * sampling_rate))
+    sampling_size = max(
+        1, min(max_sampling_size, int(population_size * sampling_rate))
+    )
 
     print(
         f"Sampling {sampling_size} out of {population_size} total items "

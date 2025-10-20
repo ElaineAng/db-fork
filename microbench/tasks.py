@@ -48,11 +48,11 @@ class DatabaseTask:
 
     def create_branch(self, branch_name: str, timed: bool = True):
         self.db_tools.create_db_branch(branch_name, timed=timed)
-        print(f"   -> Created branch '{branch_name}'.")
+        # print(f"   -> Created branch '{branch_name}'.")
 
     def connect_branch(self, branch_name: str, timed: bool = True):
         self.db_tools.connect_db_branch(branch_name, timed=timed)
-        print(f"   -> Connected to branch '{branch_name}'.")
+        # print(f"   -> Connected to branch '{branch_name}'.")
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -201,7 +201,7 @@ class DatabaseTask:
                 f"Warning: Only generated {inserted_count} unique rows due "
                 f"to PK collisions."
             )
-        print(f"   -> Insertion commands executed for {inserted_count} rows.")
+        # print(f"   -> Insertion commands executed for {inserted_count} rows.")
 
     def update(
         self,

@@ -8,7 +8,7 @@ from anytree import Node, RenderTree
 
 from dblib import timer
 from dblib.dolt import DoltToolSuite
-from microbench import sampling
+from microbench import mylogger, sampling
 from tasks import DatabaseTask
 
 
@@ -25,7 +25,7 @@ def format_db_uri(
 
 
 def BETA_DIST(sample_size):
-    return sampling.beta_distribution(sample_size, alpha=2.0, beta=5.0)
+    return sampling.beta_distribution(sample_size, alpha=10, beta=1.0)
 
 
 def build_branch_tree(root_branch: str, tree_depth: int, degree: int) -> Node:
@@ -50,11 +50,12 @@ class BenchmarkSuite:
         backend: str,
         db_name: str = "microbench",
         delete_db_after_done: bool = True,
+        require_setup: bool = True,
     ):
         self.backend = backend
         self._db_name = db_name
         self.delete_db_after_done = delete_db_after_done
-
+        self.require_setup = require_setup
         self.preload_data_dir = ""
         self.preloaded_tables = set()
 
@@ -95,6 +96,8 @@ class BenchmarkSuite:
         self.conn.close()
 
     def create_benchmark_database(self):
+        if not self.require_setup:
+            return
         try:
             # Create a new database over a separate connection.
             uri = format_db_uri(
@@ -131,10 +134,10 @@ class BenchmarkSuite:
             )
 
         if db_schema_str:
-            print("Setting up database schema from string...")
+            print(f"Setting up database schema from string {db_schema_str}...")
             self.db_task.setup_db(self._db_name, db_schema_str)
         elif db_schema_path:
-            print("Setting up database schema from file...")
+            print(f"Setting up database schema from file {db_schema_path}...")
             with open(db_schema_path, "r") as f:
                 db_schema_str = f.read()
             self.db_task.setup_db(self._db_name, db_schema_str)
@@ -143,6 +146,32 @@ class BenchmarkSuite:
             print("Preloading data for benchmarks...")
             self.preload_data_dir = preload_data_dir
             self.db_task.preload_db_data(self.preload_data_dir)
+
+    def read_skip_setup(
+        self,
+        table_name: str = "",
+        sampling_rate: float = 0.01,
+        max_sample_size: int = 500,
+        dist_lambda: Callable[..., list[float]] = BETA_DIST,
+        sort_idx: int = 0,
+        branch_name: str = "",
+    ) -> None:
+        if branch_name:
+            self.db_task.connect_branch(branch_name, timed=False)
+        total_rows = self.db_task.get_table_row_count(table_name)
+        print(f"Table {table_name} has {total_rows} rows.")
+        self.db_task.point_read(
+            table_name,
+            sampling_rate=sampling_rate,
+            max_sampling_size=max_sample_size,
+            dist_lambda=dist_lambda,
+            sort_idx=sort_idx,
+        )
+        print(
+            f"Average read time for table {table_name}: "
+            f"{self.timer.report_average_time():.6f} seconds\n"
+        )
+        self.timer.reset()
 
     def read_bench(
         self,
@@ -160,20 +189,13 @@ class BenchmarkSuite:
 
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
-            total_rows = self.db_task.get_table_row_count(table)
-            print(f"Table {table} has {total_rows} rows.")
-            self.db_task.point_read(
+            self.read_skip_setup(
                 table,
-                sampling_rate=sampling_rate,
-                max_sampling_size=max_sample_size,
-                dist_lambda=dist_lambda,
-                sort_idx=sort_idx,
+                sampling_rate,
+                max_sample_size,
+                dist_lambda,
+                sort_idx,
             )
-            print(
-                f"Average read time for table {table}: "
-                f"{self.timer.report_average_time():.6f} seconds\n"
-            )
-            self.timer.reset()
 
     def insert_bench(self, num_inserted: int = 100) -> None:
         print("\n ====== Running insert benchmark...\n", flush=True)
@@ -216,33 +238,91 @@ class BenchmarkSuite:
             )
             self.timer.reset()
 
-    def branch_bench(self, tree_depth: int = 10, degree: int = 5) -> None:
+    def branch_insert_op(
+        self,
+        tree_depth: int = 10,
+        degree: int = 2,
+        insert_per_branch: int = 1,
+        time_branching: bool = False,
+        time_inserts: bool = False,
+    ) -> str:
         root = build_branch_tree(
             root_branch="main", tree_depth=tree_depth, degree=degree
         )
-        print("\n ====== Running branch benchmark...\n", flush=True)
         # print(RenderTree(root))
 
         # pick a random table to do minimal inserts
         all_tables = self.db_task.get_all_tables()
         insert_table = random.choice(all_tables)
-
+        total_branches = degree ** (tree_depth + 1) - 1 // (degree - 1)
+        current_inserted = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
             self.db_task.connect_branch(node.name, timed=False)
-            self.db_task.insert(insert_table, num_rows=1, timed=False)
+            self.db_task.insert(
+                insert_table, num_rows=insert_per_branch, timed=time_inserts
+            )
+            current_inserted += 1
+            mylogger.log_progress(
+                f"Progress:    {current_inserted}/{total_branches} branches "
+            )
             for child in node.children:
-                self.db_task.create_branch(child.name, timed=True)
+                self.db_task.create_branch(child.name, timed=time_branching)
             current_level_nodes.extend(node.children)
-        print(
-            f"Average branch creation time: {self.timer.report_average_time():.6f} seconds\n"
-        )
+        print(f"branch for the read: {node.name}")
+
+        if time_branching:
+            print(
+                f"Average branch creation time: {self.timer.report_average_time():.6f} seconds\n"
+            )
+        if time_inserts:
+            print(
+                f"Average insertion time: {self.timer.report_average_time():.6f} seconds\n"
+            )
         self.timer.reset()
+        return insert_table
 
-    def branch_insert_read_bench(self):
-        pass
+    def branch_bench(self, tree_depth: int = 10, degree: int = 2) -> None:
+        print("\n ====== Running branch benchmark...\n", flush=True)
+        self.branch_insert_op(
+            tree_depth=tree_depth, degree=degree, time_branching=True
+        )
 
-    def branch_update_read_bench(self):
+    def branch_insert_bench(
+        self, tree_depth: int = 10, degree: int = 2, insert_per_branch: int = 10
+    ) -> None:
+        print("\n ====== Running branch insert benchmark...\n", flush=True)
+        self.branch_insert_op(
+            tree_depth=tree_depth,
+            degree=degree,
+            insert_per_branch=insert_per_branch,
+            time_inserts=True,
+        )
+
+    def branch_insert_read_bench(
+        self,
+        sampling_rate: float = 0.01,
+        max_sample_size: int = 500,
+        dist_lambda: Callable[..., list[float]] = BETA_DIST,
+        sort_idx: int = 0,
+        tree_depth: int = 10,
+        degree: int = 2,
+        insert_per_branch: int = 10,
+    ) -> None:
+        table_name = self.branch_insert_op(
+            tree_depth=tree_depth,
+            degree=degree,
+            insert_per_branch=insert_per_branch,
+        )
+        self.read_skip_setup(
+            table_name,
+            sampling_rate,
+            max_sample_size,
+            dist_lambda,
+            sort_idx,
+        )
+
+    def branch_update_bench(self):
         pass
 
 
@@ -291,17 +371,87 @@ if __name__ == "__main__":
         help="Only run the insert benchmark.",
     )
 
+    parser.add_argument(
+        "--branch_insert",
+        action="store_true",
+        help="Only run the branch insert benchmark.",
+    )
+
+    parser.add_argument(
+        "--branch_insert_read",
+        action="store_true",
+        help="Run branch insert followed by read benchmark.",
+    )
+
+    parser.add_argument(
+        "--read_no_setup",
+        action="store_true",
+        help=(
+            "Run read benchmark without preloading data. This assumes data is "
+            "already present. --table_name must be provided."
+        ),
+    )
+
+    parser.add_argument(
+        "--table_name",
+        type=str,
+        help="Name of the table to run the read benchmark on.",
+    )
+
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        help="Alpha parameter for the read predicate's distribution.",
+    )
+
+    parser.add_argument(
+        "--beta",
+        type=float,
+        help="Beta parameter for the read predicate's distribution.",
+    )
+
+    parser.add_argument(
+        "--branch_name",
+        type=str,
+        help="Name of the branch to connect to for the ops.",
+    )
+
     args = parser.parse_args()
 
     with BenchmarkSuite(
         backend=args.backend,
         db_name="microbench",
         delete_db_after_done=not args.no_cleanup,
+        require_setup=not args.read_no_setup,
     ) as single_task_bench:
-        single_task_bench.setup_benchmark_database(
-            db_schema_path=args.db_schema_path
-        )
+        if not args.read_no_setup:
+            single_task_bench.setup_benchmark_database(
+                db_schema_path=args.db_schema_path
+            )
         if args.branch_only:
             single_task_bench.branch_bench(200, 1)
         elif args.insert_only:
             single_task_bench.insert_bench(num_inserted=1000)
+        elif args.branch_insert:
+            single_task_bench.branch_insert_bench(
+                tree_depth=10, degree=2, insert_per_branch=100
+            )
+        elif args.branch_insert_read:
+            single_task_bench.branch_insert_read_bench(
+                sampling_rate=0.05,
+                max_sample_size=100,
+                tree_depth=5,
+                degree=2,
+                insert_per_branch=1000,
+            )
+        elif args.read_no_setup:
+            single_task_bench.read_skip_setup(
+                table_name=args.table_name,
+                sampling_rate=0.5,
+                max_sample_size=100,
+                dist_lambda=lambda size: sampling.beta_distribution(
+                    size,
+                    alpha=args.alpha if args.alpha else 10,
+                    beta=args.beta if args.beta else 1.0,
+                ),
+            )
