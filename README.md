@@ -57,6 +57,13 @@
 
 Note that the benchmark automatically creates a database (by default named `microbench` and using `TPC-C` schema), and do insertion on that database. By default the database is cleaned up after each benchmark run. If you don't want to clean it up, specify `--no_cleanup`
 
+If a prior `branch-insert` or `branch-insert-read` benchmark has run, and `--no_cleanup` is specified, you could just run read without doing any setup. e.g.:
+
+```bash
+python3 python3 microbench/runner.py --read_no_setup --table_name="xxx" --no_cleanup --alpha=1.0 --beta=10.0 --branch_name="yyy"
+```
+This runs just the reads on branch "yyy" against the table "xxx" created in previous benchmark runs. This could be used to tune `--alpha`, `--beta`, `--sampling_rate`, `--max_sampling_size` to see how that impacts read latency. Note that `--no_cleanup` should be specified when running this, otherwise the database will get cleaned up.
+
 ## Run the agent (WIP)
 
 ```bash
