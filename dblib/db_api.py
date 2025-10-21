@@ -36,6 +36,13 @@ class DBToolSuite(ABC):
         pass
 
     @abstractmethod
+    def get_current_db_branch(self, timed: bool = False) -> str:
+        """
+        Returns the name of the current branch in the underlying database.
+        """
+        pass
+
+    @abstractmethod
     def commit_changes(self, message: str = "", timed: bool = False) -> None:
         """
         Commits any pending changes to the database with an optional message.
@@ -202,6 +209,7 @@ class DBToolSuite(ABC):
                 cursor_factory=self.timed_cursor if timed else None
             ) as cur:
                 cur.execute(query, vars)
+                #  print(f"executed query: {cur.query}")
                 return cur.fetchall()
         except psycopg2.ProgrammingError:
             # No results to fetch (e.g., for INSERT/UPDATE statements).

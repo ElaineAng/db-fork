@@ -71,7 +71,12 @@ class BenchmarkSuite:
             )
 
         # Timed connection and tools to measure timing.
-        self.conn = psycopg2.connect(uri)
+        self.conn = psycopg2.connect(
+            uri,
+            connection_factory=lambda *args, **kwargs: timer.TimerConnection(
+                *args, **kwargs, timer=self.timer
+            ),
+        )
         timed_tools = DoltToolSuite(
             connection=self.conn,
             timed_cursor=lambda *args, **kwargs: timer.TimerCursor(
@@ -88,9 +93,12 @@ class BenchmarkSuite:
         if self.delete_db_after_done:
             try:
                 self.db_task.delete_db(self._db_name)
+                print("Database deleted successfully.")
             except Exception as e:
                 if "database not found" in str(e):  # Database does not exist
-                    print("DB deleted successfully.")
+                    print(
+                        "Database not found. Assuming it was already deleted."
+                    )
                 else:
                     print(f"Error deleting database: {e}")
         self.conn.close()
@@ -167,9 +175,15 @@ class BenchmarkSuite:
             dist_lambda=dist_lambda,
             sort_idx=sort_idx,
         )
+        cursor_execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+        cursor_fetch_elapsed = self.timer.report_cursor_elapsed(tag="fetchall")
         print(
-            f"Average read time for table {table_name}: "
-            f"{self.timer.report_average_time():.6f} seconds\n"
+            f"Average read execution time for table {table_name}: "
+            f"{timer.get_average(cursor_execute_elapsed):.6f} seconds, "
+            f"over {len(cursor_execute_elapsed)} samples\n"
+            f"Average fetchall time for table {table_name}: "
+            f"{timer.get_average(cursor_fetch_elapsed):.6f} seconds, "
+            f"over {len(cursor_fetch_elapsed)} samples\n"
         )
         self.timer.reset()
 
@@ -197,13 +211,19 @@ class BenchmarkSuite:
                 sort_idx,
             )
 
-    def insert_bench(self, num_inserted: int = 100) -> None:
+    def insert_bench(self, num_inserts: int = 100) -> None:
         print("\n ====== Running insert benchmark...\n", flush=True)
         for table in self.db_task.get_all_tables():
-            self.db_task.insert(table, num_rows=num_inserted)
+            self.db_task.insert(table, num_rows=num_inserts, timed=True)
+            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+            commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
             print(
-                f"Average insert time for table {table}: "
-                f"{self.timer.report_average_time():.6f} seconds\n"
+                f"Average insertion execution time for table {table}: "
+                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"over {len(execute_elapsed)} samples\n"
+                f"Average insertion commit time for table {table}: "
+                f"{timer.get_average(commit_elapsed):.6f} seconds, "
+                f"over {len(commit_elapsed)} samples\n"
             )
             self.timer.reset()
 
@@ -232,9 +252,11 @@ class BenchmarkSuite:
                 dist_lambda=dist_lambda,
                 sort_idx=sort_idx,
             )
+            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
             print(
                 f"Average read time for table {table}: "
-                f"{self.timer.report_average_time():.6f} seconds\n"
+                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"over {len(execute_elapsed)} samples\n"
             )
             self.timer.reset()
 
@@ -255,37 +277,66 @@ class BenchmarkSuite:
         all_tables = self.db_task.get_all_tables()
         insert_table = random.choice(all_tables)
         total_branches = degree ** (tree_depth + 1) - 1 // (degree - 1)
-        current_inserted = 0
+        current_visited = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
             self.db_task.connect_branch(node.name, timed=False)
-            self.db_task.insert(
-                insert_table, num_rows=insert_per_branch, timed=time_inserts
-            )
-            current_inserted += 1
+            if insert_per_branch > 0:
+                self.db_task.insert(
+                    insert_table,
+                    num_rows=insert_per_branch,
+                    timed=time_inserts,
+                )
+            current_visited += 1
             mylogger.log_progress(
-                f"Progress:    {current_inserted}/{total_branches} branches "
+                f"Progress:    {current_visited}/{total_branches} branches, "
+                f"inserted {insert_per_branch} records each."
             )
             for child in node.children:
                 self.db_task.create_branch(child.name, timed=time_branching)
             current_level_nodes.extend(node.children)
-        print(f"branch for the read: {node.name}")
+        print(
+            f"{total_branches} branches created, "
+            f"current one for following operations: {node.name}"
+        )
+
+        execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+        commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
 
         if time_branching:
             print(
-                f"Average branch creation time: {self.timer.report_average_time():.6f} seconds\n"
+                "Average branch creation time: "
+                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"over {len(execute_elapsed)} samples\n"
+            )
+            print(
+                "Average branch commit time: "
+                f"{timer.get_average(commit_elapsed):.6f} seconds, "
+                f"over {len(commit_elapsed)} samples\n"
             )
         if time_inserts:
             print(
-                f"Average insertion time: {self.timer.report_average_time():.6f} seconds\n"
+                "Average insertion execution time: "
+                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"over {len(execute_elapsed)} samples\n"
+            )
+            print(
+                "Average insertion commit time: "
+                f"{timer.get_average(commit_elapsed):.6f} seconds, "
+                f"over {len(commit_elapsed)} samples\n"
             )
         self.timer.reset()
         return insert_table
 
-    def branch_bench(self, tree_depth: int = 10, degree: int = 2) -> None:
+    def branch_bench(
+        self, tree_depth: int = 10, degree: int = 2, insert_per_branch: int = 1
+    ) -> None:
         print("\n ====== Running branch benchmark...\n", flush=True)
         self.branch_insert_op(
-            tree_depth=tree_depth, degree=degree, time_branching=True
+            tree_depth=tree_depth,
+            degree=degree,
+            insert_per_branch=insert_per_branch,
+            time_branching=True,
         )
 
     def branch_insert_bench(
@@ -296,6 +347,7 @@ class BenchmarkSuite:
             tree_depth=tree_depth,
             degree=degree,
             insert_per_branch=insert_per_branch,
+            time_branching=False,
             time_inserts=True,
         )
 
@@ -416,6 +468,27 @@ if __name__ == "__main__":
         help="Name of the branch to connect to for the ops.",
     )
 
+    parser.add_argument(
+        "--branch_depth",
+        type=int,
+        default=6,
+        help="Depth of the branch tree for branch benchmarks.",
+    )
+
+    parser.add_argument(
+        "--branch_degree",
+        type=int,
+        default=2,
+        help="Degree of the branch tree for branch benchmarks.",
+    )
+
+    parser.add_argument(
+        "--num_inserts",
+        type=int,
+        default=None,
+        help="Number of rows to insert at a single time",
+    )
+
     args = parser.parse_args()
 
     with BenchmarkSuite(
@@ -429,29 +502,38 @@ if __name__ == "__main__":
                 db_schema_path=args.db_schema_path
             )
         if args.branch_only:
-            single_task_bench.branch_bench(200, 1)
+            single_task_bench.branch_bench(
+                tree_depth=args.branch_depth,
+                degree=args.branch_degree,
+                insert_per_branch=args.num_inserts or 0,
+            )
         elif args.insert_only:
-            single_task_bench.insert_bench(num_inserted=1000)
+            single_task_bench.insert_bench(num_inserts=args.num_inserts or 1000)
+
         elif args.branch_insert:
             single_task_bench.branch_insert_bench(
-                tree_depth=10, degree=2, insert_per_branch=100
+                tree_depth=args.branch_depth,
+                degree=args.branch_degree,
+                insert_per_branch=args.num_inserts or 100,
             )
+
         elif args.branch_insert_read:
             single_task_bench.branch_insert_read_bench(
                 sampling_rate=0.05,
-                max_sample_size=100,
-                tree_depth=5,
-                degree=2,
-                insert_per_branch=1000,
+                max_sample_size=10,
+                tree_depth=args.branch_depth,
+                degree=args.branch_degree,
+                insert_per_branch=args.num_inserts or 100,
             )
         elif args.read_no_setup:
             single_task_bench.read_skip_setup(
                 table_name=args.table_name,
-                sampling_rate=0.5,
-                max_sample_size=100,
+                sampling_rate=0.05,
+                max_sample_size=10,
                 dist_lambda=lambda size: sampling.beta_distribution(
                     size,
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
+                branch_name=args.branch_name if args.branch_name else "",
             )

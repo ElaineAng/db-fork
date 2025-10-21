@@ -54,6 +54,9 @@ class DatabaseTask:
         self.db_tools.connect_db_branch(branch_name, timed=timed)
         # print(f"   -> Connected to branch '{branch_name}'.")
 
+    def get_current_branch(self) -> str:
+        return self.db_tools.get_current_db_branch()
+
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
         Retrieves the primary key columns by ordinal position for the specified
@@ -77,12 +80,14 @@ class DatabaseTask:
         """
         if table_name in self.all_pks:
             return  # Already loaded
-
+        print(f"Loading primary keys for table '{table_name}'...")
         if not pk_columns:
             pk_columns = self.get_pk_columns_name(table_name)
 
         sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
         self.all_pks[table_name] = set(self.db_tools.run_sql_query(sql))
+        # print(", ".join(pk_columns))
+        # print(self.all_pks[table_name])
 
     def get_table_row_count(self, table_name: str) -> int:
         """
@@ -195,7 +200,11 @@ class DatabaseTask:
                 inserted_count += 1
 
         # Commit all insertions at once.
-        self.db_tools.commit_changes("Inserted new rows.", timed=timed)
+        current_branch = self.get_current_branch()
+        self.db_tools.commit_changes(
+            f"Inserted {inserted_count} new rows on branch {current_branch}",
+            timed=timed,
+        )
         if inserted_count < num_rows:
             print(
                 f"Warning: Only generated {inserted_count} unique rows due "
