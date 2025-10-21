@@ -489,6 +489,27 @@ if __name__ == "__main__":
         help="Number of rows to insert at a single time",
     )
 
+    parser.add_argument(
+        "--sort_idx",
+        type=int,
+        default=None,
+        help="Index to sort sampled results by.",
+    )
+
+    parser.add_argument(
+        "--max_sample_size",
+        type=int,
+        default=10,
+        help="Maximum sample size for read benchmarks.",
+    )
+
+    parser.add_argument(
+        "--sampling_rate",
+        type=float,
+        default=0.05,
+        help="Sampling rate for read benchmarks.",
+    )
+
     args = parser.parse_args()
 
     with BenchmarkSuite(
@@ -519,8 +540,14 @@ if __name__ == "__main__":
 
         elif args.branch_insert_read:
             single_task_bench.branch_insert_read_bench(
-                sampling_rate=0.05,
-                max_sample_size=10,
+                sampling_rate=args.sampling_rate,
+                max_sample_size=args.max_sample_size,
+                dist_lambda=lambda size: sampling.beta_distribution(
+                    size,
+                    alpha=args.alpha if args.alpha else 10,
+                    beta=args.beta if args.beta else 1.0,
+                ),
+                sort_idx=args.sort_idx or 0,
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
@@ -528,12 +555,13 @@ if __name__ == "__main__":
         elif args.read_no_setup:
             single_task_bench.read_skip_setup(
                 table_name=args.table_name,
-                sampling_rate=0.05,
-                max_sample_size=10,
+                sampling_rate=args.sampling_rate,
+                max_sample_size=args.max_sample_size,
                 dist_lambda=lambda size: sampling.beta_distribution(
                     size,
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
+                sort_idx=args.sort_idx or 0,
                 branch_name=args.branch_name if args.branch_name else "",
             )
