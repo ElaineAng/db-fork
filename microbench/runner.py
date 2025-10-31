@@ -4,7 +4,7 @@ from typing import Callable
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from anytree import Node, RenderTree
+from anytree import Node
 
 from dblib import timer
 from dblib.dolt import DoltToolSuite
@@ -159,13 +159,15 @@ class BenchmarkSuite:
         self,
         table_name: str = "",
         sampling_rate: float = 0.01,
-        max_sample_size: int = 500,
+        max_sample_size: int = 100,
         dist_lambda: Callable[..., list[float]] = BETA_DIST,
         sort_idx: int = 0,
         branch_name: str = "",
     ) -> None:
         if branch_name:
             self.db_task.connect_branch(branch_name, timed=False)
+        print(f"Running from branch {self.db_task.get_current_branch()}")
+
         total_rows = self.db_task.get_table_row_count(table_name)
         print(f"Table {table_name} has {total_rows} rows.")
         self.db_task.point_read(

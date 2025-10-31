@@ -55,7 +55,7 @@ class DatabaseTask:
         # print(f"   -> Connected to branch '{branch_name}'.")
 
     def get_current_branch(self) -> str:
-        return self.db_tools.get_current_db_branch()
+        return self.db_tools.get_current_db_branch(timed=False)
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -83,11 +83,18 @@ class DatabaseTask:
         print(f"Loading primary keys for table '{table_name}'...")
         if not pk_columns:
             pk_columns = self.get_pk_columns_name(table_name)
+        print(f" PK columns: {pk_columns}")
 
         sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
-        self.all_pks[table_name] = set(self.db_tools.run_sql_query(sql))
-        # print(", ".join(pk_columns))
-        # print(self.all_pks[table_name])
+        all_pks = self.db_tools.run_sql_query(sql)
+
+        count_sql = f"SELECT COUNT(*) FROM ({sql.rstrip(';')}) as sub; "
+        count_result = self.db_tools.run_sql_query(count_sql)
+        total_count = count_result[0][0] if count_result else 0
+        print(f" Total primary keys fetched: {total_count}")
+
+        print(f" Loaded {len(all_pks)} primary keys.")
+        self.all_pks[table_name] = set(all_pks)
 
     def get_table_row_count(self, table_name: str) -> int:
         """

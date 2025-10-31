@@ -26,9 +26,6 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"call dolt_checkout('{branch_name}');"
         super().run_sql_query(cmd, timed=timed)
-        # print(
-        #     f"... Connected to branch: {self.get_current_db_branch(timed=False)}"
-        # )
 
     def list_db_branches(self, timed: bool = False) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"

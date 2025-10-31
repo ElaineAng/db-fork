@@ -209,7 +209,6 @@ class DBToolSuite(ABC):
                 cursor_factory=self.timed_cursor if timed else None
             ) as cur:
                 cur.execute(query, vars)
-                #  print(f"executed query: {cur.query}")
                 return cur.fetchall()
         except psycopg2.ProgrammingError:
             # No results to fetch (e.g., for INSERT/UPDATE statements).
