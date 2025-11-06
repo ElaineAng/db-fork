@@ -24,11 +24,13 @@ class DBToolSuite(ABC):
         if not self.conn:
             raise ValueError("Database connection is not established.")
 
-    def get_connection(self) -> _pgconn:
+    def close_connection(self) -> None:
         """
-        Returns the current database connection.
+        Closes the current database connection.
         """
-        return self.conn
+        if self.conn:
+            self.conn.close()
+            self.conn = None
 
     @abstractmethod
     def create_db_branch(
@@ -61,7 +63,6 @@ class DBToolSuite(ABC):
         """
         pass
 
-    @abstractmethod
     def commit_changes(self, message: str = "", timed: bool = False) -> None:
         """
         Commits any pending changes to the database with an optional message.
@@ -112,7 +113,6 @@ class DBToolSuite(ABC):
             stmt.strip() for stmt in schema_ddl.split(";") if stmt.strip()
         ]
         for stmt in sql_statements:
-            # print(f"Executing DDL statement:\n{stmt}\n")
             self.run_sql_query(stmt)
 
     def get_table_schema(self, table_name: str) -> str:

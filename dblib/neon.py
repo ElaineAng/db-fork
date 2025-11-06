@@ -45,6 +45,7 @@ class NeonToolSuite(DBToolSuite):
         database_name: str,
     ):
         uri = cls._get_neon_connection_uri(project_id, branch_id, database_name)
+        print(f"Initial connection to Neon with URI: {uri}")
         conn = psycopg2.connect(
             uri,
             connection_factory=lambda *args, **kwargs: dbtimer.TimerConnection(
@@ -180,7 +181,12 @@ class NeonToolSuite(DBToolSuite):
         if self.timer and timed:
             start_time = time()
         self.conn.close()
-        self.conn = psycopg2.connect(uri)
+        self.conn = psycopg2.connect(
+            uri,
+            connection_factory=lambda *args, **kwargs: dbtimer.TimerConnection(
+                *args, **kwargs, timer=self.timer
+            ),
+        )
         if self.timer and timed:
             end_time = time()
             self.timer.collect_cursor_elapsed(
@@ -202,6 +208,3 @@ class NeonToolSuite(DBToolSuite):
         for _, (branch_id, _) in self._get_neon_branches().items():
             print(f"Deleting database '{db_name}' on branch ID '{branch_id}'")
             self._delete_db_on_branch(branch_id, db_name)
-
-    def commit_changes(self, message: str = "", timed: bool = False) -> None:
-        pass

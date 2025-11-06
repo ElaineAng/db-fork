@@ -54,9 +54,15 @@ class DatabaseTask:
         )
         # print(f"   -> Created branch '{branch_name}'.")
 
+    def close_current_connection(self):
+        self.db_tools.close_connection()
+
+    def get_current_connection_str(self) -> str:
+        return self.db_tools.conn.dsn
+
     def connect_branch(self, branch_name: str, timed: bool = True):
         self.db_tools.connect_db_branch(branch_name, timed=timed)
-        # print(f"   -> Connected to branch '{branch_name}'.")
+        print(f"   -> Connected to branch '{branch_name}'.")
 
     def get_current_branch(self) -> str:
         return self.db_tools.get_current_db_branch(timed=False)

@@ -55,7 +55,7 @@ class BenchmarkSuite:
         self.timer = timer.Timer()
 
     def __enter__(self) -> Self:
-        self.db_tools = None
+        db_tools = None
         # NOTE: create_benchmark_database() must be called before this method
         # returns.
         try:
@@ -63,7 +63,7 @@ class BenchmarkSuite:
                 default_uri = DoltToolSuite.get_default_connection_uri()
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
-                self.db_tools = DoltToolSuite.init_for_bench(
+                db_tools = DoltToolSuite.init_for_bench(
                     self.timer, self._db_name
                 )
                 self.root_branch_name = "main"
@@ -80,6 +80,7 @@ class BenchmarkSuite:
                     if neon_project["connection_uris"]
                     else ""
                 )
+                print(f"Default Neon connection URI: {default_uri}")
                 # Create the benchmark database on the root branch.
                 self.create_benchmark_database(default_uri)
 
@@ -89,7 +90,7 @@ class BenchmarkSuite:
                 print(
                     f"Default Neon branch name: {self.root_branch_name}, ID: {default_branch_id}"
                 )
-                self.db_tools = NeonToolSuite.init_for_bench(
+                db_tools = NeonToolSuite.init_for_bench(
                     self.timer,
                     self._neon_project_id,
                     default_branch_id,
@@ -100,7 +101,7 @@ class BenchmarkSuite:
                 pass
 
             self.db_task = DatabaseTask(
-                db_tools=self.db_tools,
+                db_tools=db_tools,
             )
             return self
         except Exception as e:
@@ -115,7 +116,7 @@ class BenchmarkSuite:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         print("Exiting BenchmarkSuite context...")
-        if self.db_task and self.delete_db_after_done:
+        if self.delete_db_after_done:
             try:
                 self.db_task.delete_db(self._db_name)
                 print("Database deleted successfully.")
@@ -129,10 +130,7 @@ class BenchmarkSuite:
             if self.backend == "neon" and self._neon_project_id:
                 NeonToolSuite.delete_project(self._neon_project_id)
 
-        if self.db_tools:
-            current_conn = self.db_tools.get_connection()
-            if current_conn:
-                current_conn.close()
+        self.db_task.close_current_connection()
 
     def create_benchmark_database(self, uri):
         """
@@ -351,11 +349,13 @@ class BenchmarkSuite:
                 "Average branch creation time: "
                 f"{timer.get_average(execute_elapsed):.6f} seconds, "
                 f"over {len(execute_elapsed)} samples\n"
+                f"\t ----> {execute_elapsed}"
             )
             print(
-                "Average branch commit time: "
+                "Average commit time: "
                 f"{timer.get_average(commit_elapsed):.6f} seconds, "
                 f"over {len(commit_elapsed)} samples\n"
+                f"\t ----> {commit_elapsed}"
             )
         if time_inserts:
             print(
