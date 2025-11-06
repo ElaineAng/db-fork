@@ -45,7 +45,9 @@ class DoltToolSuite(DBToolSuite):
     def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
         super().__init__(connection, timed_cursor=timed_cursor)
 
-    def create_db_branch(self, branch_name: str, timed: bool = False) -> None:
+    def create_db_branch(
+        self, branch_name: str, timed: bool = False, parent_id: str = None
+    ) -> None:
         """
         Creates a new branch in the Dolt database.
         """

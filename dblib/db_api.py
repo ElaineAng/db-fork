@@ -31,7 +31,9 @@ class DBToolSuite(ABC):
         return self.conn
 
     @abstractmethod
-    def create_db_branch(self, branch_name: str, timed: bool = False) -> str:
+    def create_db_branch(
+        self, branch_name: str, timed: bool = False, parent_id: str = None
+    ) -> str:
         """
         Creates a new branch in the underlying database.
         """
@@ -229,6 +231,7 @@ class DBToolSuite(ABC):
                 cursor_factory=self.timed_cursor if timed else None
             ) as cur:
                 cur.execute(query, vars)
+                # print(f"Executed query: {query} with vars: {vars}")
                 return cur.fetchall()
         except psycopg2.ProgrammingError:
             # No results to fetch (e.g., for INSERT/UPDATE statements).

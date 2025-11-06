@@ -46,8 +46,12 @@ class DatabaseTask:
         self.db_tools.commit_changes("Preloaded data into database.")
         return loaded_tables
 
-    def create_branch(self, branch_name: str, timed: bool = True):
-        self.db_tools.create_db_branch(branch_name, timed=timed)
+    def create_branch(
+        self, branch_name: str, timed: bool = True, parent_id: str = None
+    ):
+        self.db_tools.create_db_branch(
+            branch_name, timed=timed, parent_id=parent_id
+        )
         # print(f"   -> Created branch '{branch_name}'.")
 
     def connect_branch(self, branch_name: str, timed: bool = True):

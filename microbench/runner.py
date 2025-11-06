@@ -1,10 +1,10 @@
 import argparse
 import random
-from typing import Callable, Self
+from typing import Callable, Self, Tuple
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from anytree import Node
+from anytree import Node, RenderTree
 
 from dblib import timer
 from dblib.dolt import DoltToolSuite
@@ -17,8 +17,11 @@ def BETA_DIST(sample_size):
     return sampling.beta_distribution(sample_size, alpha=10, beta=1.0)
 
 
-def build_branch_tree(root_branch: str, tree_depth: int, degree: int) -> Node:
+def build_branch_tree(
+    root_branch: str, tree_depth: int, degree: int
+) -> Tuple[Node, int]:
     root_node = Node(root_branch)
+    total_branches = 1
 
     current_level_nodes = [root_node]
     for d in range(tree_depth):
@@ -26,11 +29,12 @@ def build_branch_tree(root_branch: str, tree_depth: int, degree: int) -> Node:
         for idx, parent_node in enumerate(current_level_nodes):
             for i in range(degree):
                 branch_name = f"branch_d{d + 1}_n{idx * degree + i + 1}"
+                total_branches += 1
                 child_node = Node(branch_name, parent=parent_node)
                 next_level_nodes.append(child_node)
         current_level_nodes = next_level_nodes
 
-    return root_node
+    return root_node, total_branches
 
 
 class BenchmarkSuite:
@@ -54,46 +58,64 @@ class BenchmarkSuite:
         self.db_tools = None
         # NOTE: create_benchmark_database() must be called before this method
         # returns.
-        if self.backend == "dolt":
-            default_uri = DoltToolSuite.get_default_connection_uri()
-            print(f"Default Dolt connection URI: {default_uri}")
-            self.create_benchmark_database(default_uri)
-            self.db_tools = DoltToolSuite.init_for_bench(
-                self.timer, self._db_name
-            )
-        elif self.backend == "neon":
-            # The default neon uri depends on the created project, so we create
-            # the project first.
-            neon_project = NeonToolSuite.create_neon_project(
-                f"project_{self._db_name}"
-            )
-            default_uri = (
-                neon_project["connection_uris"][0]["connection_uri"]
-                if neon_project["connection_uris"]
-                else ""
-            )
-            # Create the benchmark database on the root branch.
-            self.create_benchmark_database(default_uri)
+        try:
+            if self.backend == "dolt":
+                default_uri = DoltToolSuite.get_default_connection_uri()
+                print(f"Default Dolt connection URI: {default_uri}")
+                self.create_benchmark_database(default_uri)
+                self.db_tools = DoltToolSuite.init_for_bench(
+                    self.timer, self._db_name
+                )
+                self.root_branch_name = "main"
+            elif self.backend == "neon":
+                # The default neon uri depends on the created project, so we create
+                # the project first.
+                neon_project = NeonToolSuite.create_neon_project(
+                    f"project_{self._db_name}"
+                )
+                self._neon_project_id = neon_project["project"]["id"]
+                print(f"Neon project ID: {self._neon_project_id}")
+                default_uri = (
+                    neon_project["connection_uris"][0]["connection_uri"]
+                    if neon_project["connection_uris"]
+                    else ""
+                )
+                # Create the benchmark database on the root branch.
+                self.create_benchmark_database(default_uri)
 
-            # Now get the connection uri for the benchmark database.
-            default_branch_id = neon_project["branch"]["id"]
-            default_branch_name = neon_project["branch"]["name"]
-            self.db_tools = NeonToolSuite.init_for_bench(
-                self.timer,
-                default_branch_id,
-                default_branch_name,
-                self._db_name,
-            )
-        elif self.backend == "tiger":
-            pass
+                # Now get the connection uri for the benchmark database.
+                default_branch_id = neon_project["branch"]["id"]
+                self.root_branch_name = neon_project["branch"]["name"]
+                print(
+                    f"Default Neon branch name: {self.root_branch_name}, ID: {default_branch_id}"
+                )
+                self.db_tools = NeonToolSuite.init_for_bench(
+                    self.timer,
+                    self._neon_project_id,
+                    default_branch_id,
+                    self.root_branch_name,
+                    self._db_name,
+                )
+            elif self.backend == "tiger":
+                pass
 
-        self.db_task = DatabaseTask(
-            db_tools=self.db_tools,
-        )
-        return self
+            self.db_task = DatabaseTask(
+                db_tools=self.db_tools,
+            )
+            return self
+        except Exception as e:
+            print(f"Error during BenchmarkSuite setup: {e}")
+            if (
+                self.delete_db_after_done
+                and self.backend == "neon"
+                and self._neon_project_id
+            ):
+                NeonToolSuite.delete_project(self._neon_project_id)
+            raise e
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.delete_db_after_done:
+        print("Exiting BenchmarkSuite context...")
+        if self.db_task and self.delete_db_after_done:
             try:
                 self.db_task.delete_db(self._db_name)
                 print("Database deleted successfully.")
@@ -104,9 +126,13 @@ class BenchmarkSuite:
                     )
                 else:
                     print(f"Error deleting database: {e}")
-        current_conn = self.db_tools.get_connection()
-        if current_conn:
-            current_conn.close()
+            if self.backend == "neon" and self._neon_project_id:
+                NeonToolSuite.delete_project(self._neon_project_id)
+
+        if self.db_tools:
+            current_conn = self.db_tools.get_connection()
+            if current_conn:
+                current_conn.close()
 
     def create_benchmark_database(self, uri):
         """
@@ -269,21 +295,22 @@ class BenchmarkSuite:
 
     def branch_insert_op(
         self,
-        tree_depth: int = 10,
+        tree_depth: int = 6,
         degree: int = 2,
         insert_per_branch: int = 1,
         time_branching: bool = False,
         time_inserts: bool = False,
     ) -> str:
-        root = build_branch_tree(
-            root_branch="main", tree_depth=tree_depth, degree=degree
+        (root, total_branches) = build_branch_tree(
+            root_branch=self.root_branch_name,
+            tree_depth=tree_depth,
+            degree=degree,
         )
-        # print(RenderTree(root))
+        print(RenderTree(root))
 
         # pick a random table to do minimal inserts
         all_tables = self.db_task.get_all_tables()
         insert_table = random.choice(all_tables)
-        total_branches = degree ** (tree_depth + 1) - 1 // (degree - 1)
         current_visited = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
@@ -299,15 +326,23 @@ class BenchmarkSuite:
                 f"Progress:    {current_visited}/{total_branches} branches, "
                 f"inserted {insert_per_branch} records each."
             )
+            _, cur_branch_id = self.db_task.get_current_branch()
             for child in node.children:
-                self.db_task.create_branch(child.name, timed=time_branching)
+                self.db_task.create_branch(
+                    child.name, timed=time_branching, parent_id=cur_branch_id
+                )
             current_level_nodes.extend(node.children)
         print(
             f"{total_branches} branches created, "
             f"current one for following operations: {node.name}"
         )
-
-        execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+        execute_elapsed = []
+        if self.backend == "dolt":
+            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+        elif self.backend == "neon":
+            execute_elapsed = self.timer.report_cursor_elapsed(
+                tag="neon_branching"
+            )
         commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
 
         if time_branching:
@@ -390,7 +425,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         default="dolt",
-        choices=["dolt"],
+        choices=["dolt", "neon"],
         help="The database backend to use.",
     )
 
