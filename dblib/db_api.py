@@ -6,12 +6,29 @@ from psycopg2.extensions import cursor as _pgcursor
 
 class DBToolSuite(ABC):
     """
-    An API for interacting with Postgres via a single connection.
+    An API for interacting with Postgres via a shared connection.
     """
 
-    def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
+    def __init__(
+        self, connection: _pgconn = None, timed_cursor: _pgcursor = None
+    ):
+        """
+        Subclass need to create the connection if connection isn't provided.
+        """
         self.conn = connection
         self.timed_cursor = timed_cursor
+        if not self.timed_cursor:
+            print("Timed cursor is not provided.")
+
+    def check_connection(self):
+        if not self.conn:
+            raise ValueError("Database connection is not established.")
+
+    def get_connection(self) -> _pgconn:
+        """
+        Returns the current database connection.
+        """
+        return self.conn
 
     @abstractmethod
     def create_db_branch(self, branch_name: str, timed: bool = False) -> str:
@@ -47,6 +64,7 @@ class DBToolSuite(ABC):
         """
         Commits any pending changes to the database with an optional message.
         """
+        self.check_connection()
         self.conn.commit()
 
     def create_db(self, db_name: str) -> None:
@@ -67,6 +85,7 @@ class DBToolSuite(ABC):
         """
         Bulk copies data from a CSV file into the specified table.
         """
+        self.check_connection()
         try:
             with self.conn.cursor() as cur:
                 with open(file_path, "r") as f:
@@ -204,6 +223,7 @@ class DBToolSuite(ABC):
         Runs an SQL query in the postgres database on the current branch. The
         query could be anything supported by the underlying database.
         """
+        self.check_connection()
         try:
             with self.conn.cursor(
                 cursor_factory=self.timed_cursor if timed else None

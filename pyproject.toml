@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "db-fork"
 version = "0.1.0"
-description = "Agent that creates and manages branches in a database"
+description = "Database branching related mess."
 authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     "anytree",
     "coolname",

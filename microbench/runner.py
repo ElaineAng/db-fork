@@ -1,27 +1,15 @@
 import argparse
 import random
-from typing import Callable
+from typing import Callable, Self
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from anytree import Node
 
 from dblib import timer
-from dblib.dolt import DoltToolSuite
+from dblib.dolt import DoltToolSuite, NeonToolSuite
 from microbench import mylogger, sampling
 from tasks import DatabaseTask
-
-
-PG_USER = "postgres"
-PG_PASSWORD = "password"
-PG_HOST = "localhost"
-PG_PORT = 5432
-
-
-def format_db_uri(
-    user: str, password: str, host: str, port: int, db_name: str
-) -> str:
-    return f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
 
 
 def BETA_DIST(sample_size):
@@ -55,37 +43,51 @@ class BenchmarkSuite:
         self.backend = backend
         self._db_name = db_name
         self.delete_db_after_done = delete_db_after_done
-        self.require_setup = require_setup
+        self.require_db_setup = require_setup
         self.preload_data_dir = ""
         self.preloaded_tables = set()
 
         self.timer = timer.Timer()
 
-        self.create_benchmark_database()
-
-    def __enter__(self):
+    def __enter__(self) -> Self:
+        self.db_tools = None
+        # NOTE: create_benchmark_database() must be called before this method
+        # returns.
         if self.backend == "dolt":
-            # TODO: Consider making these parameters configurable.
-            uri = format_db_uri(
-                PG_USER, PG_PASSWORD, PG_HOST, PG_PORT, self._db_name
+            self.create_benchmark_database(
+                DoltToolSuite.get_default_connection_uri()
             )
+            self.db_tools = DoltToolSuite.init_for_bench(
+                self.timer, self._db_name
+            )
+        elif self.backend == "neon":
+            # The default neon uri depends on the created project, so we create
+            # the project first.
+            neon_project = NeonToolSuite.create_neon_project(
+                f"project_{self._db_name}"
+            )
+            default_uri = (
+                neon_project["connection_uris"][0]["connection_uri"]
+                if neon_project["connection_uris"]
+                else ""
+            )
+            # Create the benchmark database on the root branch.
+            self.create_benchmark_database(default_uri)
 
-        # Timed connection and tools to measure timing.
-        self.conn = psycopg2.connect(
-            uri,
-            connection_factory=lambda *args, **kwargs: timer.TimerConnection(
-                *args, **kwargs, timer=self.timer
-            ),
-        )
-        timed_tools = DoltToolSuite(
-            connection=self.conn,
-            timed_cursor=lambda *args, **kwargs: timer.TimerCursor(
-                *args, **kwargs, timer=self.timer
-            ),
-        )
+            # Now get the connection uri for the benchmark database.
+            default_branch_id = neon_project["branch"]["id"]
+            default_branch_name = neon_project["branch"]["name"]
+            self.db_tools = NeonToolSuite.init_for_bench(
+                self.timer,
+                default_branch_id,
+                default_branch_name,
+                self._db_name,
+            )
+        elif self.backend == "tiger":
+            pass
 
         self.db_task = DatabaseTask(
-            db_tools=timed_tools,
+            db_tools=self.db_tools,
         )
         return self
 
@@ -101,16 +103,18 @@ class BenchmarkSuite:
                     )
                 else:
                     print(f"Error deleting database: {e}")
-        self.conn.close()
+        current_conn = self.db_tools.get_connection()
+        if current_conn:
+            current_conn.close()
 
-    def create_benchmark_database(self):
-        if not self.require_setup:
+    def create_benchmark_database(self, uri):
+        """
+        Creates the benchmark database on the root branch.
+        """
+        if not self.require_db_setup:
             return
         try:
             # Create a new database over a separate connection.
-            uri = format_db_uri(
-                PG_USER, PG_PASSWORD, PG_HOST, PG_PORT, "postgres"
-            )
             conn = psycopg2.connect(uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
