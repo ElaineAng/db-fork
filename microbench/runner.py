@@ -328,12 +328,13 @@ class BenchmarkSuite:
             )
             _, cur_branch_id = self.db_task.get_current_branch()
             for child in node.children:
-                self.db_task.create_branch(
+                success = self.db_task.create_branch(
                     child.name, timed=time_branching, parent_id=cur_branch_id
                 )
-            current_level_nodes.extend(node.children)
+                if success:
+                    current_level_nodes.append(child)
         print(
-            f"{total_branches} branches created, "
+            f"{current_visited} branches created, "
             f"current one for following operations: {node.name}"
         )
         execute_elapsed = []

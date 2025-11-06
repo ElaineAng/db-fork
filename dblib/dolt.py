@@ -47,13 +47,14 @@ class DoltToolSuite(DBToolSuite):
 
     def create_db_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
-    ) -> None:
+    ) -> bool:
         """
         Creates a new branch in the Dolt database.
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
         super().run_sql_query(cmd, timed=timed)
         super().commit_changes()
+        return True
 
     def connect_db_branch(self, branch_name: str, timed: bool = False) -> None:
         """

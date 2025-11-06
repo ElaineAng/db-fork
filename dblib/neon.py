@@ -140,21 +140,26 @@ class NeonToolSuite(DBToolSuite):
         }
         # Branch creation isn't a database operation in Neon, so we have to
         # explicitly time it here.
-        if self.timer and timed:
-            start_time = time()
-        branch = neon.branch_create(self.project_id, **branch_payload)
-        if self.timer and timed:
-            end_time = time()
-            # Report the collected time to the cursor elapsed, compatible with
-            # those backends whose branching operations are done via SQL
-            # queries.
-            self.timer.collect_cursor_elapsed(
-                end_time - start_time, tag="neon_branching"
+        try:
+            if self.timer and timed:
+                start_time = time()
+            branch = neon.branch_create(self.project_id, **branch_payload)
+            if self.timer and timed:
+                end_time = time()
+                # Report the collected time to the cursor elapsed, compatible with
+                # those backends whose branching operations are done via SQL
+                # queries.
+                self.timer.collect_cursor_elapsed(
+                    end_time - start_time, tag="neon_branching"
+                )
+            print(
+                f"Created branch: name: {branch.branch.name}, "
+                f"ID: {branch.branch.id}"
             )
-        print(
-            f"Created branch: name: {branch.branch.name}, "
-            f"ID: {branch.branch.id}"
-        )
+            return True
+        except Exception as e:
+            print(f"Failed to create branch '{branch_name}': {e}")
+            return False
 
     def connect_db_branch(self, branch_name: str, timed: bool = False) -> None:
         """

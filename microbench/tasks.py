@@ -48,8 +48,8 @@ class DatabaseTask:
 
     def create_branch(
         self, branch_name: str, timed: bool = True, parent_id: str = None
-    ):
-        self.db_tools.create_db_branch(
+    ) -> bool:
+        return self.db_tools.create_db_branch(
             branch_name, timed=timed, parent_id=parent_id
         )
         # print(f"   -> Created branch '{branch_name}'.")

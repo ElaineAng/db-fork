@@ -33,7 +33,7 @@ class DBToolSuite(ABC):
     @abstractmethod
     def create_db_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
-    ) -> str:
+    ) -> bool:
         """
         Creates a new branch in the underlying database.
         """
