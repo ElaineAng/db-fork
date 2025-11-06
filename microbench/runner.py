@@ -7,7 +7,8 @@ from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from anytree import Node
 
 from dblib import timer
-from dblib.dolt import DoltToolSuite, NeonToolSuite
+from dblib.dolt import DoltToolSuite
+from dblib.neon import NeonToolSuite
 from microbench import mylogger, sampling
 from tasks import DatabaseTask
 
@@ -54,9 +55,9 @@ class BenchmarkSuite:
         # NOTE: create_benchmark_database() must be called before this method
         # returns.
         if self.backend == "dolt":
-            self.create_benchmark_database(
-                DoltToolSuite.get_default_connection_uri()
-            )
+            default_uri = DoltToolSuite.get_default_connection_uri()
+            print(f"Default Dolt connection URI: {default_uri}")
+            self.create_benchmark_database(default_uri)
             self.db_tools = DoltToolSuite.init_for_bench(
                 self.timer, self._db_name
             )
