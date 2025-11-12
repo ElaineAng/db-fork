@@ -1,5 +1,5 @@
 import random
-from typing import Callable, Any
+from typing import Callable, Any, Tuple
 from pathlib import Path
 
 from dblib.db_api import DBToolSuite
@@ -10,12 +10,11 @@ from microbench import sampling
 class DatabaseTask:
     def __init__(self, db_tools: DBToolSuite):
         self.db_tools = db_tools
+        # Cache of data generators per table, lazy init.
+        self.all_datagen = {}
 
-        self.all_pks = {}  # Cache of all primary keys per table, lazy init.
-
-        self.all_datagen = {}  # Cache of data generators per table, lazy init.
-
-        self.all_tables = []  # Cache of all tables, lazy init.
+        # Cache of all tables per branch, lazy init.
+        self.all_tables = []
 
     def setup_db(self, db_name: str, db_schema: str) -> None:
         self.db_tools.initialize_schema(db_schema)
@@ -30,6 +29,11 @@ class DatabaseTask:
         return self.all_tables
 
     def preload_db_data(self, dir_path: str) -> list[str]:
+        """
+        Preloads data into all tables from CSV files located in the specified
+        directory. Each table should have a corresponding CSV file named
+        '<table_name>.csv'.
+        """
         all_tables = self.get_all_tables()
         loaded_tables = []
         for table in all_tables:
@@ -49,7 +53,7 @@ class DatabaseTask:
     def create_branch(
         self, branch_name: str, timed: bool = True, parent_id: str = None
     ) -> bool:
-        return self.db_tools.create_db_branch(
+        return self.db_tools.create_branch(
             branch_name, timed=timed, parent_id=parent_id
         )
         # print(f"   -> Created branch '{branch_name}'.")
@@ -61,11 +65,11 @@ class DatabaseTask:
         return self.db_tools.conn.dsn
 
     def connect_branch(self, branch_name: str, timed: bool = True):
-        self.db_tools.connect_db_branch(branch_name, timed=timed)
+        self.db_tools.connect_branch(branch_name, timed=timed)
         print(f"   -> Connected to branch '{branch_name}'.")
 
     def get_current_branch(self) -> str:
-        return self.db_tools.get_current_db_branch(timed=False)
+        return self.db_tools.get_current_branch()
 
     def get_pk_columns_name(self, table_name: str) -> list[str]:
         """
@@ -81,15 +85,14 @@ class DatabaseTask:
 
         return [col[0] for col in pk_columns]
 
-    def load_pk_values_for_table(
+    def get_pk_values_for_table(
         self, table_name: str, pk_columns: list[str] = None
-    ) -> None:
+    ) -> set[Tuple]:
         """
-        Fetch all primary keys to create a base population. This should be
-        relatively fast since it's an index-only scan.
+        Fetch all primary keys for the current database and branch to create a
+        base population to sample reads from. This should be relatively fast
+        since it's an index-only scan.
         """
-        if table_name in self.all_pks:
-            return  # Already loaded
         print(f"Loading primary keys for table '{table_name}'...")
         if not pk_columns:
             pk_columns = self.get_pk_columns_name(table_name)
@@ -104,14 +107,7 @@ class DatabaseTask:
         print(f" Total primary keys fetched: {total_count}")
 
         print(f" Loaded {len(all_pks)} primary keys.")
-        self.all_pks[table_name] = set(all_pks)
-
-    def get_table_row_count(self, table_name: str) -> int:
-        """
-        Returns the total number of rows in the specified table.
-        """
-        self.load_pk_values_for_table(table_name)
-        return len(self.all_pks.get(table_name, []))
+        return set(all_pks)
 
     def load_datagen_for_table(self, table_name: str) -> None:
         """
@@ -147,15 +143,14 @@ class DatabaseTask:
         """
 
         pk_columns_name = self.get_pk_columns_name(table_name)
-        self.load_pk_values_for_table(table_name, pk_columns_name)
-        if not self.all_pks.get(table_name):
+        pk_set = self.get_pk_values_for_table(table_name, pk_columns_name)
+        if not pk_set:
             print(" Table is empty. No rows to read.")
             return
 
         # Convert the set of primary keys to a list for indexing
         # CAREFUL: This could be expensive for very large tables since we are
         # storing everything in memory.
-        pk_set = self.all_pks[table_name]
         pk_list = list(pk_set)
 
         # Sort by first PK column, this could be a argument if needed.
@@ -180,20 +175,21 @@ class DatabaseTask:
         print(f" Read operations completed, {len(skewed_indices)} rows read.")
 
     def insert(
-        self, table_name: str, num_rows: int, timed: bool = True
+        self,
+        table_name: str,
+        num_rows: int,
+        timed: bool = True,
     ) -> None:
         """
-        Inserts unique rows into the database using a provided connection.
+        Inserts unique rows to a table in the current branch.
         """
         col_names = self.db_tools.get_all_columns(table_name)
         placeholders = ", ".join([f"%({name})s" for name in col_names])
         insert_sql = f"INSERT INTO {table_name} ({', '.join(col_names)}) VALUES ({placeholders});"
 
         pk_columns = self.get_pk_columns_name(table_name)
-        # print(
-        #     f" Inserting into table '{table_name}' with PK columns {pk_columns}."
-        # )
-        self.load_pk_values_for_table(table_name, pk_columns)
+
+        pk_set = self.get_pk_values_for_table(table_name, pk_columns)
         self.load_datagen_for_table(table_name)
 
         # print(
@@ -210,16 +206,17 @@ class DatabaseTask:
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             # Generated a new unique row, insert it.
-            if pk_tuple not in self.all_pks[table_name]:
+            if pk_tuple not in pk_set:
                 # Add the new pk to set.
-                self.all_pks[table_name].add(pk_tuple)
+                pk_set.add(pk_tuple)
                 self.db_tools.run_sql_query(insert_sql, row_data, timed=timed)
                 inserted_count += 1
 
         # Commit all insertions at once.
         current_branch = self.get_current_branch()
         self.db_tools.commit_changes(
-            f"Inserted {inserted_count} new rows on branch {current_branch}",
+            f"Inserted {inserted_count} rows on branch {current_branch[0]}, "
+            f"id {current_branch[1]}.",
             timed=timed,
         )
         if inserted_count < num_rows:
@@ -250,10 +247,9 @@ class DatabaseTask:
             return
 
         # Load existing primary keys and data generators.
-        self.load_pk_values_for_table(table_name, pk_columns)
+        pk_set = self.get_pk_values_for_table(table_name, pk_columns)
         self.load_datagen_for_table(table_name)
 
-        pk_set = self.all_pks.get(table_name)
         if not pk_set:
             print("   -> Table is empty. No rows to update.")
             return

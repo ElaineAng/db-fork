@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Tuple
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from psycopg2.extensions import cursor as _pgcursor
@@ -6,15 +7,15 @@ from psycopg2.extensions import cursor as _pgcursor
 
 class DBToolSuite(ABC):
     """
-    An API for interacting with Postgres via a shared connection.
+    An API for interacting with Postgres via a shared connection. The connection
+    is always for a specific database, and, in some cases, a specific branch.
     """
 
     def __init__(
         self, connection: _pgconn = None, timed_cursor: _pgcursor = None
     ):
-        """
-        Subclass need to create the connection if connection isn't provided.
-        """
+        # NOTE: Subclass need to create the connection if connection isn't
+        # provided.
         self.conn = connection
         self.timed_cursor = timed_cursor
         if not self.timed_cursor:
@@ -33,33 +34,38 @@ class DBToolSuite(ABC):
             self.conn = None
 
     @abstractmethod
-    def create_db_branch(
+    def create_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
     ) -> bool:
         """
-        Creates a new branch in the underlying database.
+        Creates a new branch.
         """
         pass
 
     @abstractmethod
-    def connect_db_branch(self, branch_name: str, timed: bool = False) -> str:
+    def connect_branch(self, branch_name: str, timed: bool = False) -> str:
         """
-        Connects to an existing branch in the underlying database to allow
-        reading and writing data to that branch.
-        """
-        pass
-
-    @abstractmethod
-    def list_db_branches(self, timed: bool = False) -> set[str]:
-        """
-        Lists all branches in the underlying database.
+        Connects to an existing branch to allow reading and writing data to that
+        branch.
         """
         pass
 
     @abstractmethod
-    def get_current_db_branch(self, timed: bool = False) -> str:
+    def list_branches(self) -> set[str]:
         """
-        Returns the name of the current branch in the underlying database.
+        Lists all existing branches by branch name.
+        Used for debugging/logging/db setup so timing isn't enabled.
+        """
+        pass
+
+    @abstractmethod
+    def get_current_branch(self) -> Tuple[str, str]:
+        """
+        Returns a tuple of the current (branch_name, branch_id).
+        branch_name isn't always unique and should be used for debugging/logging
+        purposes only, while branch_id is needed to uniquely identify the
+        current branch.
+        Used for debugging/logging/db setup so timing isn't enabled.
         """
         pass
 
@@ -69,13 +75,6 @@ class DBToolSuite(ABC):
         """
         self.check_connection()
         self.conn.commit()
-
-    def create_db(self, db_name: str) -> None:
-        """
-        Creates a new database in the underlying Postgres server.
-        """
-        query = f"CREATE DATABASE {db_name};"
-        self.run_sql_query(query)
 
     def delete_db(self, db_name: str) -> None:
         """

@@ -45,7 +45,7 @@ class DoltToolSuite(DBToolSuite):
     def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
         super().__init__(connection, timed_cursor=timed_cursor)
 
-    def create_db_branch(
+    def create_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
     ) -> bool:
         """
@@ -56,7 +56,7 @@ class DoltToolSuite(DBToolSuite):
         super().commit_changes()
         return True
 
-    def connect_db_branch(self, branch_name: str, timed: bool = False) -> None:
+    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
         """
         Connects to an existing branch in the Dolt database to allow reads and
         writes on that branch.
@@ -64,14 +64,16 @@ class DoltToolSuite(DBToolSuite):
         cmd = f"call dolt_checkout('{branch_name}');"
         super().run_sql_query(cmd, timed=timed)
 
-    def list_db_branches(self, timed: bool = False) -> list[str]:
+    def list_branches(self) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"
-        return [branch[0] for branch in super().run_sql_query(cmd, timed=timed)]
+        return [branch[0] for branch in super().run_sql_query(cmd, timed=False)]
 
-    def get_current_db_branch(self, timed: bool = False) -> str:
+    def get_current_branch(self) -> str:
+        # TODO: Consider cache the current branch name to avoid querying.
         cmd = "SELECT active_branch();"
-        result = super().run_sql_query(cmd, timed=timed)
-        return result[0][0]
+        result = super().run_sql_query(cmd, timed=False)
+        # Dolt's branch name is unique and can be used as an ID.
+        return (result[0][0], result[0][0])
 
     def commit_changes(self, message: str = "", timed: bool = False) -> None:
         try:

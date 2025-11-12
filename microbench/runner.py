@@ -197,8 +197,6 @@ class BenchmarkSuite:
             self.db_task.connect_branch(branch_name, timed=False)
         print(f"Running from branch {self.db_task.get_current_branch()}")
 
-        total_rows = self.db_task.get_table_row_count(table_name)
-        print(f"Table {table_name} has {total_rows} rows.")
         self.db_task.point_read(
             table_name,
             sampling_rate=sampling_rate,
@@ -212,6 +210,7 @@ class BenchmarkSuite:
             f"Average read execution time for table {table_name}: "
             f"{timer.get_average(cursor_execute_elapsed):.6f} seconds, "
             f"over {len(cursor_execute_elapsed)} samples\n"
+            f"\t ----> {[round(t, 3) for t in cursor_execute_elapsed]}\n"
             f"Average fetchall time for table {table_name}: "
             f"{timer.get_average(cursor_fetch_elapsed):.6f} seconds, "
             f"over {len(cursor_fetch_elapsed)} samples\n"
@@ -274,8 +273,6 @@ class BenchmarkSuite:
 
         benchmark_tables = table_names if table_names else self.preloaded_tables
         for table in benchmark_tables:
-            total_rows = self.db_task.get_table_row_count(table)
-            print(f"Table {table} has {total_rows} rows.")
             self.db_task.update(
                 table,
                 sampling_rate=sampling_rate,
@@ -306,12 +303,14 @@ class BenchmarkSuite:
         )
         print(RenderTree(root))
 
-        # pick a random table to do minimal inserts
+        # pick a random table to do inserts
         all_tables = self.db_task.get_all_tables()
         insert_table = random.choice(all_tables)
         current_visited = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
+            # We don't time the branch switching for insert since it's part of
+            # setup.
             self.db_task.connect_branch(node.name, timed=False)
             if insert_per_branch > 0:
                 self.db_task.insert(

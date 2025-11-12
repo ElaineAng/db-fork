@@ -31,18 +31,18 @@ if __name__ == "__main__":
 
         available_tools = [
             StructuredTool.from_function(
-                func=db_tools.create_db_branch,
-                name="create_db_branch",
+                func=db_tools.create_branch,
+                name="create_branch",
                 description="Creates a new branch in the database and allow reading and writing data to that branch.",
             ),
             StructuredTool.from_function(
-                func=db_tools.connect_db_branch,
-                name="connect_db_branch",
+                func=db_tools.connect_branch,
+                name="connect_branch",
                 description="Connects to an existing branch in the database to allow reading and writing data to that branch.",
             ),
             StructuredTool.from_function(
-                func=db_tools.list_db_branches,
-                name="list_db_branches",
+                func=db_tools.list_branches,
+                name="list_branches",
                 description="With the current connection context, lists all branches in the database.",
             ),
             StructuredTool.from_function(

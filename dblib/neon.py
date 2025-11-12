@@ -128,7 +128,7 @@ class NeonToolSuite(DBToolSuite):
         endpoint = f"projects/{self.project_id}/branches/{branch_id}/databases/{db_name}"
         self.__class__._request("DELETE", endpoint)
 
-    def create_db_branch(
+    def create_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
     ) -> None:
         """
@@ -162,7 +162,7 @@ class NeonToolSuite(DBToolSuite):
             print(f"Failed to create branch '{branch_name}': {e}")
             return False
 
-    def connect_db_branch(self, branch_name: str, timed: bool = False) -> None:
+    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
         """
         Connects to an existing branch and a specific database to allow reads
         and writes on that branch.
@@ -195,10 +195,10 @@ class NeonToolSuite(DBToolSuite):
         self.current_branch_name = branch_name
         self.current_branch_id = branch_id
 
-    def list_db_branches(self, timed: bool = False) -> list[str]:
+    def list_branches(self) -> list[str]:
         return list(self._get_neon_branches().keys())
 
-    def get_current_db_branch(self, timed: bool = False) -> Tuple[str, str]:
+    def get_current_branch(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
 
     def delete_db(self, db_name: str) -> None:
