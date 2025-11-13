@@ -21,6 +21,8 @@ dependencies = [
     "langgraph",
     "langchain-google-genai",
     "langchain-openai",
+    "scipy",
+    "matplotlib",
 ]
 
 [tool.setuptools]

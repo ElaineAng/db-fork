@@ -355,24 +355,26 @@ class BenchmarkSuite:
                 "Average branch creation time: "
                 f"{1000 * timer.get_average(execute_elapsed):.3f} milliseconds, "
                 f"over {len(execute_elapsed)} samples\n"
-                f"\t ----> {execute_elapsed}"
+                f"\t ----> in ms: {[round(t * 1000, 3) for t in execute_elapsed]}\n"
             )
             print(
                 "Average commit time: "
                 f"{1000 * timer.get_average(commit_elapsed):.3f} milliseconds, "
                 f"over {len(commit_elapsed)} samples\n"
-                f"\t ----> {commit_elapsed}"
+                f"\t ----> in ms: {[round(t * 1000, 3) for t in commit_elapsed]}\n"
             )
         if time_inserts:
             print(
                 "Average insertion execution time: "
                 f"{timer.get_average(execute_elapsed):.6f} seconds, "
                 f"over {len(execute_elapsed)} samples\n"
+                f"\t ----> in ms: {[round(t * 1000, 3) for t in execute_elapsed]}\n"
             )
             print(
                 "Average insertion commit time: "
                 f"{timer.get_average(commit_elapsed):.6f} seconds, "
                 f"over {len(commit_elapsed)} samples\n"
+                f"\t ----> in ms: {[round(t * 1000, 3) for t in commit_elapsed]}\n"
             )
         self.timer.reset()
         return insert_table
