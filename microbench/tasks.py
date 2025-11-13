@@ -103,7 +103,7 @@ class DatabaseTask:
             raise ValueError(f"Table {table_name} has no primary key.")
 
         # sort pk_columns by ordinal position
-        pk_columns.sort(key=lambda x: x[1])
+        pk_columns.sort(key=lambda x: -x[1])
 
         return [col[0] for col in pk_columns]
 

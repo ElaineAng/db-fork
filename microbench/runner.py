@@ -56,8 +56,8 @@ class BenchmarkSuite:
 
     def __enter__(self) -> Self:
         db_tools = None
-        # NOTE: create_benchmark_database() must be called before this method
-        # returns.
+        # NOTE: If self.require_db_setup, create_benchmark_database() must be
+        # called before this method returns.
         try:
             if self.backend == "dolt":
                 default_uri = DoltToolSuite.get_default_connection_uri()
@@ -97,8 +97,8 @@ class BenchmarkSuite:
                     self.root_branch_name,
                     self._db_name,
                 )
-            elif self.backend == "tiger":
-                pass
+            else:
+                raise ValueError(f"Unsupported backend: {self.backend}")
 
             self.db_task = DatabaseTask(
                 db_tools=db_tools,
@@ -295,6 +295,7 @@ class BenchmarkSuite:
         tree_depth: int = 6,
         degree: int = 2,
         insert_per_branch: int = 1,
+        table_name: str = "",
         time_branching: bool = False,
         time_inserts: bool = False,
     ) -> str:
@@ -307,7 +308,10 @@ class BenchmarkSuite:
 
         # pick a random table to do inserts
         all_tables = self.db_task.get_all_tables()
-        insert_table = random.choice(all_tables)
+        if table_name and table_name in all_tables:
+            insert_table = table_name
+        else:
+            insert_table = random.choice(all_tables)
         current_visited = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
@@ -385,13 +389,18 @@ class BenchmarkSuite:
         )
 
     def branch_insert_bench(
-        self, tree_depth: int = 10, degree: int = 2, insert_per_branch: int = 10
+        self,
+        tree_depth: int = 10,
+        degree: int = 2,
+        insert_per_branch: int = 10,
+        table_name: str = "",
     ) -> None:
         print("\n ====== Running branch insert benchmark...\n", flush=True)
         self.branch_insert_op(
             tree_depth=tree_depth,
             degree=degree,
             insert_per_branch=insert_per_branch,
+            table_name=table_name,
             time_branching=False,
             time_inserts=True,
         )
@@ -405,14 +414,16 @@ class BenchmarkSuite:
         tree_depth: int = 10,
         degree: int = 2,
         insert_per_branch: int = 10,
+        intended_table_name: str = "",
     ) -> None:
-        table_name = self.branch_insert_op(
+        final_table_name = self.branch_insert_op(
             tree_depth=tree_depth,
             degree=degree,
             insert_per_branch=insert_per_branch,
+            table_name=intended_table_name,
         )
         self.read_skip_setup(
-            table_name,
+            final_table_name,
             sampling_rate,
             max_sample_size,
             dist_lambda,
@@ -492,7 +503,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--table_name",
         type=str,
-        help="Name of the table to run the read benchmark on.",
+        help="Name of the table to run the benchmark on.",
     )
 
     parser.add_argument(
@@ -588,6 +599,7 @@ if __name__ == "__main__":
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
+                table_name=args.table_name or "",
             )
 
         elif args.branch_insert_read:
@@ -603,6 +615,7 @@ if __name__ == "__main__":
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
+                intended_table_name=args.table_name or "",
             )
         elif args.read_no_setup:
             single_task_bench.read_skip_setup(
