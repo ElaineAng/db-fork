@@ -1,6 +1,9 @@
+import os
 import random
+import pickle
 from typing import Callable, Any, Tuple
 from pathlib import Path
+from datetime import datetime
 
 from dblib.db_api import DBToolSuite
 from microbench.datagen import DynamicDataGenerator
@@ -16,11 +19,30 @@ class DatabaseTask:
         # Cache of all tables per branch, lazy init.
         self.all_tables = []
 
+        # File that stores all keys inserted during the current run, in
+        # insertion order. This is a little "meh" since technically this
+        # should be done in postgres itself if we add an additional tracking
+        # table or an additional pk column, but for simplicity we do it here.
+        # WARNING: This currently doesn't consider the data being bulk-loaded.
+        self.inserted_keys_file = None
+
+        # All inserted primary keys in the current run, to avoid duplicates.
+        # Techincally the primary keys only need to be unique per branch, but
+        # to simplify our setup we make them unique globally.
+        self.all_inserted_pks = set()
+
     def setup_db(self, db_name: str, db_schema: str) -> None:
         self.db_tools.initialize_schema(db_schema)
         self.db_tools.commit_changes("Initialized database schema.")
 
     def delete_db(self, db_name: str) -> None:
+        if self.inserted_keys_file:
+            self.inserted_keys_file.close()
+            print(
+                f"Removing inserted keys file {self.inserted_keys_file.name}..."
+            )
+            os.remove(os.path.join(os.curdir, self.inserted_keys_file.name))
+            self.inserted_keys_file = None
         self.db_tools.delete_db(db_name)
 
     def get_all_tables(self) -> list[str]:
@@ -131,6 +153,7 @@ class DatabaseTask:
         max_sampling_size: int,
         dist_lambda: Callable[..., list[float]],  # The distribution to call,
         sort_idx: int,
+        pk_file: str = "",
     ) -> None:
         """
         Performs reads on a skewed sample of keys using the Beta distribution.
@@ -139,24 +162,43 @@ class DatabaseTask:
             table_name: The name of the table to read from.
             sampling_rate: The fraction (0.0 to 1.0) of total keys to form the reading pool.
             dist_lambda: The distribution function to use for sampling.
-            sort_idx: The index of the PK column to sort by before sampling.
+            sort_idx: The index of the PK column to sort by before sampling. -1 if we don't sort the PKs.
+            pk_file: If provided, primary keys orders should follow the ones defined in this file.
         """
 
+        _, branch_id = self.get_current_branch()
         pk_columns_name = self.get_pk_columns_name(table_name)
+        print(f"Loading primary keys for table '{table_name}' from DB...")
         pk_set = self.get_pk_values_for_table(table_name, pk_columns_name)
         if not pk_set:
             print(" Table is empty. No rows to read.")
             return
 
-        # Convert the set of primary keys to a list for indexing
-        # CAREFUL: This could be expensive for very large tables since we are
-        # storing everything in memory.
-        pk_list = list(pk_set)
+        # Get a list of all pks for indexing.
+        # CAREFUL: This could be expensive for very large tables since we
+        # are storing everything in memory.
+        pk_list = []
+        if pk_file or self.inserted_keys_file:
+            pk_file = pk_file or self.inserted_keys_file.name
+            print(f"Loading primary keys orders from file '{pk_file}'...")
+            with open(pk_file, "rb") as f:
+                while True:
+                    try:
+                        pk_values = pickle.load(f)
+                        if pk_values in pk_set:
+                            pk_list.append(pk_values)
+                    except EOFError:
+                        break
+            print(f" Loaded {len(pk_list)} primary keys from file.")
+        else:
+            # Just convert directly. This might be of random order.
+            pk_list = list(pk_set)
 
         # Sort by first PK column, this could be a argument if needed.
-        sampling.sort_population(pk_list, sort_idx)
+        if sort_idx >= 0:
+            sampling.sort_population(pk_list, sort_idx)
         skewed_indices = sampling.get_sampled_indices(
-            population_size=len(pk_set),
+            population_size=len(pk_list),
             sampling_rate=sampling_rate,
             max_sampling_size=max_sampling_size,
             dist_lambda=dist_lambda,
@@ -189,13 +231,20 @@ class DatabaseTask:
 
         pk_columns = self.get_pk_columns_name(table_name)
 
-        pk_set = self.get_pk_values_for_table(table_name, pk_columns)
         self.load_datagen_for_table(table_name)
 
-        # print(
-        #     f"Generating and inserting {num_rows} unique rows into '{table_name}'..."
-        # )
+        if not self.inserted_keys_file or self.inserted_keys_file.closed:
+            filename = (
+                self.inserted_keys_file.name
+                if self.inserted_keys_file
+                else (
+                    f"rundata/inserted_keys_{table_name}_"
+                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+            )
+            self.inserted_keys_file = open(filename, "ab")
 
+        branch_name, branch_id = self.get_current_branch()
         inserted_count = 0
         # Safety break to prevent infinite loops on high PK collision rates.
         for _ in range(num_rows * 5):
@@ -206,17 +255,19 @@ class DatabaseTask:
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             # Generated a new unique row, insert it.
-            if pk_tuple not in pk_set:
+            if pk_tuple not in self.all_inserted_pks:
+                pickle.dump(pk_tuple, self.inserted_keys_file)
                 # Add the new pk to set.
-                pk_set.add(pk_tuple)
+                self.all_inserted_pks.add(pk_tuple)
                 self.db_tools.run_sql_query(insert_sql, row_data, timed=timed)
                 inserted_count += 1
 
+        self.inserted_keys_file.close()
+
         # Commit all insertions at once.
-        current_branch = self.get_current_branch()
         self.db_tools.commit_changes(
-            f"Inserted {inserted_count} rows on branch {current_branch[0]}, "
-            f"id {current_branch[1]}.",
+            f"Inserted {inserted_count} rows on branch {branch_name}, "
+            f"id {branch_id}.",
             timed=timed,
         )
         if inserted_count < num_rows:

@@ -190,8 +190,9 @@ class BenchmarkSuite:
         sampling_rate: float = 0.01,
         max_sample_size: int = 100,
         dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = 0,
+        sort_idx: int = -1,
         branch_name: str = "",
+        pk_file: str = "",
     ) -> None:
         if branch_name:
             self.db_task.connect_branch(branch_name, timed=False)
@@ -203,16 +204,17 @@ class BenchmarkSuite:
             max_sampling_size=max_sample_size,
             dist_lambda=dist_lambda,
             sort_idx=sort_idx,
+            pk_file=pk_file,
         )
         cursor_execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
         cursor_fetch_elapsed = self.timer.report_cursor_elapsed(tag="fetchall")
         print(
             f"Average read execution time for table {table_name}: "
-            f"{timer.get_average(cursor_execute_elapsed):.6f} seconds, "
+            f"{1000 * timer.get_average(cursor_execute_elapsed):.3f} milliseconds, "
             f"over {len(cursor_execute_elapsed)} samples\n"
-            f"\t ----> {[round(t, 3) for t in cursor_execute_elapsed]}\n"
+            f"\t ----> in ms: {[round(t * 1000, 3) for t in cursor_execute_elapsed]}\n"
             f"Average fetchall time for table {table_name}: "
-            f"{timer.get_average(cursor_fetch_elapsed):.6f} seconds, "
+            f"{1000 * timer.get_average(cursor_fetch_elapsed):.3f} milliseconds, "
             f"over {len(cursor_fetch_elapsed)} samples\n"
         )
         self.timer.reset()
@@ -249,10 +251,10 @@ class BenchmarkSuite:
             commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
             print(
                 f"Average insertion execution time for table {table}: "
-                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"{1000 * timer.get_average(execute_elapsed):.3f} milliseconds, "
                 f"over {len(execute_elapsed)} samples\n"
                 f"Average insertion commit time for table {table}: "
-                f"{timer.get_average(commit_elapsed):.6f} seconds, "
+                f"{1000 * timer.get_average(commit_elapsed):.3f} milliseconds, "
                 f"over {len(commit_elapsed)} samples\n"
             )
             self.timer.reset()
@@ -335,24 +337,25 @@ class BenchmarkSuite:
             f"current one for following operations: {node.name}"
         )
         execute_elapsed = []
-        if self.backend == "dolt":
-            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
-        elif self.backend == "neon":
+        if time_branching and self.backend == "neon":
             execute_elapsed = self.timer.report_cursor_elapsed(
                 tag="neon_branching"
             )
+        else:
+            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+
         commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
 
         if time_branching:
             print(
                 "Average branch creation time: "
-                f"{timer.get_average(execute_elapsed):.6f} seconds, "
+                f"{1000 * timer.get_average(execute_elapsed):.3f} milliseconds, "
                 f"over {len(execute_elapsed)} samples\n"
                 f"\t ----> {execute_elapsed}"
             )
             print(
                 "Average commit time: "
-                f"{timer.get_average(commit_elapsed):.6f} seconds, "
+                f"{1000 * timer.get_average(commit_elapsed):.3f} milliseconds, "
                 f"over {len(commit_elapsed)} samples\n"
                 f"\t ----> {commit_elapsed}"
             )
@@ -552,6 +555,13 @@ if __name__ == "__main__":
         help="Sampling rate for read benchmarks.",
     )
 
+    parser.add_argument(
+        "--pk_file",
+        type=str,
+        default="",
+        help="Path to the file containing primary keys to read from.",
+    )
+
     args = parser.parse_args()
 
     with BenchmarkSuite(
@@ -606,4 +616,5 @@ if __name__ == "__main__":
                 ),
                 sort_idx=args.sort_idx or 0,
                 branch_name=args.branch_name if args.branch_name else "",
+                pk_file=args.pk_file,
             )
