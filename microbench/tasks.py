@@ -192,10 +192,15 @@ class DatabaseTask:
             print(f" Loaded {len(pk_list)} primary keys from file.")
         else:
             # Just convert directly. This might be of random order.
+            print(" Loading primary keys from DB in any order...")
             pk_list = list(pk_set)
+            if sort_idx == -1:
+                print(" Sorting primary keys by first column...")
+                sampling.sort_population(pk_list, 0)
 
         # Sort by first PK column, this could be a argument if needed.
         if sort_idx >= 0:
+            print(f" Sorting primary keys by column index {sort_idx}...")
             sampling.sort_population(pk_list, sort_idx)
         skewed_indices = sampling.get_sampled_indices(
             population_size=len(pk_list),

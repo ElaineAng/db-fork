@@ -43,15 +43,20 @@ class BenchmarkSuite:
         backend: str,
         db_name: str = "microbench",
         delete_db_after_done: bool = True,
-        require_setup: bool = True,
-        preload_data_dir: str = "",
+        require_db_setup: bool = True,
+        neon_project_id: str = "",
     ):
         self.backend = backend
         self._db_name = db_name
         self.delete_db_after_done = delete_db_after_done
-        self.require_db_setup = require_setup
-        self.preload_data_dir = preload_data_dir
+        # Whether we need to create and setup the benchmark database. If false,
+        # we assume the database is already created and setup.
+        self.require_db_setup = require_db_setup
         self.preloaded_tables = set()
+
+        # Use the provided Neon project ID if we are not setting up a new
+        # database.
+        self._neon_project_id = neon_project_id if not require_db_setup else ""
 
         self.timer = timer.Timer()
 
@@ -69,25 +74,39 @@ class BenchmarkSuite:
                 )
                 self.root_branch_name = "main"
             elif self.backend == "neon":
-                # The default neon uri depends on the created project, so we create
-                # the project first.
-                neon_project = NeonToolSuite.create_neon_project(
-                    f"project_{self._db_name}"
-                )
-                self._neon_project_id = neon_project["project"]["id"]
-                print(f"Neon project ID: {self._neon_project_id}")
-                default_uri = (
-                    neon_project["connection_uris"][0]["connection_uri"]
-                    if neon_project["connection_uris"]
-                    else ""
-                )
-                print(f"Default Neon connection URI: {default_uri}")
-                # Create the benchmark database on the root branch.
-                self.create_benchmark_database(default_uri)
+                default_branch_id = ""
+                if self.require_db_setup:
+                    # If the database hasn't been setup yet, the default neon
+                    # uri depends on the created project, so we create the
+                    # project first.
+                    neon_project = NeonToolSuite.create_neon_project(
+                        f"project_{self._db_name}"
+                    )
+                    self._neon_project_id = neon_project["project"]["id"]
+                    print(f"Neon project ID: {self._neon_project_id}")
+                    default_uri = (
+                        neon_project["connection_uris"][0]["connection_uri"]
+                        if neon_project["connection_uris"]
+                        else ""
+                    )
+                    print(f"Default Neon connection URI: {default_uri}")
+                    # Create the benchmark database on the root branch.
+                    self.create_benchmark_database(default_uri)
+                    default_branch_id = neon_project["branch"]["id"]
+                    self.root_branch_name = neon_project["branch"]["name"]
+                else:
+                    # Otherwise we try to get the default branch ID
+                    # and name from the specified project.
+                    proj_branches = NeonToolSuite.get_project_branches(
+                        self._neon_project_id
+                    )
+                    for branch in proj_branches["branches"]:
+                        if branch["default"]:
+                            self.root_branch_name = branch["name"]
+                            default_branch_id = branch["id"]
+                            break
 
                 # Now get the connection uri for the benchmark database.
-                default_branch_id = neon_project["branch"]["id"]
-                self.root_branch_name = neon_project["branch"]["name"]
                 print(
                     f"Default Neon branch name: {self.root_branch_name}, ID: {default_branch_id}"
                 )
@@ -214,35 +233,13 @@ class BenchmarkSuite:
             f"{1000 * timer.get_average(cursor_execute_elapsed):.3f} milliseconds, "
             f"over {len(cursor_execute_elapsed)} samples\n"
             f"\t ----> in ms: {[round(t * 1000, 3) for t in cursor_execute_elapsed]}\n"
+            f"\t ----> with a max of {max(cursor_execute_elapsed) * 1000:.3f} ms "
+            f"and a min of {min(cursor_execute_elapsed) * 1000:.3f} ms\n"
             f"Average fetchall time for table {table_name}: "
             f"{1000 * timer.get_average(cursor_fetch_elapsed):.3f} milliseconds, "
             f"over {len(cursor_fetch_elapsed)} samples\n"
         )
         self.timer.reset()
-
-    def read_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_rate: float = 0.01,
-        dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = 0,
-        max_sample_size: int = 500,
-    ) -> None:
-        # Simple read bench requires pre-loaded data.
-        if not self.preload_data_dir:
-            return
-
-        print("\n ====== Running read benchmark...\n", flush=True)
-
-        benchmark_tables = table_names if table_names else self.preloaded_tables
-        for table in benchmark_tables:
-            self.read_skip_setup(
-                table,
-                sampling_rate,
-                max_sample_size,
-                dist_lambda,
-                sort_idx,
-            )
 
     def insert_bench(self, num_inserts: int = 100) -> None:
         print("\n ====== Running insert benchmark...\n", flush=True)
@@ -265,8 +262,8 @@ class BenchmarkSuite:
         table_names: list[str] = [],
         sampling_rate: float = 0.01,
         dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = 0,
-        max_sample_size: int = 500,
+        sort_idx: int = -1,
+        max_sample_size: int = 100,
     ) -> None:
         # Simple update bench requires pre-loaded data.
         if not self.preload_data_dir:
@@ -411,9 +408,9 @@ class BenchmarkSuite:
     def branch_insert_read_bench(
         self,
         sampling_rate: float = 0.01,
-        max_sample_size: int = 500,
+        max_sample_size: int = 100,
         dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = 0,
+        sort_idx: int = -1,
         tree_depth: int = 10,
         degree: int = 2,
         insert_per_branch: int = 10,
@@ -546,14 +543,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--branch_depth",
         type=int,
-        default=6,
+        default=9,
         help="Depth of the branch tree for branch benchmarks.",
     )
 
     parser.add_argument(
         "--branch_degree",
         type=int,
-        default=2,
+        default=1,
         help="Degree of the branch tree for branch benchmarks.",
     )
 
@@ -574,7 +571,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_sample_size",
         type=int,
-        default=10,
+        default=100,
         help="Maximum sample size for read benchmarks.",
     )
 
@@ -592,19 +589,30 @@ if __name__ == "__main__":
         help="Path to the file containing primary keys to read from.",
     )
 
+    parser.add_argument(
+        "--neon_project_id",
+        type=str,
+        default="",
+        help="Neon project ID to connect to when running read_no_setup.",
+    )
+
     args = parser.parse_args()
 
+    # TODO: Consider init BenchmarkSuite with just `args` and has a cleaner
+    # `Init()` method.
     with BenchmarkSuite(
         backend=args.backend,
         db_name="microbench",
         # If we preload data, we most certainly want to keep the database.
         delete_db_after_done=not args.no_cleanup and not args.preload_data_dir,
-        require_setup=not args.read_no_setup,
-        preload_data_dir=args.preload_data_dir,
+        # Specifying read_no_setup means the DB to be read has already been setup.
+        require_db_setup=not args.read_no_setup,
+        neon_project_id=args.neon_project_id if args.read_no_setup else "",
     ) as single_task_bench:
         if not args.read_no_setup:
             single_task_bench.setup_benchmark_database(
-                db_schema_path=args.db_schema_path
+                db_schema_path=args.db_schema_path,
+                preload_data_dir=args.preload_data_dir,
             )
         if args.branch_only:
             single_task_bench.branch_bench(
@@ -632,7 +640,7 @@ if __name__ == "__main__":
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
-                sort_idx=args.sort_idx or 0,
+                sort_idx=args.sort_idx or -1,
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
@@ -648,7 +656,7 @@ if __name__ == "__main__":
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
-                sort_idx=args.sort_idx or 0,
+                sort_idx=args.sort_idx or -1,
                 branch_name=args.branch_name if args.branch_name else "",
                 pk_file=args.pk_file,
             )

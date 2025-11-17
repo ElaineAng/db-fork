@@ -95,6 +95,14 @@ class NeonToolSuite(DBToolSuite):
         response = cls._request("GET", endpoint)
         return response["uri"]
 
+    @classmethod
+    def get_project_branches(cls, project_id: str) -> dict:
+        """
+        Retrieves details of a Neon project by its ID.
+        """
+        endpoint = f"projects/{project_id}/branches"
+        return cls._request("GET", endpoint)
+
     def __init__(
         self,
         connection: _pgconn,
