@@ -517,6 +517,12 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--reuse_exisiting_db",
+        action="store_true",
+        help="Reuse an existing database instead of creating a new one.",
+    )
+
+    parser.add_argument(
         "--table_name",
         type=str,
         help="Name of the table to run the benchmark on.",
@@ -600,16 +606,22 @@ if __name__ == "__main__":
 
     # TODO: Consider init BenchmarkSuite with just `args` and has a cleaner
     # `Init()` method.
+    require_db_setup = not args.read_no_setup or not args.reuse_exisiting_db
+    if args.backend == "neon":
+        assert require_db_setup or args.neon_project_id, (
+            "When reusing existing Neon database, --neon_project_id "
+            "must be provided."
+        )
     with BenchmarkSuite(
         backend=args.backend,
         db_name="microbench",
         # If we preload data, we most certainly want to keep the database.
         delete_db_after_done=not args.no_cleanup and not args.preload_data_dir,
         # Specifying read_no_setup means the DB to be read has already been setup.
-        require_db_setup=not args.read_no_setup,
-        neon_project_id=args.neon_project_id if args.read_no_setup else "",
+        require_db_setup=require_db_setup,
+        neon_project_id=args.neon_project_id,
     ) as single_task_bench:
-        if not args.read_no_setup:
+        if require_db_setup:
             single_task_bench.setup_benchmark_database(
                 db_schema_path=args.db_schema_path,
                 preload_data_dir=args.preload_data_dir,
