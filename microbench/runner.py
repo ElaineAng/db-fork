@@ -430,14 +430,6 @@ class BenchmarkSuite:
             sort_idx,
         )
 
-    def preload_only(self):
-        print("Preloading data for benchmarks only...")
-        if not self.preload_data_dir:
-            raise ValueError(
-                "Preload data directory must be provided to preload data."
-            )
-        self.db_task.preload_db_data(self.preload_data_dir)
-
     def branch_update_bench(self):
         pass
 
@@ -517,7 +509,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--reuse_exisiting_db",
+        "--reuse_existing_db",
         action="store_true",
         help="Reuse an existing database instead of creating a new one.",
     )
@@ -606,17 +598,24 @@ if __name__ == "__main__":
 
     # TODO: Consider init BenchmarkSuite with just `args` and has a cleaner
     # `Init()` method.
-    require_db_setup = not args.read_no_setup or not args.reuse_exisiting_db
+
+    # Decide when we need to setup the database.
+    require_db_setup = not (args.read_no_setup or args.reuse_existing_db)
     if args.backend == "neon":
         assert require_db_setup or args.neon_project_id, (
             "When reusing existing Neon database, --neon_project_id "
             "must be provided."
         )
+    # Decide whether we need to cleanup database after benchmark.
+    delete_db_after_done = not (
+        args.no_cleanup or args.reuse_existing_db or args.preload_only
+    )
+
     with BenchmarkSuite(
         backend=args.backend,
         db_name="microbench",
         # If we preload data, we most certainly want to keep the database.
-        delete_db_after_done=not args.no_cleanup and not args.preload_data_dir,
+        delete_db_after_done=delete_db_after_done,
         # Specifying read_no_setup means the DB to be read has already been setup.
         require_db_setup=require_db_setup,
         neon_project_id=args.neon_project_id,
@@ -624,7 +623,9 @@ if __name__ == "__main__":
         if require_db_setup:
             single_task_bench.setup_benchmark_database(
                 db_schema_path=args.db_schema_path,
-                preload_data_dir=args.preload_data_dir,
+                preload_data_dir=args.preload_data_dir
+                if args.preload_data_dir
+                else "",
             )
         if args.branch_only:
             single_task_bench.branch_bench(
@@ -672,5 +673,3 @@ if __name__ == "__main__":
                 branch_name=args.branch_name if args.branch_name else "",
                 pk_file=args.pk_file,
             )
-        elif args.preload_only:
-            single_task_bench.preload_only()
