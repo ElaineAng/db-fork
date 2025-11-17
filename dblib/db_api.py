@@ -94,7 +94,7 @@ class DBToolSuite(ABC):
                     cur.copy_expert(
                         (
                             f"COPY {table_name} FROM STDIN "
-                            "WITH (FORMAT CSV, DELIMITER '|');"
+                            "WITH (FORMAT CSV, NULL 'null', DELIMITER ',');"
                         ),
                         file=f,
                     )

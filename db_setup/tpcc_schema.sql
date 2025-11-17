@@ -51,7 +51,7 @@ CREATE TABLE customer (
   c_state        CHAR(2),
   c_zip          CHAR(9),
   c_phone        CHAR(16),
-  c_since        TIMESTAMP,
+  c_since        BIGINT,
   c_credit       CHAR(2),
   c_credit_lim   DECIMAL(12, 2),
   c_discount     DECIMAL(4, 4),
@@ -98,7 +98,7 @@ CREATE TABLE orders (
   o_d_id       SMALLINT NOT NULL,
   o_w_id       SMALLINT NOT NULL,
   o_c_id       INT,
-  o_entry_d    TIMESTAMP,
+  o_entry_d    BIGINT,
   o_carrier_id SMALLINT,
   o_ol_cnt     SMALLINT,
   o_all_local  SMALLINT
@@ -119,7 +119,7 @@ CREATE TABLE order_line (
   ol_number      SMALLINT NOT NULL,
   ol_i_id        INT,
   ol_supply_w_id SMALLINT,
-  ol_delivery_d  TIMESTAMP,
+  ol_delivery_d  BIGINT,
   ol_quantity    SMALLINT,
   ol_amount      DECIMAL(6, 2),
   ol_dist_info   CHAR(24)

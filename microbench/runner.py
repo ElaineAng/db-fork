@@ -44,12 +44,13 @@ class BenchmarkSuite:
         db_name: str = "microbench",
         delete_db_after_done: bool = True,
         require_setup: bool = True,
+        preload_data_dir: str = "",
     ):
         self.backend = backend
         self._db_name = db_name
         self.delete_db_after_done = delete_db_after_done
         self.require_db_setup = require_setup
-        self.preload_data_dir = ""
+        self.preload_data_dir = preload_data_dir
         self.preloaded_tables = set()
 
         self.timer = timer.Timer()
@@ -432,6 +433,14 @@ class BenchmarkSuite:
             sort_idx,
         )
 
+    def preload_only(self):
+        print("Preloading data for benchmarks only...")
+        if not self.preload_data_dir:
+            raise ValueError(
+                "Preload data directory must be provided to preload data."
+            )
+        self.db_task.preload_db_data(self.preload_data_dir)
+
     def branch_update_bench(self):
         pass
 
@@ -453,7 +462,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--preload_data_dir",
-        default="/tmp/db-fork/",
+        default="",
         help="Path to the directory with data files to preload.",
     )
 
@@ -500,6 +509,14 @@ if __name__ == "__main__":
             "Run read benchmark without preloading data. This assumes data is "
             "already present. --table_name must be provided."
         ),
+    )
+
+    parser.add_argument(
+        "--preload_only",
+        action="store_true",
+        help="Only preload data without running any benchmarks. This requires "
+        "--preload_data_dir being set to a valid directory containing a list"
+        "of CSV files matching the tables in the schema.",
     )
 
     parser.add_argument(
@@ -580,8 +597,10 @@ if __name__ == "__main__":
     with BenchmarkSuite(
         backend=args.backend,
         db_name="microbench",
-        delete_db_after_done=not args.no_cleanup,
+        # If we preload data, we most certainly want to keep the database.
+        delete_db_after_done=not args.no_cleanup and not args.preload_data_dir,
         require_setup=not args.read_no_setup,
+        preload_data_dir=args.preload_data_dir,
     ) as single_task_bench:
         if not args.read_no_setup:
             single_task_bench.setup_benchmark_database(
@@ -633,3 +652,5 @@ if __name__ == "__main__":
                 branch_name=args.branch_name if args.branch_name else "",
                 pk_file=args.pk_file,
             )
+        elif args.preload_only:
+            single_task_bench.preload_only()
