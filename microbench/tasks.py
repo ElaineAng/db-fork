@@ -31,6 +31,8 @@ class DatabaseTask:
         # to simplify our setup we make them unique globally.
         self.all_inserted_pks = set()
 
+        self.considered_existing_pks = False
+
     def setup_db(self, db_name: str, db_schema: str) -> None:
         self.db_tools.initialize_schema(db_schema)
         self.db_tools.commit_changes("Initialized database schema.")
@@ -131,6 +133,58 @@ class DatabaseTask:
         print(f" Loaded {len(all_pks)} primary keys.")
         return set(all_pks)
 
+    def sample_keys_for_table(
+        self,
+        table_name: str,
+        pk_columns_name: list[str],
+        sampling_args: sampling.SamplingArgs,
+        pk_file: str = "",
+    ) -> Tuple[list[tuple], list[int]]:
+        pk_set = self.get_pk_values_for_table(table_name, pk_columns_name)
+        if not pk_set:
+            print(" Table is empty. No rows to read.")
+            return
+
+        # Get a list of all pks for indexing.
+        # CAREFUL: This could be expensive for very large tables since we
+        # are storing everything in memory.
+        pk_list = []
+        if pk_file or self.inserted_keys_file:
+            pk_file = pk_file or self.inserted_keys_file.name
+            print(f"Loading primary key orders from file '{pk_file}'...")
+            with open(pk_file, "rb") as f:
+                while True:
+                    try:
+                        pk_values = pickle.load(f)
+                        if pk_values in pk_set:
+                            pk_list.append(pk_values)
+                    except EOFError:
+                        break
+            print(f" Loaded {len(pk_list)} primary keys from file.")
+        else:
+            # Just convert directly. This might be of random order.
+            print(" Loading primary keys from DB in any order...")
+            pk_list = list(pk_set)
+            if sampling_args.sort_idx == -1:
+                print(" Sorting primary keys by first column...")
+                sampling.sort_population(pk_list, 0)
+
+        # Sort by first PK column, this could be an argument if needed.
+        if sampling_args.sort_idx >= 0:
+            print(
+                f" Sorting primary keys by column index {sampling_args.sort_idx}..."
+            )
+            sampling.sort_population(pk_list, sampling_args.sort_idx)
+        else:
+            print("No additional sorting of primary keys applied.")
+        skewed_indices = sampling.get_sampled_indices(
+            population_size=len(pk_list),
+            sampling_rate=sampling_args.sampling_rate,
+            max_sampling_size=sampling_args.max_sampling_size,
+            dist_lambda=sampling_args.distribution,
+        )
+        return pk_list, skewed_indices
+
     def load_datagen_for_table(self, table_name: str) -> None:
         """
         Loads the DDL schema for the specified table and initializes the data
@@ -149,10 +203,7 @@ class DatabaseTask:
     def point_read(
         self,
         table_name: str,
-        sampling_rate: float,
-        max_sampling_size: int,
-        dist_lambda: Callable[..., list[float]],  # The distribution to call,
-        sort_idx: int,
+        sampling_args: sampling.SamplingArgs,
         pk_file: str = "",
     ) -> None:
         """
@@ -160,53 +211,16 @@ class DatabaseTask:
 
         Args:
             table_name: The name of the table to read from.
-            sampling_rate: The fraction (0.0 to 1.0) of total keys to form the reading pool.
-            dist_lambda: The distribution function to use for sampling.
-            sort_idx: The index of the PK column to sort by before sampling. -1 if we don't sort the PKs.
-            pk_file: If provided, primary keys orders should follow the ones defined in this file.
+            sampling_args: The sampling arguments to use for selecting keys.
+            pk_file: If provided, primary keys orders should follow the ones
+                     defined in this file. This is useful when we want to do a
+                     read only benchmark without any inserts.
         """
-
-        _, branch_id = self.get_current_branch()
         pk_columns_name = self.get_pk_columns_name(table_name)
         print(f"Loading primary keys for table '{table_name}' from DB...")
-        pk_set = self.get_pk_values_for_table(table_name, pk_columns_name)
-        if not pk_set:
-            print(" Table is empty. No rows to read.")
-            return
 
-        # Get a list of all pks for indexing.
-        # CAREFUL: This could be expensive for very large tables since we
-        # are storing everything in memory.
-        pk_list = []
-        if pk_file or self.inserted_keys_file:
-            pk_file = pk_file or self.inserted_keys_file.name
-            print(f"Loading primary keys orders from file '{pk_file}'...")
-            with open(pk_file, "rb") as f:
-                while True:
-                    try:
-                        pk_values = pickle.load(f)
-                        if pk_values in pk_set:
-                            pk_list.append(pk_values)
-                    except EOFError:
-                        break
-            print(f" Loaded {len(pk_list)} primary keys from file.")
-        else:
-            # Just convert directly. This might be of random order.
-            print(" Loading primary keys from DB in any order...")
-            pk_list = list(pk_set)
-            if sort_idx == -1:
-                print(" Sorting primary keys by first column...")
-                sampling.sort_population(pk_list, 0)
-
-        # Sort by first PK column, this could be a argument if needed.
-        if sort_idx >= 0:
-            print(f" Sorting primary keys by column index {sort_idx}...")
-            sampling.sort_population(pk_list, sort_idx)
-        skewed_indices = sampling.get_sampled_indices(
-            population_size=len(pk_list),
-            sampling_rate=sampling_rate,
-            max_sampling_size=max_sampling_size,
-            dist_lambda=dist_lambda,
+        pk_list, skewed_indices = self.sample_keys_for_table(
+            table_name, pk_columns_name, sampling_args, pk_file
         )
 
         # Now build the read queries for the timed connection to execute.
@@ -248,6 +262,18 @@ class DatabaseTask:
                 )
             )
             self.inserted_keys_file = open(filename, "ab")
+
+        if not self.considered_existing_pks:
+            existing_pks = self.get_pk_values_for_table(table_name, pk_columns)
+            self.all_inserted_pks = self.all_inserted_pks.union(existing_pks)
+            for pk in existing_pks:
+                pickle.dump(pk, self.inserted_keys_file)
+            self.inserted_keys_file.flush()
+            print(
+                f" Loaded {len(existing_pks)} existing primary keys from DB and"
+                f" writing to file {self.inserted_keys_file.name}."
+            )
+            self.considered_existing_pks = True
 
         branch_name, branch_id = self.get_current_branch()
         inserted_count = 0

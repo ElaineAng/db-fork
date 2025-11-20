@@ -1,4 +1,19 @@
+from typing import Callable
 import numpy
+
+
+class SamplingArgs:
+    def __init__(
+        self,
+        sampling_rate: float,
+        max_sampling_size: int,
+        distribution: Callable[..., list[float]],
+        sort_idx: int,
+    ):
+        self.sampling_rate = sampling_rate
+        self.max_sampling_size = max_sampling_size
+        self.distribution = distribution
+        self.sort_idx = sort_idx
 
 
 # ================= Distribution Functions =================
@@ -8,15 +23,24 @@ def beta_distribution(sample_size, alpha, beta):
     """
     Generate skewed values using Beta distribution (output is [0, 1])
     """
-    skew_type = "uniform"
+    skew_type, sampling_region = "uniform", "middle indices"
     if alpha < beta:
-        skew_type = f"right-skewed (a={alpha}, b={beta})"
+        skew_type, sampling_region = (
+            f"right-skewed (a={alpha}, b={beta})",
+            "lower indices",
+        )
     elif alpha > beta:
-        skew_type = f"left-skewed (a={alpha}, b={beta})"
+        skew_type, sampling_region = (
+            f"left-skewed (a={alpha}, b={beta})",
+            "higher indices",
+        )
 
-    print(f"Using {skew_type} distribution...")
+    print(f"Using {skew_type} distribution, sampling from {sampling_region}...")
 
-    return numpy.random.beta(a=alpha, b=beta, size=sample_size)
+    dist = numpy.random.beta(a=alpha, b=beta, size=sample_size)
+    dist.sort()
+    print(dist)
+    return dist
 
 
 # =================== Sampling Utils =======================
@@ -35,7 +59,7 @@ def sort_population(population: list[tuple], idx: int) -> None:
 
 def get_sampled_indices(
     population_size, sampling_rate, max_sampling_size, dist_lambda
-):
+) -> list[int]:
     """
     Generates skewed sample indices based on the provided distribution function.
 

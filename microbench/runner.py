@@ -207,10 +207,7 @@ class BenchmarkSuite:
     def read_skip_setup(
         self,
         table_name: str = "",
-        sampling_rate: float = 0.01,
-        max_sample_size: int = 100,
-        dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = -1,
+        sampling_args: sampling.SamplingArgs = None,
         branch_name: str = "",
         pk_file: str = "",
     ) -> None:
@@ -220,10 +217,7 @@ class BenchmarkSuite:
 
         self.db_task.point_read(
             table_name,
-            sampling_rate=sampling_rate,
-            max_sampling_size=max_sample_size,
-            dist_lambda=dist_lambda,
-            sort_idx=sort_idx,
+            sampling_args=sampling_args,
             pk_file=pk_file,
         )
         cursor_execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
@@ -407,10 +401,7 @@ class BenchmarkSuite:
 
     def branch_insert_read_bench(
         self,
-        sampling_rate: float = 0.01,
-        max_sample_size: int = 100,
-        dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = -1,
+        sampling_args: sampling.SamplingArgs = None,
         tree_depth: int = 10,
         degree: int = 2,
         insert_per_branch: int = 10,
@@ -422,13 +413,7 @@ class BenchmarkSuite:
             insert_per_branch=insert_per_branch,
             table_name=intended_table_name,
         )
-        self.read_skip_setup(
-            final_table_name,
-            sampling_rate,
-            max_sample_size,
-            dist_lambda,
-            sort_idx,
-        )
+        self.read_skip_setup(final_table_name, sampling_args)
 
     def branch_update_bench(self):
         pass
@@ -645,31 +630,37 @@ if __name__ == "__main__":
             )
 
         elif args.branch_insert_read:
-            single_task_bench.branch_insert_read_bench(
+            sampling_args = sampling.SamplingArgs(
                 sampling_rate=args.sampling_rate,
-                max_sample_size=args.max_sample_size,
-                dist_lambda=lambda size: sampling.beta_distribution(
+                max_sampling_size=args.max_sample_size,
+                distribution=lambda size: sampling.beta_distribution(
                     size,
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
                 sort_idx=args.sort_idx or -1,
+            )
+            single_task_bench.branch_insert_read_bench(
+                sampling_args=sampling_args,
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
                 intended_table_name=args.table_name or "",
             )
         elif args.read_no_setup:
-            single_task_bench.read_skip_setup(
-                table_name=args.table_name,
+            sampling_args = sampling.SamplingArgs(
                 sampling_rate=args.sampling_rate,
-                max_sample_size=args.max_sample_size,
-                dist_lambda=lambda size: sampling.beta_distribution(
+                max_sampling_size=args.max_sample_size,
+                distribution=lambda size: sampling.beta_distribution(
                     size,
                     alpha=args.alpha if args.alpha else 10,
                     beta=args.beta if args.beta else 1.0,
                 ),
                 sort_idx=args.sort_idx or -1,
+            )
+            single_task_bench.read_skip_setup(
+                table_name=args.table_name,
+                sampling_args=sampling_args,
                 branch_name=args.branch_name if args.branch_name else "",
                 pk_file=args.pk_file,
             )
