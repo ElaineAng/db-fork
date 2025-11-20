@@ -311,11 +311,9 @@ class DatabaseTask:
     def update(
         self,
         table_name: str,
-        update_ratio: float,
-        max_updates: int,
-        sort_idx: int,
-        dist_lambda: Callable[..., Any],
+        sampling_args: sampling.SamplingArgs,
         timed: bool = True,
+        pk_file: str = "",
     ) -> None:
         """
         Updates a specified number of random rows in the table.
@@ -328,22 +326,11 @@ class DatabaseTask:
             print("   -> No updatable (non-primary key) columns found.")
             return
 
-        # Load existing primary keys and data generators.
-        pk_set = self.get_pk_values_for_table(table_name, pk_columns)
+        # Load data generators.
         self.load_datagen_for_table(table_name)
 
-        if not pk_set:
-            print("   -> Table is empty. No rows to update.")
-            return
-        pk_list = list(pk_set)
-        sampling.sort_population(pk_list, sort_idx)
-
-        # Select a sample of keys to update.
-        skewed_indices = sampling.get_sampled_indices(
-            population_size=len(pk_set),
-            sampling_rate=update_ratio,
-            max_sampling_size=max_updates,
-            dist_lambda=dist_lambda,
+        pk_list, skewed_indices = self.sample_keys_for_table(
+            table_name, pk_columns, sampling_args, pk_file
         )
 
         # Loop through selected keys and perform updates

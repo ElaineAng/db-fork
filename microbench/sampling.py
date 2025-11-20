@@ -39,7 +39,7 @@ def beta_distribution(sample_size, alpha, beta):
 
     dist = numpy.random.beta(a=alpha, b=beta, size=sample_size)
     dist.sort()
-    print(dist)
+    print(f"min: {dist[0]:.4f}, max: {dist[-1]:.4f}, mean: {dist.mean():.4f}")
     return dist
 
 

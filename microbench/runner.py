@@ -1,6 +1,6 @@
 import argparse
 import random
-from typing import Callable, Self, Tuple
+from typing import Self, Tuple
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -37,6 +37,36 @@ def build_branch_tree(
     return root_node, total_branches
 
 
+def log_result(
+    execute: list[float] = [],
+    fetch: list[float] = [],
+    commit: list[float] = [],
+    table_name: str = "",
+    label: str = "",
+):
+    if execute:
+        print(
+            f"Average {label} time for table {table_name}: "
+            f"{1000 * timer.get_average(execute):.3f} milliseconds, "
+            f"over {len(execute)} samples\n"
+            f"\t ----> in ms: {[round(t * 1000, 3) for t in execute]}\n"
+            f"\t ----> with a max of {max(execute) * 1000:.3f} ms "
+            f"and a min of {min(execute) * 1000:.3f} ms\n"
+        )
+    if fetch:
+        print(
+            f"Average fetchall time for table {table_name}: "
+            f"{1000 * timer.get_average(fetch):.3f} milliseconds, "
+            f"over {len(fetch)} samples\n"
+        )
+    if commit:
+        print(
+            f"Average commit time for table {table_name}: "
+            f"{1000 * timer.get_average(commit):.3f} milliseconds, "
+            f"over {len(commit)} samples\n"
+        )
+
+
 class BenchmarkSuite:
     def __init__(
         self,
@@ -52,7 +82,6 @@ class BenchmarkSuite:
         # Whether we need to create and setup the benchmark database. If false,
         # we assume the database is already created and setup.
         self.require_db_setup = require_db_setup
-        self.preloaded_tables = set()
 
         # Use the provided Neon project ID if we are not setting up a new
         # database.
@@ -222,16 +251,11 @@ class BenchmarkSuite:
         )
         cursor_execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
         cursor_fetch_elapsed = self.timer.report_cursor_elapsed(tag="fetchall")
-        print(
-            f"Average read execution time for table {table_name}: "
-            f"{1000 * timer.get_average(cursor_execute_elapsed):.3f} milliseconds, "
-            f"over {len(cursor_execute_elapsed)} samples\n"
-            f"\t ----> in ms: {[round(t * 1000, 3) for t in cursor_execute_elapsed]}\n"
-            f"\t ----> with a max of {max(cursor_execute_elapsed) * 1000:.3f} ms "
-            f"and a min of {min(cursor_execute_elapsed) * 1000:.3f} ms\n"
-            f"Average fetchall time for table {table_name}: "
-            f"{1000 * timer.get_average(cursor_fetch_elapsed):.3f} milliseconds, "
-            f"over {len(cursor_fetch_elapsed)} samples\n"
+        log_result(
+            execute=cursor_execute_elapsed,
+            fetch=cursor_fetch_elapsed,
+            table_name=table_name,
+            label="read",
         )
         self.timer.reset()
 
@@ -241,44 +265,42 @@ class BenchmarkSuite:
             self.db_task.insert(table, num_rows=num_inserts, timed=True)
             execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
             commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
-            print(
-                f"Average insertion execution time for table {table}: "
-                f"{1000 * timer.get_average(execute_elapsed):.3f} milliseconds, "
-                f"over {len(execute_elapsed)} samples\n"
-                f"Average insertion commit time for table {table}: "
-                f"{1000 * timer.get_average(commit_elapsed):.3f} milliseconds, "
-                f"over {len(commit_elapsed)} samples\n"
+            log_result(
+                execute=execute_elapsed,
+                commit=commit_elapsed,
+                table_name=table,
+                label="insert",
             )
             self.timer.reset()
 
     def update_bench(
         self,
         table_names: list[str] = [],
-        sampling_rate: float = 0.01,
-        dist_lambda: Callable[..., list[float]] = BETA_DIST,
-        sort_idx: int = -1,
-        max_sample_size: int = 100,
+        sampling_args: sampling.SamplingArgs = None,
+        branch_name: str = "",
+        pk_file: str = "",
     ) -> None:
-        # Simple update bench requires pre-loaded data.
-        if not self.preload_data_dir:
-            return
+        if branch_name:
+            self.db_task.connect_branch(branch_name, timed=False)
+        print(f"Running from branch {self.db_task.get_current_branch()}")
 
-        print("\n ====== Running update benchmark...\n", flush=True)
-
-        benchmark_tables = table_names if table_names else self.preloaded_tables
+        benchmark_tables = (
+            table_names if table_names else self.db_task.get_all_tables()
+        )
         for table in benchmark_tables:
             self.db_task.update(
                 table,
-                sampling_rate=sampling_rate,
-                max_sampling_size=max_sample_size,
-                dist_lambda=dist_lambda,
-                sort_idx=sort_idx,
+                sampling_args=sampling_args,
+                timed=True,
+                pk_file=pk_file,
             )
             execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
-            print(
-                f"Average read time for table {table}: "
-                f"{timer.get_average(execute_elapsed):.6f} seconds, "
-                f"over {len(execute_elapsed)} samples\n"
+            commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
+            log_result(
+                execute=execute_elapsed,
+                commit=commit_elapsed,
+                table_name=table,
+                label="update",
             )
             self.timer.reset()
 
@@ -343,30 +365,18 @@ class BenchmarkSuite:
         commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
 
         if time_branching:
-            print(
-                "Average branch creation time: "
-                f"{1000 * timer.get_average(execute_elapsed):.3f} milliseconds, "
-                f"over {len(execute_elapsed)} samples\n"
-                f"\t ----> in ms: {[round(t * 1000, 3) for t in execute_elapsed]}\n"
-            )
-            print(
-                "Average commit time: "
-                f"{1000 * timer.get_average(commit_elapsed):.3f} milliseconds, "
-                f"over {len(commit_elapsed)} samples\n"
-                f"\t ----> in ms: {[round(t * 1000, 3) for t in commit_elapsed]}\n"
+            log_result(
+                execute=execute_elapsed,
+                commit=commit_elapsed,
+                table_name=insert_table,
+                label="branching",
             )
         if time_inserts:
-            print(
-                "Average insertion execution time: "
-                f"{timer.get_average(execute_elapsed):.6f} seconds, "
-                f"over {len(execute_elapsed)} samples\n"
-                f"\t ----> in ms: {[round(t * 1000, 3) for t in execute_elapsed]}\n"
-            )
-            print(
-                "Average insertion commit time: "
-                f"{timer.get_average(commit_elapsed):.6f} seconds, "
-                f"over {len(commit_elapsed)} samples\n"
-                f"\t ----> in ms: {[round(t * 1000, 3) for t in commit_elapsed]}\n"
+            log_result(
+                execute=execute_elapsed,
+                commit=commit_elapsed,
+                table_name=insert_table,
+                label="insert",
             )
         self.timer.reset()
         return insert_table
@@ -415,9 +425,6 @@ class BenchmarkSuite:
         )
         self.read_skip_setup(final_table_name, sampling_args)
 
-    def branch_update_bench(self):
-        pass
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run database benchmarks.")
@@ -462,6 +469,12 @@ if __name__ == "__main__":
         "--insert_only",
         action="store_true",
         help="Only run the insert benchmark.",
+    )
+
+    parser.add_argument(
+        "--update_only",
+        action="store_true",
+        help="Only run the update benchmark.",
     )
 
     parser.add_argument(
@@ -620,6 +633,26 @@ if __name__ == "__main__":
             )
         elif args.insert_only:
             single_task_bench.insert_bench(num_inserts=args.num_inserts or 1000)
+
+        elif args.update_only:
+            sampling_args = sampling.SamplingArgs(
+                sampling_rate=args.sampling_rate,
+                max_sampling_size=args.max_sample_size,
+                distribution=lambda size: sampling.beta_distribution(
+                    size,
+                    alpha=args.alpha if args.alpha else 10,
+                    beta=args.beta if args.beta else 1,
+                ),
+                sort_idx=args.sort_idx or -1,
+            )
+            single_task_bench.update_bench(
+                table_names=args.table_name.split(",")
+                if args.table_name
+                else [],
+                sampling_args=sampling_args,
+                branch_name=args.branch_name if args.branch_name else "",
+                pk_file=args.pk_file,
+            )
 
         elif args.branch_insert:
             single_task_bench.branch_insert_bench(
