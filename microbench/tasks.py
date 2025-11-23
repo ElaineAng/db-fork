@@ -1,7 +1,7 @@
 import os
 import random
 import pickle
-from typing import Callable, Any, Tuple
+from typing import Tuple
 from pathlib import Path
 from datetime import datetime
 
@@ -308,23 +308,34 @@ class DatabaseTask:
             )
         # print(f"   -> Insertion commands executed for {inserted_count} rows.")
 
-    def update(
+    def _get_updatable_columns(
+        self, table_name: str, pk_columns: list[str]
+    ) -> list[str]:
+        """
+        Returns list of columns that can be updated (excludes primary key columns).
+        """
+        col_names = self.db_tools.get_all_columns(table_name)
+        return [col for col in col_names if col not in pk_columns]
+
+    def _prepare_update_context(
         self,
         table_name: str,
         sampling_args: sampling.SamplingArgs,
-        timed: bool = True,
         pk_file: str = "",
-    ) -> None:
+    ) -> Tuple[list[str], list[str], list[tuple], list[int]]:
         """
-        Updates a specified number of random rows in the table.
+        Prepares common context needed for update operations.
+
+        Returns:
+            Tuple of (pk_columns, updatable_columns, pk_list, skewed_indices)
+            or None if update cannot proceed.
         """
-        # Get updatable columns (exclude primary key columns).
         pk_columns = self.get_pk_columns_name(table_name)
-        col_names = self.db_tools.get_all_columns(table_name)
-        updatable_columns = [col for col in col_names if col not in pk_columns]
+        updatable_columns = self._get_updatable_columns(table_name, pk_columns)
+
         if not updatable_columns:
             print("   -> No updatable (non-primary key) columns found.")
-            return
+            return None
 
         # Load data generators.
         self.load_datagen_for_table(table_name)
@@ -333,22 +344,58 @@ class DatabaseTask:
             table_name, pk_columns, sampling_args, pk_file
         )
 
+        return pk_columns, updatable_columns, pk_list, skewed_indices
+
+    def _generate_set_clause_and_data(
+        self, table_name: str, updatable_columns: list[str]
+    ) -> Tuple[list[str], dict]:
+        """
+        Generates SET clause components and random update data.
+
+        Returns:
+            Tuple of (set_clauses, update_data)
+        """
+        # Choose 1 to 3 random columns to update
+        cols_to_update = random.sample(
+            updatable_columns,
+            k=random.randint(1, min(3, len(updatable_columns))),
+        )
+
+        # Build the SET clause and data dictionary for the query
+        set_clauses = [f"{col} = %({col})s" for col in cols_to_update]
+
+        update_data = {
+            col: self.all_datagen[table_name].generate_value(col)
+            for col in cols_to_update
+        }
+
+        return set_clauses, update_data
+
+    def update(
+        self,
+        table_name: str,
+        sampling_args: sampling.SamplingArgs,
+        timed: bool = True,
+        pk_file: str = "",
+    ) -> None:
+        """
+        Updates a specified number of random rows in the table (point updates).
+        """
+        context = self._prepare_update_context(
+            table_name, sampling_args, pk_file
+        )
+        if context is None:
+            return
+
+        pk_columns, updatable_columns, pk_list, skewed_indices = context
+
         # Loop through selected keys and perform updates
         for idx in skewed_indices:
             pk_tuple = pk_list[idx]
-            # Choose 1 to 3 random columns to update for this row
-            cols_to_update = random.sample(
-                updatable_columns,
-                k=random.randint(1, min(3, len(updatable_columns))),
+
+            set_clauses, update_data = self._generate_set_clause_and_data(
+                table_name, updatable_columns
             )
-
-            # Build the SET clause and data dictionary for the query
-            set_clauses = [f"{col} = %({col})s" for col in cols_to_update]
-
-            update_data = {
-                col: self.all_datagen[table_name].generate_value(col)
-                for col in cols_to_update
-            }
 
             # Build the WHERE clause and add PKs to the data dictionary
             where_clauses = [
@@ -365,6 +412,83 @@ class DatabaseTask:
 
             self.db_tools.run_sql_query(update_sql, update_data, timed=timed)
 
-        # Commit all updates at once.
-        self.db_tools.commit_changes("Updated existing rows.", timed=timed)
+            # Commit every update so that the change is immediately visible.
+            self.db_tools.commit_changes("Updated existing rows.", timed=timed)
+
         print(f"Update commands executed for {len(skewed_indices)} rows.")
+
+    def update_range(
+        self,
+        table_name: str,
+        sampling_args: sampling.SamplingArgs,
+        range_size: int = 20,
+        timed: bool = True,
+        pk_file: str = "",
+    ) -> None:
+        """
+        Updates a range of rows in the table using range-based WHERE clauses.
+
+        This method selects starting points using the sampling strategy, then
+        updates all rows within a range from each starting point. This is more
+        efficient for bulk updates compared to single-row updates.
+
+        Args:
+            table_name: The name of the table to update.
+            sampling_args: The sampling arguments to use for selecting range
+                           start points.
+            range_size: The number of rows to update per range operation.
+            timed: Whether to time the operations.
+            pk_file: If provided, primary keys orders should follow the ones
+                     defined in this file.
+        """
+        context = self._prepare_update_context(
+            table_name, sampling_args, pk_file
+        )
+        if context is None:
+            return
+
+        pk_columns, updatable_columns, pk_list, skewed_indices = context
+
+        pk_column = pk_columns[0]
+
+        if not pk_list:
+            print("   -> No rows available for range update.")
+            return
+
+        total_rows_updated = 0
+
+        # Loop through selected starting indices and perform range updates
+        for idx in skewed_indices:
+            # Determine the range boundaries
+            start_idx = idx
+            end_idx = min(idx + range_size - 1, len(pk_list) - 1)
+
+            start_pk = pk_list[start_idx][0]  # Extract value from tuple
+            end_pk = pk_list[end_idx][0]
+
+            set_clauses, update_data = self._generate_set_clause_and_data(
+                table_name, updatable_columns
+            )
+
+            # Build range WHERE clause
+            update_data["start_pk"] = start_pk
+            update_data["end_pk"] = end_pk
+
+            update_sql = (
+                f"UPDATE {table_name} SET {', '.join(set_clauses)} "
+                f"WHERE {pk_column} >= %(start_pk)s AND {pk_column} <= %(end_pk)s;"
+            )
+
+            self.db_tools.run_sql_query(update_sql, update_data, timed=timed)
+
+            # Commit every range update so that the change is immediately visible.
+            self.db_tools.commit_changes(
+                f"Updated range [{start_pk}, {end_pk}].", timed=timed
+            )
+
+            total_rows_updated += end_idx - start_idx + 1
+
+        print(
+            f"Range update commands executed for {len(skewed_indices)} ranges, "
+            f"approximately {total_rows_updated} rows affected."
+        )

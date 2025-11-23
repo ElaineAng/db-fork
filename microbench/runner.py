@@ -273,13 +273,21 @@ class BenchmarkSuite:
             )
             self.timer.reset()
 
-    def update_bench(
+    def _run_update_bench(
         self,
         table_names: list[str] = [],
         sampling_args: sampling.SamplingArgs = None,
         branch_name: str = "",
         pk_file: str = "",
+        range_size: int = 0,
     ) -> None:
+        """
+        Common implementation for update benchmarks.
+
+        Args:
+            range_size: If > 0, performs range updates with this size.
+                        If 0, performs point updates.
+        """
         if branch_name:
             self.db_task.connect_branch(branch_name, timed=False)
         print(f"Running from branch {self.db_task.get_current_branch()}")
@@ -287,22 +295,67 @@ class BenchmarkSuite:
         benchmark_tables = (
             table_names if table_names else self.db_task.get_all_tables()
         )
+        is_range_update = range_size > 0
+        label = "range_update" if is_range_update else "update"
+
         for table in benchmark_tables:
-            self.db_task.update(
-                table,
-                sampling_args=sampling_args,
-                timed=True,
-                pk_file=pk_file,
-            )
+            if is_range_update:
+                print(f"\n--- Running range update on table {table} ---\n")
+                self.db_task.update_range(
+                    table,
+                    sampling_args=sampling_args,
+                    range_size=range_size,
+                    timed=True,
+                    pk_file=pk_file,
+                )
+            else:
+                print(f"\n--- Running point update on table {table} ---\n")
+                self.db_task.update(
+                    table,
+                    sampling_args=sampling_args,
+                    timed=True,
+                    pk_file=pk_file,
+                )
             execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
             commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
             log_result(
                 execute=execute_elapsed,
                 commit=commit_elapsed,
                 table_name=table,
-                label="update",
+                label=label,
             )
             self.timer.reset()
+
+    def update_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_args: sampling.SamplingArgs = None,
+        branch_name: str = "",
+        pk_file: str = "",
+    ) -> None:
+        self._run_update_bench(
+            table_names=table_names,
+            sampling_args=sampling_args,
+            branch_name=branch_name,
+            pk_file=pk_file,
+            range_size=0,
+        )
+
+    def range_update_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_args: sampling.SamplingArgs = None,
+        branch_name: str = "",
+        pk_file: str = "",
+        range_size: int = 20,
+    ) -> None:
+        self._run_update_bench(
+            table_names=table_names,
+            sampling_args=sampling_args,
+            branch_name=branch_name,
+            pk_file=pk_file,
+            range_size=range_size,
+        )
 
     def branch_insert_op(
         self,
@@ -478,6 +531,19 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--range_update_only",
+        action="store_true",
+        help="Only run the range update benchmark.",
+    )
+
+    parser.add_argument(
+        "--range_size",
+        type=int,
+        default=20,
+        help="Number of rows to update per range operation (for range_update_only).",
+    )
+
+    parser.add_argument(
         "--branch_insert",
         action="store_true",
         help="Only run the branch insert benchmark.",
@@ -634,7 +700,7 @@ if __name__ == "__main__":
         elif args.insert_only:
             single_task_bench.insert_bench(num_inserts=args.num_inserts or 1000)
 
-        elif args.update_only:
+        elif args.update_only or args.range_update_only:
             sampling_args = sampling.SamplingArgs(
                 sampling_rate=args.sampling_rate,
                 max_sampling_size=args.max_sample_size,
@@ -645,14 +711,25 @@ if __name__ == "__main__":
                 ),
                 sort_idx=args.sort_idx or -1,
             )
-            single_task_bench.update_bench(
-                table_names=args.table_name.split(",")
-                if args.table_name
-                else [],
-                sampling_args=sampling_args,
-                branch_name=args.branch_name if args.branch_name else "",
-                pk_file=args.pk_file,
-            )
+            if args.range_update_only:
+                single_task_bench.range_update_bench(
+                    table_names=args.table_name.split(",")
+                    if args.table_name
+                    else [],
+                    sampling_args=sampling_args,
+                    branch_name=args.branch_name if args.branch_name else "",
+                    pk_file=args.pk_file,
+                    range_size=args.range_size,
+                )
+            else:
+                single_task_bench.update_bench(
+                    table_names=args.table_name.split(",")
+                    if args.table_name
+                    else [],
+                    sampling_args=sampling_args,
+                    branch_name=args.branch_name if args.branch_name else "",
+                    pk_file=args.pk_file,
+                )
 
         elif args.branch_insert:
             single_task_bench.branch_insert_bench(
