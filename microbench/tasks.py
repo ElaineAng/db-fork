@@ -5,6 +5,8 @@ from typing import Tuple
 from pathlib import Path
 from datetime import datetime
 
+from tqdm import tqdm
+
 from dblib.db_api import DBToolSuite
 from microbench.datagen import DynamicDataGenerator
 from microbench import sampling
@@ -360,6 +362,7 @@ class DatabaseTask:
             updatable_columns,
             k=random.randint(1, min(3, len(updatable_columns))),
         )
+        #  print(f"   -> Updating columns: {cols_to_update}")
 
         # Build the SET clause and data dictionary for the query
         set_clauses = [f"{col} = %({col})s" for col in cols_to_update]
@@ -390,7 +393,7 @@ class DatabaseTask:
         pk_columns, updatable_columns, pk_list, skewed_indices = context
 
         # Loop through selected keys and perform updates
-        for idx in skewed_indices:
+        for idx in tqdm(skewed_indices, desc="Updating rows"):
             pk_tuple = pk_list[idx]
 
             set_clauses, update_data = self._generate_set_clause_and_data(
@@ -458,7 +461,7 @@ class DatabaseTask:
         total_rows_updated = 0
 
         # Loop through selected starting indices and perform range updates
-        for idx in skewed_indices:
+        for idx in tqdm(skewed_indices, desc="Updating ranges"):
             # Determine the range boundaries
             start_idx = idx
             end_idx = min(idx + range_size - 1, len(pk_list) - 1)

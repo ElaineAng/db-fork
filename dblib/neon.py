@@ -167,6 +167,9 @@ class NeonToolSuite(DBToolSuite):
             )
             return True
         except Exception as e:
+            if "branch already exists" in str(e):
+                print(f"Branch '{branch_name}' already exists.")
+                return True
             print(f"Failed to create branch '{branch_name}': {e}")
             return False
 

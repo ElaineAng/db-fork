@@ -259,9 +259,15 @@ class BenchmarkSuite:
         )
         self.timer.reset()
 
-    def insert_bench(self, num_inserts: int = 100) -> None:
+    def insert_bench(
+        self, num_inserts: int = 100, table_name: str = ""
+    ) -> None:
         print("\n ====== Running insert benchmark...\n", flush=True)
-        for table in self.db_task.get_all_tables():
+
+        tables_to_insert = (
+            [table_name] if table_name else self.db_task.get_all_tables()
+        )
+        for table in tables_to_insert:
             self.db_task.insert(table, num_rows=num_inserts, timed=True)
             execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
             commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
@@ -698,7 +704,10 @@ if __name__ == "__main__":
                 insert_per_branch=args.num_inserts or 0,
             )
         elif args.insert_only:
-            single_task_bench.insert_bench(num_inserts=args.num_inserts or 1000)
+            single_task_bench.insert_bench(
+                num_inserts=args.num_inserts or 100,
+                table_name=args.table_name or "",
+            )
 
         elif args.update_only or args.range_update_only:
             sampling_args = sampling.SamplingArgs(

@@ -23,6 +23,7 @@ dependencies = [
     "langchain-openai",
     "scipy",
     "matplotlib",
+    "tqdm",
 ]
 
 [tool.setuptools]

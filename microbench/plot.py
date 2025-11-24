@@ -1,9 +1,15 @@
 import numpy as np
 import scipy.stats as st
 import matplotlib.pyplot as plt
+import os
 
 # Data provided by the user (re-using from previous context)
-all_data = open("/tmp/sample_data.txt").readlines()
+
+# Get the current directory and construct the full path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_file_path = os.path.join(current_dir, "sample_data.txt")
+
+all_data = open(data_file_path).readlines()
 labels = all_data[0].split("|")
 print(f"labels are {labels}")
 
@@ -42,10 +48,10 @@ bars = plt.bar(
 )
 
 # Add titles and labels
-plt.title("Mean of Point Reads with 95% Confidence Intervals Neon", fontsize=16)
+plt.title("Neon Stats (Update)", fontsize=16)
 
 # Change 1: Update Y-axis label
-plt.ylabel("Mean Read Time in ms", fontsize=12)
+plt.ylabel("Mean Time in ms", fontsize=12)
 plt.xlabel("", fontsize=12)
 
 # Add text labels for means on top of bars
@@ -59,10 +65,12 @@ for bar, mean_val in zip(bars, means):
         va="bottom",
     )
 
+# Rotate x-axis labels to avoid overlap
+plt.xticks(rotation=45, ha="right")
+
 # Adjust layout
 plt.tight_layout()
 
 # Save the plot
-plt.savefig("mean_reads_confidence_interval_plot_updated.png")
-
-print("Plot saved as 'mean_reads_confidence_interval_plot_updated.png'")
+plt.savefig("neon-1.png")
+plt.close()
