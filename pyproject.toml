@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "wheel", "grpcio-tools"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -23,6 +23,7 @@ dependencies = [
     "langchain-openai",
     "scipy",
     "matplotlib",
+    "pyarrow",
     "tqdm",
 ]
 
@@ -31,3 +32,7 @@ packages = ["dblib", "microbench"]
 
 [tool.setuptools.package-data]
 lib = ["*.py"]
+dblib = ["*.proto", "*_pb2.py"]
+
+[tool.setuptools.cmdclass]
+build_py = "build_protos:BuildWithProtos"

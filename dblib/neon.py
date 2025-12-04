@@ -8,8 +8,9 @@ import requests
 from psycopg2.extensions import connection as _pgconn
 from psycopg2.extensions import cursor as _pgcursor
 from dblib.db_api import DBToolSuite
+from dblib.util import OpType
 from neon_api import NeonAPI
-import dblib.timer as dbtimer
+import dblib.result_collector as rc
 
 load_dotenv()
 API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
@@ -38,7 +39,7 @@ class NeonToolSuite(DBToolSuite):
     @classmethod
     def init_for_bench(
         cls,
-        timer: dbtimer.Timer,
+        result_collector: rc.ResultCollector,
         project_id: str,
         branch_id: str,
         branch_name: str,
@@ -48,16 +49,13 @@ class NeonToolSuite(DBToolSuite):
         print(f"Initial connection to Neon with URI: {uri}")
         conn = psycopg2.connect(
             uri,
-            connection_factory=lambda *args, **kwargs: dbtimer.TimerConnection(
-                *args, **kwargs, timer=timer
+            connection_factory=lambda *args, **kwargs: rc.TimedConnection(
+                *args, **kwargs, result_collector=result_collector
             ),
         )
         return cls(
             connection=conn,
-            timed_cursor=lambda *args, **kwargs: dbtimer.TimerCursor(
-                *args, **kwargs, timer=timer
-            ),
-            timer=timer,
+            result_collector=result_collector,
             project_id=project_id,
             branch_name=branch_name,
             branch_id=branch_id,
@@ -106,15 +104,14 @@ class NeonToolSuite(DBToolSuite):
     def __init__(
         self,
         connection: _pgconn,
-        timed_cursor: _pgcursor = None,
-        timer: dbtimer.Timer = None,
+        result_collector: rc.ResultCollector,
         project_id: str = "",
         branch_name: str = "",
         branch_id: str = "",
     ):
-        super().__init__(connection, timed_cursor=timed_cursor)
+        super().__init__(connection, result_collector)
         self.project_id = project_id
-        self.timer = timer
+        self.result_collector = result_collector
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
 
@@ -136,7 +133,7 @@ class NeonToolSuite(DBToolSuite):
         endpoint = f"projects/{self.project_id}/branches/{branch_id}/databases/{db_name}"
         self.__class__._request("DELETE", endpoint)
 
-    def create_branch(
+    def create_branch_impl(
         self, branch_name: str, timed: bool = False, parent_id: str = None
     ) -> None:
         """
@@ -150,17 +147,9 @@ class NeonToolSuite(DBToolSuite):
         # Branch creation isn't a database operation in Neon, so we have to
         # explicitly time it here.
         try:
-            if self.timer and timed:
-                start_time = time()
-            branch = neon.branch_create(self.project_id, **branch_payload)
-            if self.timer and timed:
-                end_time = time()
-                # Report the collected time to the cursor elapsed, compatible with
-                # those backends whose branching operations are done via SQL
-                # queries.
-                self.timer.collect_cursor_elapsed(
-                    end_time - start_time, tag="neon_branching"
-                )
+            with self.result_collector.maybe_time_ops(OpType.BRANCH_CREATE, timed):
+                branch = neon.branch_create(self.project_id, **branch_payload)
+
             print(
                 f"Created branch: name: {branch.branch.name}, "
                 f"ID: {branch.branch.id}"
@@ -173,7 +162,7 @@ class NeonToolSuite(DBToolSuite):
             print(f"Failed to create branch '{branch_name}': {e}")
             return False
 
-    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
+    def connect_branch_impl(self, branch_name: str, timed: bool = False) -> None:
         """
         Connects to an existing branch and a specific database to allow reads
         and writes on that branch.
@@ -184,25 +173,22 @@ class NeonToolSuite(DBToolSuite):
         if branch_name not in all_branches:
             raise ValueError(f"Branch '{branch_name}' does not exist.")
         branch_id = all_branches[branch_name][0]
-        uri = self.__class__._get_neon_connection_uri(
+        uri = self.__class__(
             self.project_id,
             branch_id,
             self.conn.get_dsn_parameters()["dbname"],
         )
-        if self.timer and timed:
-            start_time = time()
-        self.conn.close()
-        self.conn = psycopg2.connect(
-            uri,
-            connection_factory=lambda *args, **kwargs: dbtimer.TimerConnection(
-                *args, **kwargs, timer=self.timer
-            ),
-        )
-        if self.timer and timed:
-            end_time = time()
-            self.timer.collect_cursor_elapsed(
-                end_time - start_time, tag="neon_branching"
+
+        # Timing the connect_branch operation if `timed`.
+        with self.result_collector.maybe_time_ops(OpType.BRANCH_CONNECT.name, timed):
+            self.conn.close()
+            self.conn = psycopg2.connect(
+                uri,
+                connection_factory=lambda *args, **kwargs: rc.TimedConnection(
+                    *args, **kwargs, collector=self.collector
+                ),
             )
+
         self.current_branch_name = branch_name
         self.current_branch_id = branch_id
 

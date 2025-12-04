@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package microbench;
+
+// Result message for structured logging
+message Result {
+  // Unique identifier for the run
+  string run_id = 1;
+  
+  // Incremental iteration number within the run
+  int32 iteration_number = 2;
+  
+  // Type of database operation being benchmarked
+  OpType op_type = 3;
+  
+  // Initial size of the database in bytes (or rows, depending on context)
+  int64 initial_db_size = 4;
+  
+  // Name of the table being operated on
+  string table_name = 5;
+  
+  // Schema of the table (DDL or schema description)
+  string table_schema = 6;
+  
+  // Number of keys touched during the operation
+  int64 num_keys_touched = 7;
+  
+  // Latency for executing the SQL query (in milliseconds)
+  double execute_latency = 8;
+  
+  // Latency for fetching all results (in milliseconds)
+  double fetch_all_latency = 9;
+  
+  // Latency for committing the transaction (in milliseconds)
+  double commit_latency = 10;
+
+  // Latency for generic operations that don't fit into the above categories (in milliseconds)
+  double generic_latency = 11;
+
+  // Disk size of the database before the operation (in bytes)
+  int64 disk_size_before = 12;
+
+  // Disk size of the database after the operation (in bytes)
+  int64 disk_size_after = 13;
+}
+
+// Enum for different types of database operations
+enum OpType {
+  UNSPECIFIED = 0;
+  BRANCH_CREATE = 1;
+  BRANCH_CONNECT = 2;
+  READ = 3;
+  INSERT = 4;
+  UPDATE = 5;
+}
+

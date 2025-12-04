@@ -6,7 +6,7 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from anytree import Node, RenderTree
 
-from dblib import timer
+from dblib import result_collector as collector
 from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from microbench import mylogger, sampling
@@ -47,7 +47,7 @@ def log_result(
     if execute:
         print(
             f"Average {label} time for table {table_name}: "
-            f"{1000 * timer.get_average(execute):.3f} milliseconds, "
+            f"{1000 * collector.get_average(execute):.3f} milliseconds, "
             f"over {len(execute)} samples\n"
             f"\t ----> in ms: {[round(t * 1000, 3) for t in execute]}\n"
             f"\t ----> with a max of {max(execute) * 1000:.3f} ms "
@@ -56,13 +56,13 @@ def log_result(
     if fetch:
         print(
             f"Average fetchall time for table {table_name}: "
-            f"{1000 * timer.get_average(fetch):.3f} milliseconds, "
+            f"{1000 * collector.get_average(fetch):.3f} milliseconds, "
             f"over {len(fetch)} samples\n"
         )
     if commit:
         print(
             f"Average commit time for table {table_name}: "
-            f"{1000 * timer.get_average(commit):.3f} milliseconds, "
+            f"{1000 * collector.get_average(commit):.3f} milliseconds, "
             f"over {len(commit)} samples\n"
         )
 
@@ -75,6 +75,7 @@ class BenchmarkSuite:
         delete_db_after_done: bool = True,
         require_db_setup: bool = True,
         neon_project_id: str = "",
+        experiment_id: str = None,
     ):
         self.backend = backend
         self._db_name = db_name
@@ -87,7 +88,8 @@ class BenchmarkSuite:
         # database.
         self._neon_project_id = neon_project_id if not require_db_setup else ""
 
-        self.timer = timer.Timer()
+        self.result_collector = collector.ResultCollector(
+            experiment_id=experiment_id)
 
     def __enter__(self) -> Self:
         db_tools = None
@@ -99,7 +101,7 @@ class BenchmarkSuite:
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
                 db_tools = DoltToolSuite.init_for_bench(
-                    self.timer, self._db_name
+                    self.result_collector, self._db_name
                 )
                 self.root_branch_name = "main"
             elif self.backend == "neon":
@@ -140,7 +142,7 @@ class BenchmarkSuite:
                     f"Default Neon branch name: {self.root_branch_name}, ID: {default_branch_id}"
                 )
                 db_tools = NeonToolSuite.init_for_bench(
-                    self.timer,
+                    self.result_collector,
                     self._neon_project_id,
                     default_branch_id,
                     self.root_branch_name,
@@ -165,6 +167,10 @@ class BenchmarkSuite:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         print("Exiting BenchmarkSuite context...")
+        
+        # Write benchmark results to parquet file
+        self.result_collector.write_to_parquet()
+        
         if self.delete_db_after_done:
             try:
                 self.db_task.delete_db(self._db_name)
@@ -221,12 +227,12 @@ class BenchmarkSuite:
 
         if db_schema_str:
             print(f"Setting up database schema from string {db_schema_str}...")
-            self.db_task.setup_db(self._db_name, db_schema_str)
+            self.db_task.setup_db(db_schema_str)
         elif db_schema_path:
             print(f"Setting up database schema from file {db_schema_path}...")
             with open(db_schema_path, "r") as f:
                 db_schema_str = f.read()
-            self.db_task.setup_db(self._db_name, db_schema_str)
+            self.db_task.setup_db(db_schema_str)
 
         if preload_data_dir:
             print("Preloading data for benchmarks...")
@@ -244,40 +250,22 @@ class BenchmarkSuite:
             self.db_task.connect_branch(branch_name, timed=False)
         print(f"Running from branch {self.db_task.get_current_branch()}")
 
+        # Set context for proto collection
+        table_schema = self.db_task.db_tools.get_table_schema(table_name)
+        self.result_collector.set_context(
+            operation_type="read",
+            table_name=table_name,
+            table_schema=table_schema,
+        )
+
         self.db_task.point_read(
             table_name,
             sampling_args=sampling_args,
             pk_file=pk_file,
         )
-        cursor_execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
-        cursor_fetch_elapsed = self.timer.report_cursor_elapsed(tag="fetchall")
-        log_result(
-            execute=cursor_execute_elapsed,
-            fetch=cursor_fetch_elapsed,
-            table_name=table_name,
-            label="read",
-        )
-        self.timer.reset()
 
-    def insert_bench(
-        self, num_inserts: int = 100, table_name: str = ""
-    ) -> None:
-        print("\n ====== Running insert benchmark...\n", flush=True)
+        self.result_collector.reset()
 
-        tables_to_insert = (
-            [table_name] if table_name else self.db_task.get_all_tables()
-        )
-        for table in tables_to_insert:
-            self.db_task.insert(table, num_rows=num_inserts, timed=True)
-            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
-            commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
-            log_result(
-                execute=execute_elapsed,
-                commit=commit_elapsed,
-                table_name=table,
-                label="insert",
-            )
-            self.timer.reset()
 
     def _run_update_bench(
         self,
@@ -305,6 +293,14 @@ class BenchmarkSuite:
         label = "range_update" if is_range_update else "update"
 
         for table in benchmark_tables:
+            # Set context for proto collection
+            table_schema = self.db_task.db_tools.get_table_schema(table)
+            self.result_collector.set_context(
+                operation_type=label,
+                table_name=table,
+                table_schema=table_schema,
+            )
+            
             if is_range_update:
                 print(f"\n--- Running range update on table {table} ---\n")
                 self.db_task.update_range(
@@ -322,51 +318,20 @@ class BenchmarkSuite:
                     timed=True,
                     pk_file=pk_file,
                 )
-            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
-            commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
+            execute_elapsed = self.result_collector.report_cursor_elapsed(tag="execute")
+            commit_elapsed = self.result_collector.report_connection_elapsed(tag="commit")
             log_result(
                 execute=execute_elapsed,
                 commit=commit_elapsed,
                 table_name=table,
                 label=label,
             )
-            self.timer.reset()
-
-    def update_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-    ) -> None:
-        self._run_update_bench(
-            table_names=table_names,
-            sampling_args=sampling_args,
-            branch_name=branch_name,
-            pk_file=pk_file,
-            range_size=0,
-        )
-
-    def range_update_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-        range_size: int = 20,
-    ) -> None:
-        self._run_update_bench(
-            table_names=table_names,
-            sampling_args=sampling_args,
-            branch_name=branch_name,
-            pk_file=pk_file,
-            range_size=range_size,
-        )
+            self.result_collector.reset()
 
     def branch_insert_op(
         self,
-        tree_depth: int = 6,
-        degree: int = 2,
+        tree_depth: int = 9,
+        degree: int = 1,
         insert_per_branch: int = 1,
         table_name: str = "",
         time_branching: bool = False,
@@ -379,18 +344,30 @@ class BenchmarkSuite:
         )
         print(RenderTree(root))
 
-        # pick a random table to do inserts
+        # Choose the table specified by `table_name`, or pick a random table for
+        # inserts.
+        # Branching is generally a database (or higher) -level operation and
+        # shouldn't concern a specific table.
         all_tables = self.db_task.get_all_tables()
         if table_name and table_name in all_tables:
             insert_table = table_name
         else:
             insert_table = random.choice(all_tables)
+
+        # Set context for result proto collection.
+        table_schema = self.db_task.db_tools.get_table_schema(insert_table)
+        self.result_collector.set_context(
+            table_name=insert_table if not time_branching else "",
+            table_schema=table_schema if not time_branching else "",
+            initial_db_size=self.db_task.get_db_size(),
+        )
+
         current_visited = 0
         current_level_nodes = [root]
         for node in current_level_nodes:
-            # We don't time the branch switching for insert since it's part of
+            # We don't time the branch switching for inserts since it's part of
             # setup.
-            self.db_task.connect_branch(node.name, timed=False)
+            self.db_task.connect_branch(node.name, timed=time_branching)
             if insert_per_branch > 0:
                 self.db_task.insert(
                     insert_table,
@@ -398,6 +375,7 @@ class BenchmarkSuite:
                     timed=time_inserts,
                 )
             current_visited += 1
+            # TODO: Change this to use tqdm for the for-loop.
             mylogger.log_progress(
                 f"Progress:    {current_visited}/{total_branches} branches, "
                 f"inserted {insert_per_branch} records each."
@@ -414,14 +392,14 @@ class BenchmarkSuite:
             f"current one for following operations: {node.name}"
         )
         execute_elapsed = []
-        if time_branching and self.backend == "neon":
-            execute_elapsed = self.timer.report_cursor_elapsed(
-                tag="neon_branching"
+        if time_branching:
+            execute_elapsed = self.result_collector.report_cursor_elapsed(
+                tag="branching"
             )
         else:
-            execute_elapsed = self.timer.report_cursor_elapsed(tag="execute")
+            execute_elapsed = self.result_collector.report_cursor_elapsed(tag="execute")
 
-        commit_elapsed = self.timer.report_connection_elapsed(tag="commit")
+        commit_elapsed = self.result_collector.report_connection_elapsed(tag="commit")
 
         if time_branching:
             log_result(
@@ -431,31 +409,69 @@ class BenchmarkSuite:
                 label="branching",
             )
         if time_inserts:
+            # Set context for insert proto collection
+            table_schema = self.db_task.db_tools.get_table_schema(insert_table)
+            self.result_collector.set_context(
+                operation_type="insert",
+                table_name=insert_table,
+                table_schema=table_schema,
+            )
+            
             log_result(
                 execute=execute_elapsed,
                 commit=commit_elapsed,
                 table_name=insert_table,
                 label="insert",
             )
-        self.timer.reset()
+        self.result_collector.reset()
         return insert_table
 
+    # =========================================================================
+    # Benchmark code below
+    # =========================================================================
+
+    # Benchmark that creates a branch tree and measures the time taken to create
+    # the branches.
     def branch_bench(
-        self, tree_depth: int = 10, degree: int = 2, insert_per_branch: int = 1
+        self, tree_depth: int = 9, degree: int = 1, insert_per_branch: int = 1
     ) -> None:
         print("\n ====== Running branch benchmark...\n", flush=True)
+
         self.branch_insert_op(
             tree_depth=tree_depth,
             degree=degree,
             insert_per_branch=insert_per_branch,
             time_branching=True,
+            time_inserts=False,
         )
 
+    def insert_bench(
+        self, num_inserts: int = 100, table_names: list[str] = []
+    ) -> None:
+        print("\n ====== Running insert benchmark...\n", flush=True)
+
+        tables_to_insert = (
+            table_names if table_names else self.db_task.get_all_tables()
+        )
+        for table in tables_to_insert:
+            # Set context for proto collection
+            table_schema = self.db_task.db_tools.get_table_schema(table)
+            self.result_collector.set_context(
+                table_name=table,
+                table_schema=table_schema,
+                initial_db_size=self.db_task.get_db_size(),
+            )
+            
+            self.db_task.insert(table, num_rows=num_inserts, timed=True)
+            self.result_collector.reset()
+
+    # Benchmark that creates a branch tree and measures the time taken to insert
+    # records into the branches.
     def branch_insert_bench(
         self,
-        tree_depth: int = 10,
-        degree: int = 2,
-        insert_per_branch: int = 10,
+        tree_depth: int = 9,
+        degree: int = 1,
+        insert_per_branch: int = 1,
         table_name: str = "",
     ) -> None:
         print("\n ====== Running branch insert benchmark...\n", flush=True)
@@ -468,12 +484,14 @@ class BenchmarkSuite:
             time_inserts=True,
         )
 
+    # Benchmark that creates a branch tree, inserts records into the branches,
+    # and measures the time taken to read the records.
     def branch_insert_read_bench(
         self,
         sampling_args: sampling.SamplingArgs = None,
-        tree_depth: int = 10,
-        degree: int = 2,
-        insert_per_branch: int = 10,
+        tree_depth: int = 9,
+        degree: int = 1,
+        insert_per_branch: int = 1,
         intended_table_name: str = "",
     ) -> None:
         final_table_name = self.branch_insert_op(
@@ -483,6 +501,41 @@ class BenchmarkSuite:
             table_name=intended_table_name,
         )
         self.read_skip_setup(final_table_name, sampling_args)
+
+    # Benchmark that measures the time taken to update a single record in 
+    # table(s) specified by `table_names`.
+    def update_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_args: sampling.SamplingArgs = None,
+        branch_name: str = "",
+        pk_file: str = "",
+    ) -> None:
+        self._run_update_bench(
+            table_names=table_names,
+            sampling_args=sampling_args,
+            branch_name=branch_name,
+            pk_file=pk_file,
+            range_size=0,
+        )
+
+    # Benchmark that measures the time taken to update a range of records in 
+    # table(s) specified by `table_names`.
+    def range_update_bench(
+        self,
+        table_names: list[str] = [],
+        sampling_args: sampling.SamplingArgs = None,
+        branch_name: str = "",
+        pk_file: str = "",
+        range_size: int = 20,
+    ) -> None:
+        self._run_update_bench(
+            table_names=table_names,
+            sampling_args=sampling_args,
+            branch_name=branch_name,
+            pk_file=pk_file,
+            range_size=range_size,
+        )
 
 
 if __name__ == "__main__":
@@ -585,9 +638,9 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--table_name",
+        "--table_names",
         type=str,
-        help="Name of the table to run the benchmark on.",
+        help="Names of the tables to run the benchmark on. Comma separated.",
     )
 
     parser.add_argument(
@@ -690,6 +743,7 @@ if __name__ == "__main__":
         require_db_setup=require_db_setup,
         neon_project_id=args.neon_project_id,
     ) as single_task_bench:
+        table_names = args.table_names.split(",") if args.table_names else []
         if require_db_setup:
             single_task_bench.setup_benchmark_database(
                 db_schema_path=args.db_schema_path,
@@ -706,7 +760,7 @@ if __name__ == "__main__":
         elif args.insert_only:
             single_task_bench.insert_bench(
                 num_inserts=args.num_inserts or 100,
-                table_name=args.table_name or "",
+                table_name=table_names,
             )
 
         elif args.update_only or args.range_update_only:
@@ -722,9 +776,7 @@ if __name__ == "__main__":
             )
             if args.range_update_only:
                 single_task_bench.range_update_bench(
-                    table_names=args.table_name.split(",")
-                    if args.table_name
-                    else [],
+                    table_names=table_names,
                     sampling_args=sampling_args,
                     branch_name=args.branch_name if args.branch_name else "",
                     pk_file=args.pk_file,
@@ -732,9 +784,7 @@ if __name__ == "__main__":
                 )
             else:
                 single_task_bench.update_bench(
-                    table_names=args.table_name.split(",")
-                    if args.table_name
-                    else [],
+                    table_names=table_names,
                     sampling_args=sampling_args,
                     branch_name=args.branch_name if args.branch_name else "",
                     pk_file=args.pk_file,
@@ -745,7 +795,7 @@ if __name__ == "__main__":
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
-                table_name=args.table_name or "",
+                table_name=table_names,
             )
 
         elif args.branch_insert_read:
@@ -764,7 +814,7 @@ if __name__ == "__main__":
                 tree_depth=args.branch_depth,
                 degree=args.branch_degree,
                 insert_per_branch=args.num_inserts or 100,
-                intended_table_name=args.table_name or "",
+                intended_table_name=table_names,
             )
         elif args.read_no_setup:
             sampling_args = sampling.SamplingArgs(
@@ -778,7 +828,7 @@ if __name__ == "__main__":
                 sort_idx=args.sort_idx or -1,
             )
             single_task_bench.read_skip_setup(
-                table_name=args.table_name,
+                table_name=table_names,
                 sampling_args=sampling_args,
                 branch_name=args.branch_name if args.branch_name else "",
                 pk_file=args.pk_file,

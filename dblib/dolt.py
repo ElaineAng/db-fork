@@ -2,7 +2,7 @@ import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from psycopg2.extensions import cursor as _pgcursor
 from dblib.db_api import DBToolSuite
-import dblib.timer as dbtimer
+import dblib.result_collector as rc
 import dblib.util as dbutil
 
 DOLT_USER = "postgres"
@@ -23,7 +23,7 @@ class DoltToolSuite(DBToolSuite):
         )
 
     @classmethod
-    def init_for_bench(cls, timer, db_name: str):
+    def init_for_bench(cls, collector: rc.ResultCollector, db_name: str):
         uri = dbutil.format_db_uri(
             DOLT_USER, DOLT_PASSWORD, DOLT_HOST, DOLT_PORT, db_name
         )
@@ -31,19 +31,17 @@ class DoltToolSuite(DBToolSuite):
         # Timed connection and tools to measure timing.
         conn = psycopg2.connect(
             uri,
-            connection_factory=lambda *args, **kwargs: dbtimer.TimerConnection(
-                *args, **kwargs, timer=timer
+            connection_factory=lambda *args, **kwargs: rc.TimedConnection(
+                *args, **kwargs, collector=collector
             ),
-        )
+        ) 
         return cls(
             connection=conn,
-            timed_cursor=lambda *args, **kwargs: dbtimer.TimerCursor(
-                *args, **kwargs, timer=timer
-            ),
+            collector=collector
         )
 
-    def __init__(self, connection: _pgconn, timed_cursor: _pgcursor = None):
-        super().__init__(connection, timed_cursor=timed_cursor)
+    def __init__(self, connection: _pgconn, collector: rc.ResultCollector):
+        super().__init__(connection, collector=collector)
 
     def create_branch(
         self, branch_name: str, timed: bool = False, parent_id: str = None
@@ -53,10 +51,9 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
         super().run_sql_query(cmd, timed=timed)
-        super().commit_changes()
         return True
 
-    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
+    def connect_branch_impl(self, branch_name: str, timed: bool = False) -> None:
         """
         Connects to an existing branch in the Dolt database to allow reads and
         writes on that branch.

@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Proto generated files
+*_pb2.py
+
 # C extensions
 *.so
 

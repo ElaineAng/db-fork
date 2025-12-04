@@ -35,9 +35,8 @@ class DatabaseTask:
 
         self.considered_existing_pks = False
 
-    def setup_db(self, db_name: str, db_schema: str) -> None:
+    def setup_db(self, db_schema: str) -> None:
         self.db_tools.initialize_schema(db_schema)
-        self.db_tools.commit_changes("Initialized database schema.")
 
     def delete_db(self, db_name: str) -> None:
         if self.inserted_keys_file:
@@ -73,7 +72,6 @@ class DatabaseTask:
             self.db_tools.bulk_copy_from_file(table, str(file_path))
             loaded_tables.append(table)
 
-        self.db_tools.commit_changes("Preloaded data into database.")
         return loaded_tables
 
     def create_branch(
@@ -82,7 +80,6 @@ class DatabaseTask:
         return self.db_tools.create_branch(
             branch_name, timed=timed, parent_id=parent_id
         )
-        # print(f"   -> Created branch '{branch_name}'.")
 
     def close_current_connection(self):
         self.db_tools.close_connection()
@@ -97,43 +94,9 @@ class DatabaseTask:
     def get_current_branch(self) -> str:
         return self.db_tools.get_current_branch()
 
-    def get_pk_columns_name(self, table_name: str) -> list[str]:
-        """
-        Retrieves the primary key columns by ordinal position for the specified
-        table.
-        """
-        pk_columns = self.db_tools.get_primary_key_columns(table_name)
-        if not pk_columns:
-            raise ValueError(f"Table {table_name} has no primary key.")
-
-        # sort pk_columns by ordinal position
-        pk_columns.sort(key=lambda x: -x[1])
-
-        return [col[0] for col in pk_columns]
-
-    def get_pk_values_for_table(
-        self, table_name: str, pk_columns: list[str] = None
-    ) -> set[Tuple]:
-        """
-        Fetch all primary keys for the current database and branch to create a
-        base population to sample reads from. This should be relatively fast
-        since it's an index-only scan.
-        """
-        print(f"Loading primary keys for table '{table_name}'...")
-        if not pk_columns:
-            pk_columns = self.get_pk_columns_name(table_name)
-        print(f" PK columns: {pk_columns}")
-
-        sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
-        all_pks = self.db_tools.run_sql_query(sql)
-
-        count_sql = f"SELECT COUNT(*) FROM ({sql.rstrip(';')}) as sub; "
-        count_result = self.db_tools.run_sql_query(count_sql)
-        total_count = count_result[0][0] if count_result else 0
-        print(f" Total primary keys fetched: {total_count}")
-
-        print(f" Loaded {len(all_pks)} primary keys.")
-        return set(all_pks)
+    def get_db_size(self) -> int:
+        """Get the current database size in bytes."""
+        return self.db_tools.get_db_size()
 
     def sample_keys_for_table(
         self,
@@ -142,18 +105,18 @@ class DatabaseTask:
         sampling_args: sampling.SamplingArgs,
         pk_file: str = "",
     ) -> Tuple[list[tuple], list[int]]:
-        pk_set = self.get_pk_values_for_table(table_name, pk_columns_name)
+        pk_set = self.db_tools.get_pk_values(table_name, pk_columns_name)
         if not pk_set:
             print(" Table is empty. No rows to read.")
             return
 
         # Get a list of all pks for indexing.
-        # CAREFUL: This could be expensive for very large tables since we
+        # NOTE: This could be expensive for very large tables since we
         # are storing everything in memory.
         pk_list = []
         if pk_file or self.inserted_keys_file:
             pk_file = pk_file or self.inserted_keys_file.name
-            print(f"Loading primary key orders from file '{pk_file}'...")
+            print(f" Loading primary keys from file '{pk_file}' preserving order...")
             with open(pk_file, "rb") as f:
                 while True:
                     try:
@@ -162,16 +125,17 @@ class DatabaseTask:
                             pk_list.append(pk_values)
                     except EOFError:
                         break
-            print(f" Loaded {len(pk_list)} primary keys from file.")
         else:
             # Just convert directly. This might be of random order.
-            print(" Loading primary keys from DB in any order...")
+            print(" Loading primary keys from DB...")
             pk_list = list(pk_set)
             if sampling_args.sort_idx == -1:
                 print(" Sorting primary keys by first column...")
                 sampling.sort_population(pk_list, 0)
 
-        # Sort by first PK column, this could be an argument if needed.
+        print(f"Loaded {len(pk_list)} primary keys.")
+
+        # Sort again by the sorting arg if specified.
         if sampling_args.sort_idx >= 0:
             print(
                 f" Sorting primary keys by column index {sampling_args.sort_idx}..."
@@ -218,8 +182,8 @@ class DatabaseTask:
                      defined in this file. This is useful when we want to do a
                      read only benchmark without any inserts.
         """
-        pk_columns_name = self.get_pk_columns_name(table_name)
-        print(f"Loading primary keys for table '{table_name}' from DB...")
+        pk_columns_name = self.db_tools.get_pk_columns_name(table_name)
+        print(f"Loading primary keys for table '{table_name}'...")
 
         pk_list, skewed_indices = self.sample_keys_for_table(
             table_name, pk_columns_name, sampling_args, pk_file
@@ -233,7 +197,7 @@ class DatabaseTask:
 
         for idx in skewed_indices:
             pk_to_read = pk_list[idx]
-            self.db_tools.run_sql_query(select_sql, pk_to_read, timed=True)
+            self.db_tools.timed_read(select_sql, pk_to_read, num_keys=1)
 
         print(f" Read operations completed, {len(skewed_indices)} rows read.")
 
@@ -250,7 +214,7 @@ class DatabaseTask:
         placeholders = ", ".join([f"%({name})s" for name in col_names])
         insert_sql = f"INSERT INTO {table_name} ({', '.join(col_names)}) VALUES ({placeholders});"
 
-        pk_columns = self.get_pk_columns_name(table_name)
+        pk_columns = self.db_tools.get_pk_columns_name(table_name)
 
         self.load_datagen_for_table(table_name)
 
@@ -266,7 +230,7 @@ class DatabaseTask:
             self.inserted_keys_file = open(filename, "ab")
 
         if not self.considered_existing_pks:
-            existing_pks = self.get_pk_values_for_table(table_name, pk_columns)
+            existing_pks = self.db_tools.get_pk_values(table_name, pk_columns)
             self.all_inserted_pks = self.all_inserted_pks.union(existing_pks)
             for pk in existing_pks:
                 pickle.dump(pk, self.inserted_keys_file)
@@ -292,17 +256,11 @@ class DatabaseTask:
                 pickle.dump(pk_tuple, self.inserted_keys_file)
                 # Add the new pk to set.
                 self.all_inserted_pks.add(pk_tuple)
-                self.db_tools.run_sql_query(insert_sql, row_data, timed=timed)
+                self.db_tools.timed_insert(insert_sql, row_data, num_keys=1)
                 inserted_count += 1
 
         self.inserted_keys_file.close()
 
-        # Commit all insertions at once.
-        self.db_tools.commit_changes(
-            f"Inserted {inserted_count} rows on branch {branch_name}, "
-            f"id {branch_id}.",
-            timed=timed,
-        )
         if inserted_count < num_rows:
             print(
                 f"Warning: Only generated {inserted_count} unique rows due "
@@ -332,7 +290,7 @@ class DatabaseTask:
             Tuple of (pk_columns, updatable_columns, pk_list, skewed_indices)
             or None if update cannot proceed.
         """
-        pk_columns = self.get_pk_columns_name(table_name)
+        pk_columns = self.db_tools.get_pk_columns_name(table_name)
         updatable_columns = self._get_updatable_columns(table_name, pk_columns)
 
         if not updatable_columns:
@@ -413,10 +371,7 @@ class DatabaseTask:
                 f"WHERE {' AND '.join(where_clauses)};"
             )
 
-            self.db_tools.run_sql_query(update_sql, update_data, timed=timed)
-
-            # Commit every update so that the change is immediately visible.
-            self.db_tools.commit_changes("Updated existing rows.", timed=timed)
+            self.db_tools.timed_update(update_sql, update_data, num_keys=1)
 
         print(f"Update commands executed for {len(skewed_indices)} rows.")
 
@@ -477,17 +432,21 @@ class DatabaseTask:
             update_data["start_pk"] = start_pk
             update_data["end_pk"] = end_pk
 
+            # Get the number of rows updated in this range.
+            select_sql = (
+                f"SELECT COUNT(*) FROM {table_name} "
+                f"WHERE {pk_column} >= %(start_pk)s AND {pk_column} <= %(end_pk)s;"
+            )
+            rows_updated = self.db_tools.run_sql_query(
+                select_sql, update_data, timed=False
+            )
+
             update_sql = (
                 f"UPDATE {table_name} SET {', '.join(set_clauses)} "
                 f"WHERE {pk_column} >= %(start_pk)s AND {pk_column} <= %(end_pk)s;"
             )
 
-            self.db_tools.run_sql_query(update_sql, update_data, timed=timed)
-
-            # Commit every range update so that the change is immediately visible.
-            self.db_tools.commit_changes(
-                f"Updated range [{start_pk}, {end_pk}].", timed=timed
-            )
+            self.db_tools.timed_update(update_sql, update_data, num_keys=rows_updated)
 
             total_rows_updated += end_idx - start_idx + 1
 
