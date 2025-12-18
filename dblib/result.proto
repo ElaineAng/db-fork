@@ -6,42 +6,36 @@ package microbench;
 message Result {
   // Unique identifier for the run
   string run_id = 1;
-  
+
+  // Random seed used for the run
+  int32 random_seed = 2;
+
   // Incremental iteration number within the run
-  int32 iteration_number = 2;
+  int32 iteration_number = 3;
   
   // Type of database operation being benchmarked
-  OpType op_type = 3;
+  OpType op_type = 4;
   
   // Initial size of the database in bytes (or rows, depending on context)
-  int64 initial_db_size = 4;
+  int64 initial_db_size = 5;
   
   // Name of the table being operated on
-  string table_name = 5;
+  string table_name = 6;
   
   // Schema of the table (DDL or schema description)
-  string table_schema = 6;
+  string table_schema = 7;
   
   // Number of keys touched during the operation
-  int64 num_keys_touched = 7;
-  
-  // Latency for executing the SQL query (in milliseconds)
-  double execute_latency = 8;
-  
-  // Latency for fetching all results (in milliseconds)
-  double fetch_all_latency = 9;
-  
-  // Latency for committing the transaction (in milliseconds)
-  double commit_latency = 10;
+  int64 num_keys_touched = 8;
 
-  // Latency for generic operations that don't fit into the above categories (in milliseconds)
-  double generic_latency = 11;
+  // Latency for operations (in milliseconds)
+  double latency = 9;
 
   // Disk size of the database before the operation (in bytes)
-  int64 disk_size_before = 12;
+  int64 disk_size_before = 10;
 
   // Disk size of the database after the operation (in bytes)
-  int64 disk_size_after = 13;
+  int64 disk_size_after = 11;
 }
 
 // Enum for different types of database operations
@@ -52,5 +46,6 @@ enum OpType {
   READ = 3;
   INSERT = 4;
   UPDATE = 5;
+  COMMIT = 6;
 }
 

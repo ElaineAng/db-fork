@@ -1,7 +1,7 @@
+from ast import Tuple
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
-from psycopg2.extensions import cursor as _pgcursor
-from dblib.db_api import DBToolSuite
+from dblib.db_api_back import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
@@ -28,57 +28,46 @@ class DoltToolSuite(DBToolSuite):
             DOLT_USER, DOLT_PASSWORD, DOLT_HOST, DOLT_PORT, db_name
         )
 
-        # Timed connection and tools to measure timing.
-        conn = psycopg2.connect(
-            uri,
-            connection_factory=lambda *args, **kwargs: rc.TimedConnection(
-                *args, **kwargs, collector=collector
-            ),
-        ) 
-        return cls(
-            connection=conn,
-            collector=collector
-        )
+        conn = psycopg2.connect(uri)
+        return cls(connection=conn, collector=collector)
 
     def __init__(self, connection: _pgconn, collector: rc.ResultCollector):
         super().__init__(connection, collector=collector)
 
-    def create_branch(
-        self, branch_name: str, timed: bool = False, parent_id: str = None
-    ) -> bool:
+    def list_branches(self) -> list[str]:
+        cmd = "SELECT name FROM dolt_branches;"
+        return [branch[0] for branch in super().execute_sql(cmd)]
+
+    def _prepare_commit(self, message: str = "") -> None:
+        try:
+            cmd = "call dolt_add('.');"
+            super().execute_sql(cmd)
+            cmd = f"call dolt_commit('-m', '{message}');"
+            super().execute_sql(cmd)
+        except Exception as e:
+            # Ignore commit errors (e.g., no changes to commit).
+            print(f"Commit failed: {e}")
+
+    def _create_branch_impl(self, branch_name: str) -> bool:
         """
         Creates a new branch in the Dolt database.
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
-        super().run_sql_query(cmd, timed=timed)
+        super().execute_sql(cmd)
         return True
 
-    def connect_branch_impl(self, branch_name: str, timed: bool = False) -> None:
+    def _connect_branch_impl(self, branch_name: str) -> bool:
         """
         Connects to an existing branch in the Dolt database to allow reads and
         writes on that branch.
         """
         cmd = f"call dolt_checkout('{branch_name}');"
-        super().run_sql_query(cmd, timed=timed)
+        super().execute_sql(cmd)
+        return True
 
-    def list_branches(self) -> list[str]:
-        cmd = "SELECT name FROM dolt_branches;"
-        return [branch[0] for branch in super().run_sql_query(cmd, timed=False)]
-
-    def get_current_branch(self) -> str:
+    def _get_current_branch_impl(self) -> Tuple[str, str]:
         # TODO: Consider cache the current branch name to avoid querying.
         cmd = "SELECT active_branch();"
-        result = super().run_sql_query(cmd, timed=False)
+        result = super().execute_sql(cmd)
         # Dolt's branch name is unique and can be used as an ID.
         return (result[0][0], result[0][0])
-
-    def commit_changes(self, message: str = "", timed: bool = False) -> None:
-        try:
-            cmd = "call dolt_add('.');"
-            super().run_sql_query(cmd, timed=timed)
-            cmd = f"call dolt_commit('-m', '{message}');"
-            super().run_sql_query(cmd, timed=timed)
-            super().commit_changes()
-        except Exception as e:
-            # Ignore commit errors (e.g., no changes to commit).
-            print(f"Commit failed: {e}")

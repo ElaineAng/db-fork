@@ -15,6 +15,7 @@ dependencies = [
     "microbench",
     "neon-api",
     "numpy",
+    "protobuf",
     "psycopg2-binary",
     "python-dotenv",
     "langchain",
@@ -25,14 +26,15 @@ dependencies = [
     "matplotlib",
     "pyarrow",
     "tqdm",
+    "setuptools",
 ]
 
 [tool.setuptools]
-packages = ["dblib", "microbench"]
+packages = ["dblib", "microbench", "util"]
 
 [tool.setuptools.package-data]
 lib = ["*.py"]
 dblib = ["*.proto", "*_pb2.py"]
 
 [tool.setuptools.cmdclass]
-build_py = "build_protos:BuildWithProtos"
+build_py = "build_protos.BuildWithProtos"

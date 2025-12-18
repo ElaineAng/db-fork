@@ -1,14 +1,11 @@
 import os
-from time import time
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
 import requests
 
 from psycopg2.extensions import connection as _pgconn
-from psycopg2.extensions import cursor as _pgcursor
-from dblib.db_api import DBToolSuite
-from dblib.util import OpType
+from dblib.db_api_back import DBToolSuite
 from neon_api import NeonAPI
 import dblib.result_collector as rc
 
@@ -47,12 +44,7 @@ class NeonToolSuite(DBToolSuite):
     ):
         uri = cls._get_neon_connection_uri(project_id, branch_id, database_name)
         print(f"Initial connection to Neon with URI: {uri}")
-        conn = psycopg2.connect(
-            uri,
-            connection_factory=lambda *args, **kwargs: rc.TimedConnection(
-                *args, **kwargs, result_collector=result_collector
-            ),
-        )
+        conn = psycopg2.connect(uri)
         return cls(
             connection=conn,
             result_collector=result_collector,
@@ -133,70 +125,8 @@ class NeonToolSuite(DBToolSuite):
         endpoint = f"projects/{self.project_id}/branches/{branch_id}/databases/{db_name}"
         self.__class__._request("DELETE", endpoint)
 
-    def create_branch_impl(
-        self, branch_name: str, timed: bool = False, parent_id: str = None
-    ) -> None:
-        """
-        Creates a new branch in the Neon project.
-        A branch can contain multiple databases, not the other way around.
-        """
-        branch_payload = {
-            "endpoints": [{"type": "read_write"}],
-            "branch": {"name": branch_name, "parent_id": parent_id},
-        }
-        # Branch creation isn't a database operation in Neon, so we have to
-        # explicitly time it here.
-        try:
-            with self.result_collector.maybe_time_ops(OpType.BRANCH_CREATE, timed):
-                branch = neon.branch_create(self.project_id, **branch_payload)
-
-            print(
-                f"Created branch: name: {branch.branch.name}, "
-                f"ID: {branch.branch.id}"
-            )
-            return True
-        except Exception as e:
-            if "branch already exists" in str(e):
-                print(f"Branch '{branch_name}' already exists.")
-                return True
-            print(f"Failed to create branch '{branch_name}': {e}")
-            return False
-
-    def connect_branch_impl(self, branch_name: str, timed: bool = False) -> None:
-        """
-        Connects to an existing branch and a specific database to allow reads
-        and writes on that branch.
-        """
-        # Connecting to a specific branch involves establishing a new connection
-        # to essentially a different database in Neon.
-        all_branches = self._get_neon_branches()
-        if branch_name not in all_branches:
-            raise ValueError(f"Branch '{branch_name}' does not exist.")
-        branch_id = all_branches[branch_name][0]
-        uri = self.__class__(
-            self.project_id,
-            branch_id,
-            self.conn.get_dsn_parameters()["dbname"],
-        )
-
-        # Timing the connect_branch operation if `timed`.
-        with self.result_collector.maybe_time_ops(OpType.BRANCH_CONNECT.name, timed):
-            self.conn.close()
-            self.conn = psycopg2.connect(
-                uri,
-                connection_factory=lambda *args, **kwargs: rc.TimedConnection(
-                    *args, **kwargs, collector=self.collector
-                ),
-            )
-
-        self.current_branch_name = branch_name
-        self.current_branch_id = branch_id
-
     def list_branches(self) -> list[str]:
         return list(self._get_neon_branches().keys())
-
-    def get_current_branch(self) -> Tuple[str, str]:
-        return (self.current_branch_name, self.current_branch_id)
 
     def delete_db(self, db_name: str) -> None:
         """
@@ -205,3 +135,58 @@ class NeonToolSuite(DBToolSuite):
         for _, (branch_id, _) in self._get_neon_branches().items():
             print(f"Deleting database '{db_name}' on branch ID '{branch_id}'")
             self._delete_db_on_branch(branch_id, db_name)
+
+    def _create_branch_impl(
+        self, branch_name: str, parent_id: str = None
+    ) -> bool:
+        """
+        Creates a new branch in the Neon project.
+        A branch can contain multiple databases, not the other way around.
+        """
+        branch_payload = {
+            "endpoints": [{"type": "read_write"}],
+            "branch": {"name": branch_name, "parent_id": parent_id},
+        }
+        try:
+            # This returns the branch object which has a connection string.
+            # We could use that when we implement caching of connection strings.
+            _ = neon.branch_create(self.project_id, **branch_payload)
+            return True
+        except Exception as e:
+            if "branch already exists" in str(e):
+                print(f"Branch '{branch_name}' already exists.")
+                return True
+            print(f"Failed to create branch '{branch_name}': {e}")
+            return False
+
+    def _connect_branch_impl(self, branch_name: str) -> bool:
+        """
+        Connects to an existing branch and a specific database to allow reads
+        and writes on that branch.
+        """
+        # Connecting to a specific branch involves establishing a new connection
+        # to essentially a different database in Neon.
+        #
+        # Note that there are two additional API calls which adds additional
+        # time. If this ends up becoming a performance issue, we could cache the
+        # connection URI per branch name.
+        all_branches = self._get_neon_branches()
+        if branch_name not in all_branches:
+            raise ValueError(f"Branch '{branch_name}' does not exist.")
+        branch_id = all_branches[branch_name][0]
+
+        uri = self.__class__._get_neon_connection_uri(
+            self.project_id,
+            branch_id,
+            self.conn.get_dsn_parameters()["dbname"],
+        )
+
+        self.conn.close()
+        self.conn = psycopg2.connect(uri)
+
+        self.current_branch_name = branch_name
+        self.current_branch_id = branch_id
+        return True
+
+    def _get_current_branch_impl(self) -> Tuple[str, str]:
+        return (self.current_branch_name, self.current_branch_id)
