@@ -1,0 +1,35 @@
+# Example benchmark task configuration
+# This configuration runs a mixed workload benchmark on Neon
+
+run_id: "benchmark_001"
+backend: NEON
+
+# Operations to perform in the benchmark
+operations: READ
+operations: INSERT
+operations: UPDATE
+operations: RANGE_UPDATE
+operations: BRANCH
+
+num_ops: 1000
+
+# Table to benchmark (empty means random table from schema)
+table_name: "orders"
+
+# Starting branch (empty means default/main branch)
+starting_branch: ""
+
+database_setup {
+  db_name: "microbench"
+  cleanup: true
+  
+  # Create from SQL dump
+  sql_dump {
+    sql_dump_path: "db_setup/tpcc_schema.sql"
+  }
+}
+
+# Range update configuration
+range_update_config {
+  range_size: 20
+}

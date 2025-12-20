@@ -1,9 +1,6 @@
 import time
 
-# import logging
 from functools import wraps
-
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 
 def throttle(interval):

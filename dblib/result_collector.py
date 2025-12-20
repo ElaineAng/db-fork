@@ -155,7 +155,7 @@ class ResultCollector:
         result.table_name = self.current_table_name
         result.table_schema = self.current_table_schema
         result.initial_db_size = self.initial_db_size
-        result.seed = self._seed
+        result.random_seed = self._seed
 
         # Fill in collected metrics
         result.op_type = self._current_op_type.value
@@ -184,6 +184,7 @@ class ResultCollector:
         for result in self.results:
             row = {
                 "run_id": result.run_id,
+                "random_seed": result.random_seed,
                 "iteration_number": result.iteration_number,
                 "op_type": OpType(
                     result.op_type
@@ -203,49 +204,3 @@ class ResultCollector:
         pq.write_table(table, filepath)
 
         print(f"Wrote {len(rows)} benchmark results to {filepath}")
-
-
-# class TimedCursor(_pgcursor):
-#     def __init__(self, *args, **kwargs):
-#         self.collector = kwargs.pop("collector", None)
-#         self.op_type = kwargs.pop("op_type", OpType.UNSPECIFIED)
-#         super(TimedCursor, self).__init__(*args, **kwargs)
-
-#     def execute(self, query: str, vars=None):
-#         start_timestamp = time.perf_counter()
-#         try:
-#             super(TimedCursor, self).execute(query, vars)
-#         finally:
-#             end_timestamp = time.perf_counter()
-#             if self.collector:
-#                 self.collector.record_execute_latency(
-#                     end_timestamp - start_timestamp, op_type=self.op_type
-#                 )
-
-#     def fetchall(self):
-#         start_timestamp = time.perf_counter()
-#         try:
-#             return super().fetchall()
-#         finally:
-#             end_timestamp = time.perf_counter()
-#             if self.collector:
-#                 self.collector.record_fetchall_latency(
-#                     end_timestamp - start_timestamp, op_type=self.op_type
-#                 )
-
-
-# class TimedConnection(_pgconn):
-#     def __init__(self, *args, **kwargs):
-#         self.collector = kwargs.pop("collector", None)
-#         super(TimedConnection, self).__init__(*args, **kwargs)
-
-#     def commit(self):
-#         start_timestamp = time.perf_counter()
-#         try:
-#             super(TimedConnection, self).commit()
-#         finally:
-#             end_timestamp = time.perf_counter()
-#             if self.collector:
-#                 self.collector.record_commit_latency(
-#                     end_timestamp - start_timestamp
-#                 )

@@ -2,12 +2,6 @@ syntax = "proto3";
 
 package microbench;
 
-// Branch tree configuration
-message BranchConfig {
-    int32 depth = 1;   // Depth of the branch tree
-    int32 degree = 2;  // Branching factor (children per node)
-}
-
 // All supported database backends
 enum Backend {
     NEON = 0;
@@ -96,7 +90,4 @@ message TaskConfig {
   
   // Read operation configuration (sampling parameters)
   PointReadConfig point_read_config = 9;
-
-  // Branch tree configuration
-  BranchConfig branch_config = 10;
 }
