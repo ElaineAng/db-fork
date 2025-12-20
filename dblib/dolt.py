@@ -1,7 +1,7 @@
 from ast import Tuple
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
-from dblib.db_api_back import DBToolSuite
+from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
@@ -54,6 +54,9 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
+        super().commit_changes(
+            timed=True, message=f"Create branch {branch_name}"
+        )
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -63,7 +66,7 @@ class DoltToolSuite(DBToolSuite):
         cmd = f"call dolt_checkout('{branch_name}');"
         super().execute_sql(cmd)
 
-    def _get_current_branch_impl(self) -> Tuple[str, str]:
+    def _get_current_branch_impl(self) -> tuple[str, str]:
         # TODO: Consider cache the current branch name to avoid querying.
         cmd = "SELECT active_branch();"
         result = super().execute_sql(cmd)

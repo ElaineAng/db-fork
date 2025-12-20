@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package microbench;
+package dblib;
 
 // Result message for structured logging
 message Result {

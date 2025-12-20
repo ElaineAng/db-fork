@@ -4,8 +4,20 @@ from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
 from typing import Tuple, Optional
 
-from dblib.result_collector import OpType, GetOpTypeFromSQL
 import dblib.result_collector as rc
+from dblib import result_pb2 as rslt
+
+
+def _require_connection(func):
+    """Decorator that checks if database connection is established before calling the method."""
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if not self.conn:
+            raise ValueError("Database connection is not established.")
+        return func(self, *args, **kwargs)
+
+    return wrapper
 
 
 class DBToolSuite(ABC):
@@ -38,15 +50,6 @@ class DBToolSuite(ABC):
     ######################################################################
     # Protected methods
     ######################################################################
-
-    def _require_connection(self, func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if not self.conn:
-                raise ValueError("Database connection is not established.")
-            return func(*args, **kwargs)
-
-        return wrapper
 
     @abstractmethod
     def _connect_branch_impl(self, branch_name: str) -> None:
@@ -118,7 +121,7 @@ class DBToolSuite(ABC):
         ORDER BY
             ordinal_position;
         """
-        columns = self.run_sql_query(query, (table_name,))
+        columns = self.execute_sql(query, (table_name,))
 
         if not columns:
             return f"Error: Table '{table_name}' not found."
@@ -164,7 +167,7 @@ class DBToolSuite(ABC):
         done = False
         try:
             with self.result_collector.maybe_time_ops(
-                op_type=OpType.CREATE_BRANCH, timed=True
+                op_type=rslt.OpType.BRANCH_CREATE, timed=True
             ):
                 self._create_branch_impl(branch_name, parent_id)
                 done = True
@@ -183,7 +186,7 @@ class DBToolSuite(ABC):
         done = False
         try:
             with self.result_collector.maybe_time_ops(
-                op_type=OpType.CONNECT_BRANCH, timed=timed
+                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed
             ):
                 self._connect_branch_impl(branch_name)
                 done = True
@@ -204,11 +207,11 @@ class DBToolSuite(ABC):
         return self._get_current_branch_impl()
 
     @_require_connection
-    def commit_changes(self, message: str = "", timed: bool = False) -> None:
+    def commit_changes(self, timed: bool = False, message: str = "") -> None:
         """
         Commits any pending changes to the database with an optional message.
         """
-        with self.result_collector.maybe_time_ops(timed, OpType.COMMIT):
+        with self.result_collector.maybe_time_ops(timed, rslt.OpType.COMMIT):
             self._prepare_commit(message)
             self.conn.commit()
         if timed:
@@ -232,14 +235,13 @@ class DBToolSuite(ABC):
         try:
             with self.conn.cursor() as cur:
                 # Timing both the execute and fetchall together
-                op_type = GetOpTypeFromSQL(query)
+                op_type = rc.GetOpTypeFromSQL(query)
                 with self.result_collector.maybe_time_ops(timed, op_type):
                     cur.execute(query, vars)
-                    res = cur.fetchall()
-                print(f"Executed query: {query} with vars: {vars}")
-        except psycopg2.ProgrammingError:
-            # No results to fetch (e.g., for INSERT/UPDATE statements).
-            res = []
+                    # cur.description is None for INSERT/UPDATE (no results to fetch)
+                    if cur.description is not None:
+                        res = cur.fetchall()
+                # print(f"Executed query: {query} with vars: {vars}")
         except Exception as e:
             raise Exception(f"Error executing sql query: {query}; {vars}; {e}")
         if timed:

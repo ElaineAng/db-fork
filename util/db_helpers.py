@@ -59,7 +59,7 @@ def initialize_schema(
     conn.commit()
 
 
-def get_primary_key_columns(
+def _get_primary_key_columns(
     conn: psycopg2.extensions.connection, table_name: str
 ) -> list[tuple[str, int]]:
     """
@@ -109,7 +109,7 @@ def get_pk_column_names(
     Raises:
         ValueError: If table has no primary key
     """
-    all_columns = [col[0] for col in get_primary_key_columns(conn, table_name)]
+    all_columns = [col[0] for col in _get_primary_key_columns(conn, table_name)]
     if not all_columns:
         raise ValueError(f"Table {table_name} has no primary key.")
     print(f" PK columns: {all_columns}")
@@ -140,15 +140,17 @@ def get_pk_values(
     sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
     all_pks = _run_sql_query(conn, sql)
 
-    count_sql = f"SELECT COUNT(*) FROM ({sql.rstrip(';')}) as sub;"
-    count_result = _run_sql_query(conn, count_sql)
-    total_count = count_result[0][0] if count_result else 0
+    # count_sql = f"SELECT COUNT(*) FROM ({sql.rstrip(';')}) as sub;"
+    # count_result = _run_sql_query(conn, count_sql)
+    # total_count = count_result[0][0] if count_result else 0
 
-    # The following count should be the same as the length of all_pks,
-    # otherwise there is a bug with how the backend handles fetchall.
-    print(f" Total primary keys fetched: {total_count}")
-    print(f" Loaded {len(all_pks)} primary keys.")
-    return set(all_pks)
+    # # The following count should be the same as the length of all_pks,
+    # # otherwise there is a bug with how the backend handles fetchall.
+    # print(
+    #     f"\t --> Total primary keys fetched: {total_count}, "
+    #     f"Loaded {len(all_pks)} primary keys."
+    # )
+    return all_pks
 
 
 def get_all_tables(conn: psycopg2.extensions.connection) -> list[str]:

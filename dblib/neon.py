@@ -5,7 +5,7 @@ import psycopg2
 import requests
 
 from psycopg2.extensions import connection as _pgconn
-from dblib.db_api_back import DBToolSuite
+from dblib.db_api import DBToolSuite
 from neon_api import NeonAPI
 import dblib.result_collector as rc
 

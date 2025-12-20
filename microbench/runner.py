@@ -1,3 +1,4 @@
+import tqdm
 from util.import_db import load_sql_file
 import argparse
 import random
@@ -12,7 +13,7 @@ from anytree import Node
 from google.protobuf import text_format
 from microbench import task_pb2 as tp
 from microbench.datagen import DynamicDataGenerator
-from util import db_helper as dbh
+from util import db_helpers as dbh
 
 from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite
@@ -52,12 +53,14 @@ def build_branch_tree(
 
 
 def validate_config(config: tp.TaskConfig):
-    if config.backend == tp.TaskConfig.Backend.NEON:
-        source = config.database_setup.source
-        assert source.sql_dump or source.existing_db.neon_project_id, (
-            "When reusing existing Neon database, neon_project_id "
-            "must be provided."
-        )
+    if config.backend == tp.Backend.NEON:
+        db_setup = config.database_setup
+        source_type = db_setup.WhichOneof("source")
+        if source_type == "existing_db":
+            assert db_setup.existing_db.neon_project_id, (
+                "When reusing existing Neon database, neon_project_id "
+                "must be provided."
+            )
 
 
 class BenchmarkSuite:
@@ -85,13 +88,16 @@ class BenchmarkSuite:
         # List of existing primary keys in the database for the current branch.
         self._existing_pks = []
 
+        # Cache for pk columns.
+        self._pk_columns = []
+
     def __enter__(self) -> Self:
         db_tools = None
         # NOTE: If self.require_db_setup, create_benchmark_database() must be
         # called before this method returns.
         result_collector = rc.ResultCollector(run_id=config.run_id)
         try:
-            if self._config.backend == "dolt":
+            if self._config.backend == tp.Backend.DOLT:
                 default_uri = DoltToolSuite.get_default_connection_uri()
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
@@ -99,7 +105,7 @@ class BenchmarkSuite:
                     result_collector, self._db_name
                 )
                 self._root_branch_name = "main"
-            elif self._config.backend == "neon":
+            elif self._config.backend == tp.Backend.NEON:
                 default_branch_id = ""
                 if self._require_db_setup:
                     # If the database hasn't been setup yet, the default neon
@@ -123,7 +129,9 @@ class BenchmarkSuite:
                 else:
                     # Otherwise we try to get the default branch ID
                     # and name from the specified project in the config.
-                    self._neon_project_id = self._config.database_setup.source.existing_db.neon_project_id
+                    self._neon_project_id = (
+                        self._config.database_setup.existing_db.neon_project_id
+                    )
                     proj_branches = NeonToolSuite.get_project_branches(
                         self._neon_project_id
                     )
@@ -153,8 +161,8 @@ class BenchmarkSuite:
         except Exception as e:
             print(f"Error during BenchmarkSuite setup: {e}")
             if (
-                self._config.delete_db_after_done
-                and self._config.backend == "neon"
+                self._config.database_setup.cleanup
+                and self._config.backend == tp.Backend.NEON
                 and self._neon_project_id
             ):
                 NeonToolSuite.delete_project(self._neon_project_id)
@@ -166,9 +174,9 @@ class BenchmarkSuite:
         # Write benchmark results to parquet file
         self.db_tools.result_collector.write_to_parquet()
 
-        if self._config.delete_db_after_done:
+        if self._config.database_setup.cleanup:
             try:
-                self.db_task.delete_db(self._db_name)
+                self.db_tools.delete_db(self._db_name)
                 print("Database deleted successfully.")
             except Exception as e:
                 if "database not found" in str(e):  # Database does not exist
@@ -177,10 +185,13 @@ class BenchmarkSuite:
                     )
                 else:
                     print(f"Error deleting database: {e}")
-            if self._config.backend == "neon" and self._neon_project_id:
+            if (
+                self._config.backend == tp.Backend.NEON
+                and self._neon_project_id
+            ):
                 NeonToolSuite.delete_project(self._neon_project_id)
 
-        self.db_task.close_current_connection()
+        self.db_tools.close_connection()
 
     def create_benchmark_database(self, uri):
         """
@@ -212,14 +223,17 @@ class BenchmarkSuite:
         # Setup the database and initialize the schema.
         if not self._require_db_setup:
             return
-        load_sql_file(self.db_tools.get_current_connection(), self._db_name)
+        load_sql_file(
+            self.db_tools.get_current_connection(),
+            self._config.database_setup.sql_dump.sql_dump_path,
+        )
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> bool:
         cur_name, cur_id = self.db_tools.get_current_branch()
 
         next_branch_name = f"branch_{next_bid}"
         created = self.db_tools.create_branch(
-            branch_name=next_branch_name, parent_branch_id=cur_id
+            branch_name=next_branch_name, parent_id=cur_id
         )
         if created:
             self._all_branches.append(next_branch_name)
@@ -227,17 +241,17 @@ class BenchmarkSuite:
             # Toss a fair coin to connect to the new branch, or stay on the
             # current branch.
             if rnd.random() < 0.5:
-                self.db_tools.connect_branch(next_branch_name)
+                self.db_tools.connect_branch(next_branch_name, timed=True)
                 # clear existing pks cache if switing to a different branch.
                 self._existing_pks = []
         else:
             to_connect = random.choice(self._all_branches)
-            self.db_tools.connect_branch(to_connect)
+            self.db_tools.connect_branch(to_connect, timed=True)
             # clear existing pks cache if switing to a different branch.
             self._existing_pks = []
         return created
 
-    def _select_random_key(self, rnd):
+    def _select_random_key(self, rnd, benchmark_table):
         """Select a random key from existing PKs or modified keys.
 
         Returns:
@@ -246,13 +260,11 @@ class BenchmarkSuite:
         """
         _, cur_branch_id = self.db_tools.get_current_branch()
 
-        pk_columns = dbh.get_pk_column_names(
-            self.db_tools.get_current_connection(), self._table_name
-        )
+        self.maybe_load_pk_columns(benchmark_table)
         existing_pks = self._existing_pks or dbh.get_pk_values(
             self.db_tools.get_current_connection(),
-            self._table_name,
-            pk_columns,
+            benchmark_table,
+            self._pk_columns,
         )
 
         selected_key = None
@@ -264,10 +276,10 @@ class BenchmarkSuite:
         else:
             selected_key = rnd.choice(existing_pks)
 
-        return cur_branch_id, pk_columns, selected_key
+        return cur_branch_id, selected_key
 
-    def read(self, rnd):
-        _, pk_columns, key_to_read = self._select_random_key(rnd)
+    def read_op(self, rnd, benchmark_table):
+        _, key_to_read = self._select_random_key(rnd, benchmark_table)
 
         if not key_to_read:
             print("No existing keys found, do nothing")
@@ -275,9 +287,9 @@ class BenchmarkSuite:
 
         # Build the SQL query to read the key.
         where_clause = " AND ".join(
-            [f"{pk_name} = %s" for pk_name in pk_columns]
+            [f"{pk_name} = %s" for pk_name in self._pk_columns]
         )
-        select_sql = f"SELECT * FROM {self._table_name} WHERE {where_clause};"
+        select_sql = f"SELECT * FROM {benchmark_table} WHERE {where_clause};"
 
         # Read only touches a single key. We might be able to set this in
         # execute_sql() but doing it here is easier.
@@ -286,26 +298,35 @@ class BenchmarkSuite:
         # Run the read.
         self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
 
-    def insert(self) -> bool:
+    def maybe_load_pk_columns(self, benchmark_table):
+        if not self._pk_columns:
+            self._pk_columns = dbh.get_pk_column_names(
+                self.db_tools.get_current_connection(), benchmark_table
+            )
+
+    def insert_op(self, benchmark_table) -> bool:
         _, cur_branch_id = self.db_tools.get_current_branch()
 
-        col_names = dbh.get_all_columns(self._table_name)
-        placeholders = ", ".join([f"%({name})s" for name in col_names])
-        insert_sql = f"INSERT INTO {self._table_name} ({', '.join(col_names)}) VALUES ({placeholders});"
-
-        pk_columns = dbh.get_pk_column_names(
-            self.db_tools.get_current_connection(), self._table_name
+        col_names = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
         )
+        self.maybe_load_pk_columns(benchmark_table)
+
+        placeholders = ", ".join([f"%({name})s" for name in col_names])
+        insert_sql = f"INSERT INTO {benchmark_table} ({', '.join(col_names)}) VALUES ({placeholders});"
+
         inserted = False
 
         # Pre-record the number of keys for this op.
         self.db_tools.result_collector.record_num_keys_touched(1)
         for _ in range(5):
+            if inserted:
+                break
             # Generate a new row. Note that this is using a data generator that
             # isn't initialized with the current seed. But this should be fine
             # since we shouldn't care about the exact values inserted.
             row_data = self._table_datagen.generate_row()
-            pk_tuple = tuple(row_data[pk] for pk in pk_columns)
+            pk_tuple = tuple(row_data[pk] for pk in self._pk_columns)
 
             # Try to insert it, it may fail for PK collision.
             try:
@@ -314,21 +335,28 @@ class BenchmarkSuite:
                     pk_tuple
                 )
                 inserted = True
+                self.db_tools.commit_changes(timed=True)
                 break
             except Exception:
                 continue
         return inserted
 
-    def update(self, rnd) -> bool:
-        cur_branch_id, pk_columns, key_to_update = self._select_random_key(rnd)
+    def update_op(self, rnd, benchmark_table) -> bool:
+        cur_branch_id, key_to_update = self._select_random_key(
+            rnd, benchmark_table
+        )
 
         if not key_to_update:
             print("No existing keys found, do nothing")
             return False
 
         # Get all columns and filter out PK columns to get updatable columns.
-        all_columns = dbh.get_all_columns(self._table_name)
-        non_pk_columns = [col for col in all_columns if col not in pk_columns]
+        all_columns = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
+        )
+        non_pk_columns = [
+            col for col in all_columns if col not in self._pk_columns
+        ]
 
         if not non_pk_columns:
             print("No non-PK columns to update")
@@ -342,15 +370,15 @@ class BenchmarkSuite:
 
         # Build the WHERE clause using PK columns.
         where_clause = " AND ".join(
-            [f"{pk_name} = %({pk_name})s" for pk_name in pk_columns]
+            [f"{pk_name} = %({pk_name})s" for pk_name in self._pk_columns]
         )
 
         update_sql = (
-            f"UPDATE {self._table_name} SET {set_clause} WHERE {where_clause};"
+            f"UPDATE {benchmark_table} SET {set_clause} WHERE {where_clause};"
         )
 
         # Add PK values to the row_data for the WHERE clause.
-        for i, pk_col in enumerate(pk_columns):
+        for i, pk_col in enumerate(self._pk_columns):
             row_data[pk_col] = key_to_update[i]
 
         # Update only touches a single key.
@@ -364,12 +392,13 @@ class BenchmarkSuite:
                 self._modified_keys.setdefault(cur_branch_id, []).append(
                     key_to_update
                 )
+            self.db_tools.commit_changes(timed=True)
             return True
         except Exception as e:
             print(f"Update failed: {e}")
             return False
 
-    def range_update(self, rnd) -> int:
+    def range_update_op(self, rnd, benchmark_table) -> int:
         """Perform a range update on multiple rows.
 
         Selects two random keys to bound the range. The number of rows between
@@ -387,15 +416,13 @@ class BenchmarkSuite:
         """
         _, cur_branch_id = self.db_tools.get_current_branch()
 
-        pk_columns = dbh.get_pk_column_names(
-            self.db_tools.get_current_connection(), self._table_name
-        )
+        self.maybe_load_pk_columns(benchmark_table)
 
         # Get all PK values sorted by all PK columns to determine range bounds.
         existing_pks = dbh.get_pk_values(
             self.db_tools.get_current_connection(),
-            self._table_name,
-            pk_columns,
+            benchmark_table,
+            self._pk_columns,
         )
 
         if not existing_pks:
@@ -423,12 +450,12 @@ class BenchmarkSuite:
 
         # Build tuple comparison for composite PK range queries.
         # Uses SQL row value comparison: (col1, col2, ...) >= (val1, val2, ...)
-        pk_tuple_sql = f"({', '.join(pk_columns)})"
+        pk_tuple_sql = f"({', '.join(self._pk_columns)})"
         placeholders_start = ", ".join(
-            [f"%(_start_{i})s" for i in range(len(pk_columns))]
+            [f"%(_start_{i})s" for i in range(len(self._pk_columns))]
         )
         placeholders_end = ", ".join(
-            [f"%(_end_{i})s" for i in range(len(pk_columns))]
+            [f"%(_end_{i})s" for i in range(len(self._pk_columns))]
         )
 
         # Build params dict for the range bounds.
@@ -439,8 +466,12 @@ class BenchmarkSuite:
             range_params[f"_end_{i}"] = val
 
         # Get all columns and filter out PK columns for the SET clause.
-        all_columns = dbh.get_all_columns(self._table_name)
-        non_pk_columns = [col for col in all_columns if col not in pk_columns]
+        all_columns = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
+        )
+        non_pk_columns = [
+            col for col in all_columns if col not in self._pk_columns
+        ]
 
         if not non_pk_columns:
             print("No non-PK columns to update")
@@ -459,7 +490,7 @@ class BenchmarkSuite:
         row_data.update(range_params)
 
         update_sql = (
-            f"UPDATE {self._table_name} SET {set_clause} WHERE {where_clause};"
+            f"UPDATE {benchmark_table} SET {set_clause} WHERE {where_clause};"
         )
 
         # Record the accurate number of keys touched.
@@ -476,7 +507,7 @@ class BenchmarkSuite:
             for key in keys_in_range:
                 if key not in modified_list:
                     modified_list.append(key)
-
+            self.db_tools.commit_changes(timed=True)
             return len(keys_in_range)
         except Exception as e:
             print(f"Range update failed: {e}")
@@ -500,7 +531,7 @@ class BenchmarkSuite:
         self._table_datagen = DynamicDataGenerator(table_schema)
 
         # Get the random seed for all remainder operations in the benchmark.
-        seed = time.time()
+        seed = int(time.time())
         random.seed(seed)
 
         # Set context for result proto collection.
@@ -520,7 +551,7 @@ class BenchmarkSuite:
 
         # Main benchmark loop
         next_bid = 1
-        for _ in range(self._config.num_ops):
+        for _ in tqdm.tqdm(range(self._config.num_ops)):
             # Get the operation
             cur_ops = random.choices(all_operations, ops_weights)[0]
 
@@ -529,13 +560,13 @@ class BenchmarkSuite:
                 if created:
                     next_bid += 1
             elif cur_ops == tp.OperationType.READ:
-                self.read()
+                self.read_op(random, benchmark_table)
             elif cur_ops == tp.OperationType.INSERT:
-                self.insert()
+                self.insert_op(benchmark_table)
             elif cur_ops == tp.OperationType.UPDATE:
-                self.update(random)
+                self.update_op(random, benchmark_table)
             elif cur_ops == tp.OperationType.RANGE_UPDATE:
-                self.range_update(random)
+                self.range_update_op(random, benchmark_table)
 
 
 if __name__ == "__main__":
@@ -561,9 +592,9 @@ if __name__ == "__main__":
 
         print(f"Loaded configuration from {args.config}")
         print(f"Run ID: {config.run_id}")
-        print(f"Backend: {tp.TaskConfig.Backend.Name(config.backend)}")
+        print(f"Backend: {tp.Backend.Name(config.backend)}")
         print(
-            f"Operation: {tp.TaskConfig.OperationType.Name(config.operation_type)}"
+            f"Operations: {[tp.OperationType.Name(op) for op in config.operations]}"
         )
 
     except FileNotFoundError:

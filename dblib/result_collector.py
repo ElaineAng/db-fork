@@ -1,25 +1,14 @@
 import os
 import uuid
 import time
-from enum import Enum
 from contextlib import contextmanager
 import pyarrow as pa
 import pyarrow.parquet as pq
-from dblib.result_pb2 import Result
+from dblib import result_pb2 as rslt
 from util.sql_parse import get_sql_operation_keyword
 
 
-class OpType(Enum):
-    UNSPECIFIED = 0
-    BRANCH_CREATE = 1
-    BRANCH_CONNECT = 2
-    READ = 3
-    INSERT = 4
-    UPDATE = 5
-    COMMIT = 6
-
-
-def GetOpTypeFromSQL(sql: str) -> OpType:
+def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
     """
     Determine the operation type from a SQL statement.
 
@@ -39,21 +28,21 @@ def GetOpTypeFromSQL(sql: str) -> OpType:
     keyword = get_sql_operation_keyword(sql)
 
     if not keyword:
-        return OpType.UNSPECIFIED
+        return rslt.OpType.UNSPECIFIED
 
     # Map keywords to OpType
     keyword_map = {
-        "SELECT": OpType.READ,
-        "INSERT": OpType.INSERT,
-        "UPDATE": OpType.UPDATE,
-        "DELETE": OpType.UPDATE,  # DELETE is a write operation like UPDATE
-        "WITH": OpType.READ,  # If we still have WITH, it's likely a CTE query (read)
+        "SELECT": rslt.OpType.READ,
+        "INSERT": rslt.OpType.INSERT,
+        "UPDATE": rslt.OpType.UPDATE,
+        "DELETE": rslt.OpType.UPDATE,  # DELETE is a write operation like UPDATE
+        "WITH": rslt.OpType.READ,  # If we still have WITH, it's likely a CTE query (read)
     }
 
-    return keyword_map.get(keyword, OpType.UNSPECIFIED)
+    return keyword_map.get(keyword, rslt.OpType.UNSPECIFIED)
 
 
-def str_to_op_type(op_str: str) -> OpType:
+def str_to_op_type(op_str: str) -> rslt.OpType:
     """
     Convert a string-based operation type to OpType enum.
 
@@ -65,13 +54,13 @@ def str_to_op_type(op_str: str) -> OpType:
         Corresponding OpType enum value, or OpType.UNSPECIFIED if unknown.
     """
     try:
-        return OpType[op_str.upper().strip()]
+        return rslt.OpType[op_str.upper().strip()]
     except KeyError:
-        return OpType.UNSPECIFIED
+        return rslt.OpType.UNSPECIFIED
 
 
 class ResultCollector:
-    def __init__(self, run_id: str = None, output_dir: str = "../run_stats"):
+    def __init__(self, run_id: str = None, output_dir: str = "/tmp/run_stats"):
         self.reset()
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
@@ -81,7 +70,7 @@ class ResultCollector:
 
     def _reset_metrics(self):
         """Reset all metric fields for a new record."""
-        self._current_op_type = OpType.UNSPECIFIED
+        self._current_op_type = rslt.OpType.UNSPECIFIED
         self._current_latency = 0.0
         self._num_keys_touched = 0
 
@@ -112,9 +101,9 @@ class ResultCollector:
         self.initial_db_size = initial_db_size
         self._seed = seed
 
-    def _validate_and_set_op_type(self, op_type: OpType):
+    def _validate_and_set_op_type(self, op_type: rslt.OpType):
         if (
-            self._current_op_type != OpType.UNSPECIFIED
+            self._current_op_type != rslt.OpType.UNSPECIFIED
             and self._current_op_type != op_type
         ):
             raise ValueError(
@@ -123,7 +112,7 @@ class ResultCollector:
         self._current_op_type = op_type
 
     @contextmanager
-    def maybe_time_ops(self, timed: bool, op_type: OpType):
+    def maybe_time_ops(self, timed: bool, op_type: rslt.OpType):
         # Return early if not timed.
         if not timed:
             yield
@@ -149,7 +138,7 @@ class ResultCollector:
         """
 
         # Create and fill the Result proto
-        result = Result()
+        result = rslt.Result()
         result.run_id = self.run_id
         result.iteration_number = self.iteration_counter
         result.table_name = self.current_table_name
@@ -158,7 +147,7 @@ class ResultCollector:
         result.random_seed = self._seed
 
         # Fill in collected metrics
-        result.op_type = self._current_op_type.value
+        result.op_type = self._current_op_type
         result.num_keys_touched = self._num_keys_touched
         result.latency = self._current_latency
 
@@ -186,9 +175,7 @@ class ResultCollector:
                 "run_id": result.run_id,
                 "random_seed": result.random_seed,
                 "iteration_number": result.iteration_number,
-                "op_type": OpType(
-                    result.op_type
-                ).name,  # Convert enum value to name
+                "op_type": result.op_type,  # Convert enum value to name
                 "initial_db_size": result.initial_db_size,
                 "table_name": result.table_name,
                 "table_schema": result.table_schema,
