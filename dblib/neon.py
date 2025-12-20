@@ -138,7 +138,7 @@ class NeonToolSuite(DBToolSuite):
 
     def _create_branch_impl(
         self, branch_name: str, parent_id: str = None
-    ) -> bool:
+    ) -> None:
         """
         Creates a new branch in the Neon project.
         A branch can contain multiple databases, not the other way around.
@@ -151,15 +151,14 @@ class NeonToolSuite(DBToolSuite):
             # This returns the branch object which has a connection string.
             # We could use that when we implement caching of connection strings.
             _ = neon.branch_create(self.project_id, **branch_payload)
-            return True
         except Exception as e:
             if "branch already exists" in str(e):
                 print(f"Branch '{branch_name}' already exists.")
-                return True
-            print(f"Failed to create branch '{branch_name}': {e}")
-            return False
+            else:
+                print(f"Failed to create branch '{branch_name}': {e}")
+                raise e
 
-    def _connect_branch_impl(self, branch_name: str) -> bool:
+    def _connect_branch_impl(self, branch_name: str) -> None:
         """
         Connects to an existing branch and a specific database to allow reads
         and writes on that branch.
@@ -186,7 +185,6 @@ class NeonToolSuite(DBToolSuite):
 
         self.current_branch_name = branch_name
         self.current_branch_id = branch_id
-        return True
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)

@@ -1,20 +1,34 @@
+from util.import_db import load_sql_file
 import argparse
 import random
+import sys
+import time
 from typing import Self, Tuple
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from anytree import Node, RenderTree
+from anytree import Node
 
-from dblib import result_collector as collector
+from google.protobuf import text_format
+from microbench import task_pb2 as tp
+from microbench.datagen import DynamicDataGenerator
+from util import db_helper as dbh
+
+from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
-from microbench import mylogger, sampling
-from tasks import DatabaseTask
+from microbench import sampling
 
 
 def BETA_DIST(sample_size):
     return sampling.beta_distribution(sample_size, alpha=10, beta=1.0)
+
+
+def OPS_WEIGHT(op_type: tp.OperationType):
+    if op_type == tp.OperationType.BRANCH:
+        return 1
+    else:
+        return 5
 
 
 def build_branch_tree(
@@ -37,76 +51,57 @@ def build_branch_tree(
     return root_node, total_branches
 
 
-def log_result(
-    execute: list[float] = [],
-    fetch: list[float] = [],
-    commit: list[float] = [],
-    table_name: str = "",
-    label: str = "",
-):
-    if execute:
-        print(
-            f"Average {label} time for table {table_name}: "
-            f"{1000 * collector.get_average(execute):.3f} milliseconds, "
-            f"over {len(execute)} samples\n"
-            f"\t ----> in ms: {[round(t * 1000, 3) for t in execute]}\n"
-            f"\t ----> with a max of {max(execute) * 1000:.3f} ms "
-            f"and a min of {min(execute) * 1000:.3f} ms\n"
-        )
-    if fetch:
-        print(
-            f"Average fetchall time for table {table_name}: "
-            f"{1000 * collector.get_average(fetch):.3f} milliseconds, "
-            f"over {len(fetch)} samples\n"
-        )
-    if commit:
-        print(
-            f"Average commit time for table {table_name}: "
-            f"{1000 * collector.get_average(commit):.3f} milliseconds, "
-            f"over {len(commit)} samples\n"
+def validate_config(config: tp.TaskConfig):
+    if config.backend == tp.TaskConfig.Backend.NEON:
+        source = config.database_setup.source
+        assert source.sql_dump or source.existing_db.neon_project_id, (
+            "When reusing existing Neon database, neon_project_id "
+            "must be provided."
         )
 
 
 class BenchmarkSuite:
     def __init__(
         self,
-        backend: str,
-        db_name: str = "microbench",
-        delete_db_after_done: bool = True,
-        require_db_setup: bool = True,
-        neon_project_id: str = "",
-        experiment_id: str = None,
+        config: tp.TaskConfig,
     ):
-        self.backend = backend
-        self._db_name = db_name
-        self.delete_db_after_done = delete_db_after_done
-        # Whether we need to create and setup the benchmark database. If false,
-        # we assume the database is already created and setup.
-        self.require_db_setup = require_db_setup
+        self._db_name = config.database_setup.db_name
+        self._config = config
+        self._require_db_setup = (
+            config.database_setup.WhichOneof("source") == "sql_dump"
+        )
 
-        # Use the provided Neon project ID if we are not setting up a new
-        # database.
-        self._neon_project_id = neon_project_id if not require_db_setup else ""
+        # Mapping between table name and data generator.
+        self._table_datagen = None
 
-        self.result_collector = collector.ResultCollector(
-            experiment_id=experiment_id)
+        # List of all branches created.
+        self._all_branches = []
+
+        # Cached keys to read from.
+
+        # Mapping from branch ID to list of modified keys by this benchmark.
+        self._modified_keys = {}
+
+        # List of existing primary keys in the database for the current branch.
+        self._existing_pks = []
 
     def __enter__(self) -> Self:
         db_tools = None
         # NOTE: If self.require_db_setup, create_benchmark_database() must be
         # called before this method returns.
+        result_collector = rc.ResultCollector(run_id=config.run_id)
         try:
-            if self.backend == "dolt":
+            if self._config.backend == "dolt":
                 default_uri = DoltToolSuite.get_default_connection_uri()
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
                 db_tools = DoltToolSuite.init_for_bench(
-                    self.result_collector, self._db_name
+                    result_collector, self._db_name
                 )
-                self.root_branch_name = "main"
-            elif self.backend == "neon":
+                self._root_branch_name = "main"
+            elif self._config.backend == "neon":
                 default_branch_id = ""
-                if self.require_db_setup:
+                if self._require_db_setup:
                     # If the database hasn't been setup yet, the default neon
                     # uri depends on the created project, so we create the
                     # project first.
@@ -124,42 +119,42 @@ class BenchmarkSuite:
                     # Create the benchmark database on the root branch.
                     self.create_benchmark_database(default_uri)
                     default_branch_id = neon_project["branch"]["id"]
-                    self.root_branch_name = neon_project["branch"]["name"]
+                    self._root_branch_name = neon_project["branch"]["name"]
                 else:
                     # Otherwise we try to get the default branch ID
-                    # and name from the specified project.
+                    # and name from the specified project in the config.
+                    self._neon_project_id = self._config.database_setup.source.existing_db.neon_project_id
                     proj_branches = NeonToolSuite.get_project_branches(
                         self._neon_project_id
                     )
                     for branch in proj_branches["branches"]:
                         if branch["default"]:
-                            self.root_branch_name = branch["name"]
+                            self._root_branch_name = branch["name"]
                             default_branch_id = branch["id"]
                             break
 
                 # Now get the connection uri for the benchmark database.
                 print(
-                    f"Default Neon branch name: {self.root_branch_name}, ID: {default_branch_id}"
+                    f"Default Neon branch name: {self._root_branch_name}, ID: {default_branch_id}"
                 )
+                self._all_branches.append(self._root_branch_name)
                 db_tools = NeonToolSuite.init_for_bench(
-                    self.result_collector,
+                    result_collector,
                     self._neon_project_id,
                     default_branch_id,
-                    self.root_branch_name,
+                    self._root_branch_name,
                     self._db_name,
                 )
             else:
-                raise ValueError(f"Unsupported backend: {self.backend}")
+                raise ValueError(f"Unsupported backend: {self._config.backend}")
 
-            self.db_task = DatabaseTask(
-                db_tools=db_tools,
-            )
+            self.db_tools = db_tools
             return self
         except Exception as e:
             print(f"Error during BenchmarkSuite setup: {e}")
             if (
-                self.delete_db_after_done
-                and self.backend == "neon"
+                self._config.delete_db_after_done
+                and self._config.backend == "neon"
                 and self._neon_project_id
             ):
                 NeonToolSuite.delete_project(self._neon_project_id)
@@ -167,11 +162,11 @@ class BenchmarkSuite:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         print("Exiting BenchmarkSuite context...")
-        
+
         # Write benchmark results to parquet file
-        self.result_collector.write_to_parquet()
-        
-        if self.delete_db_after_done:
+        self.db_tools.result_collector.write_to_parquet()
+
+        if self._config.delete_db_after_done:
             try:
                 self.db_task.delete_db(self._db_name)
                 print("Database deleted successfully.")
@@ -182,7 +177,7 @@ class BenchmarkSuite:
                     )
                 else:
                     print(f"Error deleting database: {e}")
-            if self.backend == "neon" and self._neon_project_id:
+            if self._config.backend == "neon" and self._neon_project_id:
                 NeonToolSuite.delete_project(self._neon_project_id)
 
         self.db_task.close_current_connection()
@@ -191,7 +186,7 @@ class BenchmarkSuite:
         """
         Creates the benchmark database on the root branch.
         """
-        if not self.require_db_setup:
+        if not self._require_db_setup:
             return
         try:
             # Create a new database over a separate connection.
@@ -213,623 +208,204 @@ class BenchmarkSuite:
             if conn:
                 conn.close()
 
-    def setup_benchmark_database(
-        self,
-        db_schema_str: str = "",
-        db_schema_path: str = "",
-        preload_data_dir: str = "",
-    ) -> None:
+    def maybe_setup_db(self) -> None:
         # Setup the database and initialize the schema.
-        if not db_schema_str and not db_schema_path:
-            raise ValueError(
-                "Database schema must be provided via string or path."
-            )
+        if not self._require_db_setup:
+            return
+        load_sql_file(self.db_tools.get_current_connection(), self._db_name)
 
-        if db_schema_str:
-            print(f"Setting up database schema from string {db_schema_str}...")
-            self.db_task.setup_db(db_schema_str)
-        elif db_schema_path:
-            print(f"Setting up database schema from file {db_schema_path}...")
-            with open(db_schema_path, "r") as f:
-                db_schema_str = f.read()
-            self.db_task.setup_db(db_schema_str)
+    def maybe_branch_and_reconnect(self, next_bid, rnd) -> bool:
+        cur_name, cur_id = self.db_tools.get_current_branch()
 
-        if preload_data_dir:
-            print("Preloading data for benchmarks...")
-            self.preload_data_dir = preload_data_dir
-            self.db_task.preload_db_data(self.preload_data_dir)
-
-    def read_skip_setup(
-        self,
-        table_name: str = "",
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-    ) -> None:
-        if branch_name:
-            self.db_task.connect_branch(branch_name, timed=False)
-        print(f"Running from branch {self.db_task.get_current_branch()}")
-
-        # Set context for proto collection
-        table_schema = self.db_task.db_tools.get_table_schema(table_name)
-        self.result_collector.set_context(
-            operation_type="read",
-            table_name=table_name,
-            table_schema=table_schema,
+        next_branch_name = f"branch_{next_bid}"
+        created = self.db_tools.create_branch(
+            branch_name=next_branch_name, parent_branch_id=cur_id
         )
+        if created:
+            self._all_branches.append(next_branch_name)
 
-        self.db_task.point_read(
-            table_name,
-            sampling_args=sampling_args,
-            pk_file=pk_file,
-        )
-
-        self.result_collector.reset()
-
-
-    def _run_update_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-        range_size: int = 0,
-    ) -> None:
-        """
-        Common implementation for update benchmarks.
-
-        Args:
-            range_size: If > 0, performs range updates with this size.
-                        If 0, performs point updates.
-        """
-        if branch_name:
-            self.db_task.connect_branch(branch_name, timed=False)
-        print(f"Running from branch {self.db_task.get_current_branch()}")
-
-        benchmark_tables = (
-            table_names if table_names else self.db_task.get_all_tables()
-        )
-        is_range_update = range_size > 0
-        label = "range_update" if is_range_update else "update"
-
-        for table in benchmark_tables:
-            # Set context for proto collection
-            table_schema = self.db_task.db_tools.get_table_schema(table)
-            self.result_collector.set_context(
-                operation_type=label,
-                table_name=table,
-                table_schema=table_schema,
-            )
-            
-            if is_range_update:
-                print(f"\n--- Running range update on table {table} ---\n")
-                self.db_task.update_range(
-                    table,
-                    sampling_args=sampling_args,
-                    range_size=range_size,
-                    timed=True,
-                    pk_file=pk_file,
-                )
-            else:
-                print(f"\n--- Running point update on table {table} ---\n")
-                self.db_task.update(
-                    table,
-                    sampling_args=sampling_args,
-                    timed=True,
-                    pk_file=pk_file,
-                )
-            execute_elapsed = self.result_collector.report_cursor_elapsed(tag="execute")
-            commit_elapsed = self.result_collector.report_connection_elapsed(tag="commit")
-            log_result(
-                execute=execute_elapsed,
-                commit=commit_elapsed,
-                table_name=table,
-                label=label,
-            )
-            self.result_collector.reset()
-
-    def branch_insert_op(
-        self,
-        tree_depth: int = 9,
-        degree: int = 1,
-        insert_per_branch: int = 1,
-        table_name: str = "",
-        time_branching: bool = False,
-        time_inserts: bool = False,
-    ) -> str:
-        (root, total_branches) = build_branch_tree(
-            root_branch=self.root_branch_name,
-            tree_depth=tree_depth,
-            degree=degree,
-        )
-        print(RenderTree(root))
-
-        # Choose the table specified by `table_name`, or pick a random table for
-        # inserts.
-        # Branching is generally a database (or higher) -level operation and
-        # shouldn't concern a specific table.
-        all_tables = self.db_task.get_all_tables()
-        if table_name and table_name in all_tables:
-            insert_table = table_name
+            # Toss a fair coin to connect to the new branch, or stay on the
+            # current branch.
+            if rnd.random() < 0.5:
+                self.db_tools.connect_branch(next_branch_name)
+                # clear existing pks cache if switing to a different branch.
+                self._existing_pks = []
         else:
-            insert_table = random.choice(all_tables)
+            to_connect = random.choice(self._all_branches)
+            self.db_tools.connect_branch(to_connect)
+            # clear existing pks cache if switing to a different branch.
+            self._existing_pks = []
+        return created
+
+    def read(self, rnd):
+        _, cur_branch_id = self.db_tools.get_current_branch()
+
+        # Get a random key to read.
+        key_to_read = None
+        pk_columns = dbh.get_pk_column_names(
+            self.db_tools.get_current_connection(), self._db_name
+        )
+        existing_pks = self._existing_pks or dbh.get_pk_values(
+            self.db_tools.get_current_connection(),
+            self._db_name,
+            pk_columns,
+        )
+        if not existing_pks or (
+            self._modified_keys.get(cur_branch_id) and rnd.random() < 0.5
+        ):
+            key_to_read = random.choice(self._modified_keys[cur_branch_id])
+        else:
+            key_to_read = random.choice(existing_pks)
+
+        if not key_to_read:
+            print("No existing keys found, do nothing")
+            return
+
+        # Build the SQL query to read the key.
+        where_clause = " AND ".join(
+            [f"{pk_name} = %s" for pk_name in pk_columns]
+        )
+        select_sql = f"SELECT * FROM {self._table_name} WHERE {where_clause};"
+
+        # Read only touches a single key. We might be able to set this in
+        # execute_sql() but doing it here is easier.
+        self.db_tools.result_collector.record_num_keys_touched(1)
+
+        # Run the read.
+        self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+
+    def insert(self) -> bool:
+        _, cur_branch_id = self.db_tools.get_current_branch()
+
+        col_names = dbh.get_all_columns(self._table_name)
+        placeholders = ", ".join([f"%({name})s" for name in col_names])
+        insert_sql = f"INSERT INTO {self._table_name} ({', '.join(col_names)}) VALUES ({placeholders});"
+
+        pk_columns = dbh.get_pk_column_names(
+            self.db_tools.get_current_connection(), self._table_name
+        )
+        inserted = False
+
+        # Pre-record the number of keys for this op.
+        self.db_tools.result_collector.record_num_keys_touched(1)
+        for _ in range(5):
+            # Generate a new row. Note that this is using a data generator that
+            # isn't initialized with the current seed. But this should be fine
+            # since we shouldn't care about the exact values inserted.
+            row_data = self._table_datagen.generate_row()
+            pk_tuple = tuple(row_data[pk] for pk in pk_columns)
+
+            # Try to insert it, it may fail for PK collision.
+            try:
+                self.db_tools.execute_sql(insert_sql, row_data, timed=True)
+                self._modified_keys.setdefault(cur_branch_id, []).append(
+                    pk_tuple
+                )
+                inserted = True
+                break
+            except Exception:
+                continue
+        return inserted
+
+    def update(self):
+        pass
+
+    def range_update(self):
+        pass
+
+    def run_benchmark(self):
+        # Get the benchmark table and load the data generator for the table.
+        benchmark_table = self._config.table_name
+        if not benchmark_table:
+            all_tables = dbh.get_all_tables(
+                self.db_tools.get_current_connection()
+            )
+            benchmark_table = random.choice(all_tables)
+
+        table_schema = self.db_tools.get_table_schema(benchmark_table)
+        if not table_schema:
+            raise ValueError(
+                f"Could not fetch DDL for table {benchmark_table}."
+            )
+
+        self._table_datagen = DynamicDataGenerator(table_schema)
+
+        # Get the random seed for all remainder operations in the benchmark.
+        seed = time.time()
+        random.seed(seed)
 
         # Set context for result proto collection.
-        table_schema = self.db_task.db_tools.get_table_schema(insert_table)
-        self.result_collector.set_context(
-            table_name=insert_table if not time_branching else "",
-            table_schema=table_schema if not time_branching else "",
-            initial_db_size=self.db_task.get_db_size(),
+        self.db_tools.result_collector.set_context(
+            table_name=benchmark_table,
+            table_schema=table_schema,
+            initial_db_size=dbh.get_db_size(
+                self.db_tools.get_current_connection()
+            ),
+            seed=seed,
         )
 
-        current_visited = 0
-        current_level_nodes = [root]
-        for node in current_level_nodes:
-            # We don't time the branch switching for inserts since it's part of
-            # setup.
-            self.db_task.connect_branch(node.name, timed=time_branching)
-            if insert_per_branch > 0:
-                self.db_task.insert(
-                    insert_table,
-                    num_rows=insert_per_branch,
-                    timed=time_inserts,
-                )
-            current_visited += 1
-            # TODO: Change this to use tqdm for the for-loop.
-            mylogger.log_progress(
-                f"Progress:    {current_visited}/{total_branches} branches, "
-                f"inserted {insert_per_branch} records each."
-            )
-            _, cur_branch_id = self.db_task.get_current_branch()
-            for child in node.children:
-                success = self.db_task.create_branch(
-                    child.name, timed=time_branching, parent_id=cur_branch_id
-                )
-                if success:
-                    current_level_nodes.append(child)
-        print(
-            f"{current_visited} branches created, "
-            f"current one for following operations: {node.name}"
-        )
-        execute_elapsed = []
-        if time_branching:
-            execute_elapsed = self.result_collector.report_cursor_elapsed(
-                tag="branching"
-            )
-        else:
-            execute_elapsed = self.result_collector.report_cursor_elapsed(tag="execute")
+        # Get the list of operations to perform, and the probability of each
+        # operation.
+        all_operations = self._config.operations
+        ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
-        commit_elapsed = self.result_collector.report_connection_elapsed(tag="commit")
+        # Main benchmark loop
+        next_bid = 1
+        for _ in range(self._config.num_ops):
+            # Get the operation
+            cur_ops = random.choices(all_operations, ops_weights)[0]
 
-        if time_branching:
-            log_result(
-                execute=execute_elapsed,
-                commit=commit_elapsed,
-                table_name=insert_table,
-                label="branching",
-            )
-        if time_inserts:
-            # Set context for insert proto collection
-            table_schema = self.db_task.db_tools.get_table_schema(insert_table)
-            self.result_collector.set_context(
-                operation_type="insert",
-                table_name=insert_table,
-                table_schema=table_schema,
-            )
-            
-            log_result(
-                execute=execute_elapsed,
-                commit=commit_elapsed,
-                table_name=insert_table,
-                label="insert",
-            )
-        self.result_collector.reset()
-        return insert_table
-
-    # =========================================================================
-    # Benchmark code below
-    # =========================================================================
-
-    # Benchmark that creates a branch tree and measures the time taken to create
-    # the branches.
-    def branch_bench(
-        self, tree_depth: int = 9, degree: int = 1, insert_per_branch: int = 1
-    ) -> None:
-        print("\n ====== Running branch benchmark...\n", flush=True)
-
-        self.branch_insert_op(
-            tree_depth=tree_depth,
-            degree=degree,
-            insert_per_branch=insert_per_branch,
-            time_branching=True,
-            time_inserts=False,
-        )
-
-    def insert_bench(
-        self, num_inserts: int = 100, table_names: list[str] = []
-    ) -> None:
-        print("\n ====== Running insert benchmark...\n", flush=True)
-
-        tables_to_insert = (
-            table_names if table_names else self.db_task.get_all_tables()
-        )
-        for table in tables_to_insert:
-            # Set context for proto collection
-            table_schema = self.db_task.db_tools.get_table_schema(table)
-            self.result_collector.set_context(
-                table_name=table,
-                table_schema=table_schema,
-                initial_db_size=self.db_task.get_db_size(),
-            )
-            
-            self.db_task.insert(table, num_rows=num_inserts, timed=True)
-            self.result_collector.reset()
-
-    # Benchmark that creates a branch tree and measures the time taken to insert
-    # records into the branches.
-    def branch_insert_bench(
-        self,
-        tree_depth: int = 9,
-        degree: int = 1,
-        insert_per_branch: int = 1,
-        table_name: str = "",
-    ) -> None:
-        print("\n ====== Running branch insert benchmark...\n", flush=True)
-        self.branch_insert_op(
-            tree_depth=tree_depth,
-            degree=degree,
-            insert_per_branch=insert_per_branch,
-            table_name=table_name,
-            time_branching=False,
-            time_inserts=True,
-        )
-
-    # Benchmark that creates a branch tree, inserts records into the branches,
-    # and measures the time taken to read the records.
-    def branch_insert_read_bench(
-        self,
-        sampling_args: sampling.SamplingArgs = None,
-        tree_depth: int = 9,
-        degree: int = 1,
-        insert_per_branch: int = 1,
-        intended_table_name: str = "",
-    ) -> None:
-        final_table_name = self.branch_insert_op(
-            tree_depth=tree_depth,
-            degree=degree,
-            insert_per_branch=insert_per_branch,
-            table_name=intended_table_name,
-        )
-        self.read_skip_setup(final_table_name, sampling_args)
-
-    # Benchmark that measures the time taken to update a single record in 
-    # table(s) specified by `table_names`.
-    def update_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-    ) -> None:
-        self._run_update_bench(
-            table_names=table_names,
-            sampling_args=sampling_args,
-            branch_name=branch_name,
-            pk_file=pk_file,
-            range_size=0,
-        )
-
-    # Benchmark that measures the time taken to update a range of records in 
-    # table(s) specified by `table_names`.
-    def range_update_bench(
-        self,
-        table_names: list[str] = [],
-        sampling_args: sampling.SamplingArgs = None,
-        branch_name: str = "",
-        pk_file: str = "",
-        range_size: int = 20,
-    ) -> None:
-        self._run_update_bench(
-            table_names=table_names,
-            sampling_args=sampling_args,
-            branch_name=branch_name,
-            pk_file=pk_file,
-            range_size=range_size,
-        )
+            if cur_ops == tp.OperationType.BRANCH:
+                created = self.maybe_branch_and_reconnect(next_bid, random)
+                if created:
+                    next_bid += 1
+            elif cur_ops == tp.OperationType.READ:
+                self.read()
+            elif cur_ops == tp.OperationType.INSERT:
+                self.insert()
+            elif cur_ops == tp.OperationType.UPDATE:
+                self.update()
+            elif cur_ops == tp.OperationType.RANGE_UPDATE:
+                self.range_update()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run database benchmarks.")
-    parser.add_argument(
-        "--backend",
-        default="dolt",
-        choices=["dolt", "neon"],
-        help="The database backend to use.",
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Run database benchmarks from config file."
     )
 
     parser.add_argument(
-        "--db_schema_path",
-        default="db_setup/tpcc_schema.sql",
-        help="Path to the database schema SQL file.",
-    )
-
-    parser.add_argument(
-        "--preload_data_dir",
-        default="",
-        help="Path to the directory with data files to preload.",
-    )
-
-    parser.add_argument(
-        "--no_cleanup",
-        action="store_true",
-        help="Keep the database after benchmarks are done.",
-    )
-
-    parser.add_argument(
-        "--branch_only",
-        action="store_true",
-        help="Only run the branch benchmark.",
-    )
-
-    parser.add_argument(
-        "--read_only",
-        action="store_true",
-        help="Only run the read benchmark after preloading data.",
-    )
-
-    parser.add_argument(
-        "--insert_only",
-        action="store_true",
-        help="Only run the insert benchmark.",
-    )
-
-    parser.add_argument(
-        "--update_only",
-        action="store_true",
-        help="Only run the update benchmark.",
-    )
-
-    parser.add_argument(
-        "--range_update_only",
-        action="store_true",
-        help="Only run the range update benchmark.",
-    )
-
-    parser.add_argument(
-        "--range_size",
-        type=int,
-        default=20,
-        help="Number of rows to update per range operation (for range_update_only).",
-    )
-
-    parser.add_argument(
-        "--branch_insert",
-        action="store_true",
-        help="Only run the branch insert benchmark.",
-    )
-
-    parser.add_argument(
-        "--branch_insert_read",
-        action="store_true",
-        help="Run branch insert followed by read benchmark.",
-    )
-
-    parser.add_argument(
-        "--read_no_setup",
-        action="store_true",
-        help=(
-            "Run read benchmark without preloading data. This assumes data is "
-            "already present. --table_name must be provided."
-        ),
-    )
-
-    parser.add_argument(
-        "--preload_only",
-        action="store_true",
-        help="Only preload data without running any benchmarks. This requires "
-        "--preload_data_dir being set to a valid directory containing a list"
-        "of CSV files matching the tables in the schema.",
-    )
-
-    parser.add_argument(
-        "--reuse_existing_db",
-        action="store_true",
-        help="Reuse an existing database instead of creating a new one.",
-    )
-
-    parser.add_argument(
-        "--table_names",
+        "--config",
         type=str,
-        help="Names of the tables to run the benchmark on. Comma separated.",
-    )
-
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        help="Alpha parameter for the read predicate's distribution.",
-    )
-
-    parser.add_argument(
-        "--beta",
-        type=float,
-        help="Beta parameter for the read predicate's distribution.",
-    )
-
-    parser.add_argument(
-        "--branch_name",
-        type=str,
-        help="Name of the branch to connect to for the ops.",
-    )
-
-    parser.add_argument(
-        "--branch_depth",
-        type=int,
-        default=9,
-        help="Depth of the branch tree for branch benchmarks.",
-    )
-
-    parser.add_argument(
-        "--branch_degree",
-        type=int,
-        default=1,
-        help="Degree of the branch tree for branch benchmarks.",
-    )
-
-    parser.add_argument(
-        "--num_inserts",
-        type=int,
-        default=None,
-        help="Number of rows to insert at a single time",
-    )
-
-    parser.add_argument(
-        "--sort_idx",
-        type=int,
-        default=None,
-        help="Index to sort sampled results by.",
-    )
-
-    parser.add_argument(
-        "--max_sample_size",
-        type=int,
-        default=100,
-        help="Maximum sample size for read benchmarks.",
-    )
-
-    parser.add_argument(
-        "--sampling_rate",
-        type=float,
-        default=0.05,
-        help="Sampling rate for read benchmarks.",
-    )
-
-    parser.add_argument(
-        "--pk_file",
-        type=str,
-        default="",
-        help="Path to the file containing primary keys to read from.",
-    )
-
-    parser.add_argument(
-        "--neon_project_id",
-        type=str,
-        default="",
-        help="Neon project ID to connect to when running read_no_setup.",
+        default="microbench/test_config.textproto",
+        help="Path to the task configuration file (textproto format).",
     )
 
     args = parser.parse_args()
 
-    # TODO: Consider init BenchmarkSuite with just `args` and has a cleaner
-    # `Init()` method.
+    # Load and parse the textproto config file
+    try:
+        config = tp.TaskConfig()
+        with open(args.config, "r") as f:
+            text_format.Parse(f.read(), config)
 
-    # Decide when we need to setup the database.
-    require_db_setup = not (args.read_no_setup or args.reuse_existing_db)
-    if args.backend == "neon":
-        assert require_db_setup or args.neon_project_id, (
-            "When reusing existing Neon database, --neon_project_id "
-            "must be provided."
+        print(f"Loaded configuration from {args.config}")
+        print(f"Run ID: {config.run_id}")
+        print(f"Backend: {tp.TaskConfig.Backend.Name(config.backend)}")
+        print(
+            f"Operation: {tp.TaskConfig.OperationType.Name(config.operation_type)}"
         )
-    # Decide whether we need to cleanup database after benchmark.
-    delete_db_after_done = not (
-        args.no_cleanup or args.reuse_existing_db or args.preload_only
-    )
 
-    with BenchmarkSuite(
-        backend=args.backend,
-        db_name="microbench",
-        # If we preload data, we most certainly want to keep the database.
-        delete_db_after_done=delete_db_after_done,
-        # Specifying read_no_setup means the DB to be read has already been setup.
-        require_db_setup=require_db_setup,
-        neon_project_id=args.neon_project_id,
-    ) as single_task_bench:
-        table_names = args.table_names.split(",") if args.table_names else []
-        if require_db_setup:
-            single_task_bench.setup_benchmark_database(
-                db_schema_path=args.db_schema_path,
-                preload_data_dir=args.preload_data_dir
-                if args.preload_data_dir
-                else "",
-            )
-        if args.branch_only:
-            single_task_bench.branch_bench(
-                tree_depth=args.branch_depth,
-                degree=args.branch_degree,
-                insert_per_branch=args.num_inserts or 0,
-            )
-        elif args.insert_only:
-            single_task_bench.insert_bench(
-                num_inserts=args.num_inserts or 100,
-                table_name=table_names,
-            )
+    except FileNotFoundError:
+        print(f"Error: Config file not found: {args.config}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error parsing config file: {e}")
+        sys.exit(1)
 
-        elif args.update_only or args.range_update_only:
-            sampling_args = sampling.SamplingArgs(
-                sampling_rate=args.sampling_rate,
-                max_sampling_size=args.max_sample_size,
-                distribution=lambda size: sampling.beta_distribution(
-                    size,
-                    alpha=args.alpha if args.alpha else 10,
-                    beta=args.beta if args.beta else 1,
-                ),
-                sort_idx=args.sort_idx or -1,
-            )
-            if args.range_update_only:
-                single_task_bench.range_update_bench(
-                    table_names=table_names,
-                    sampling_args=sampling_args,
-                    branch_name=args.branch_name if args.branch_name else "",
-                    pk_file=args.pk_file,
-                    range_size=args.range_size,
-                )
-            else:
-                single_task_bench.update_bench(
-                    table_names=table_names,
-                    sampling_args=sampling_args,
-                    branch_name=args.branch_name if args.branch_name else "",
-                    pk_file=args.pk_file,
-                )
+    validate_config(config)
 
-        elif args.branch_insert:
-            single_task_bench.branch_insert_bench(
-                tree_depth=args.branch_depth,
-                degree=args.branch_degree,
-                insert_per_branch=args.num_inserts or 100,
-                table_name=table_names,
-            )
-
-        elif args.branch_insert_read:
-            sampling_args = sampling.SamplingArgs(
-                sampling_rate=args.sampling_rate,
-                max_sampling_size=args.max_sample_size,
-                distribution=lambda size: sampling.beta_distribution(
-                    size,
-                    alpha=args.alpha if args.alpha else 10,
-                    beta=args.beta if args.beta else 1.0,
-                ),
-                sort_idx=args.sort_idx or -1,
-            )
-            single_task_bench.branch_insert_read_bench(
-                sampling_args=sampling_args,
-                tree_depth=args.branch_depth,
-                degree=args.branch_degree,
-                insert_per_branch=args.num_inserts or 100,
-                intended_table_name=table_names,
-            )
-        elif args.read_no_setup:
-            sampling_args = sampling.SamplingArgs(
-                sampling_rate=args.sampling_rate,
-                max_sampling_size=args.max_sample_size,
-                distribution=lambda size: sampling.beta_distribution(
-                    size,
-                    alpha=args.alpha if args.alpha else 10,
-                    beta=args.beta if args.beta else 1.0,
-                ),
-                sort_idx=args.sort_idx or -1,
-            )
-            single_task_bench.read_skip_setup(
-                table_name=table_names,
-                sampling_args=sampling_args,
-                branch_name=args.branch_name if args.branch_name else "",
-                pk_file=args.pk_file,
-            )
+    with BenchmarkSuite(config) as bench:
+        bench.maybe_setup_db()
+        bench.run_benchmark()

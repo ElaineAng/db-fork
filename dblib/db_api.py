@@ -32,6 +32,9 @@ class DBToolSuite(ABC):
             self.conn.close()
             self.conn = None
 
+    def get_current_connection(self) -> _pgconn:
+        return self.conn
+
     ######################################################################
     # Protected methods
     ######################################################################
@@ -46,10 +49,10 @@ class DBToolSuite(ABC):
         return wrapper
 
     @abstractmethod
-    def _connect_branch_impl(self, branch_name: str) -> bool:
+    def _connect_branch_impl(self, branch_name: str) -> None:
         """
         Connects to an existing branch to allow reading and writing data to that
-        branch. Return a bool indicating whether the operation was successful.
+        branch. Might raise an exception if connection fails.
         This method is timed by its caller. Don't implement additional timing.
         """
         pass
@@ -57,10 +60,9 @@ class DBToolSuite(ABC):
     @abstractmethod
     def _create_branch_impl(
         self, branch_name: str, parent_id: str = None
-    ) -> bool:
+    ) -> None:
         """
-        Creates a new branch. Return a bool indicating whether the operation was
-        successful.
+        Creates a new branch. Might raise an exception if creation fails.
         This method is timed by its caller. Don't implement additional timing.
         """
         pass
@@ -96,6 +98,60 @@ class DBToolSuite(ABC):
         query = f"DROP DATABASE IF EXISTS {db_name};"
         self.execute_sql(query)
 
+    def get_table_schema(self, table_name: str) -> str:
+        """
+        Returns the schema of a specific table in a CREATE TABLE format.
+        """
+        # Query for column details, including length and precision/scale
+        query = """
+        SELECT
+            column_name,
+            udt_name,
+            is_nullable,
+            character_maximum_length,
+            numeric_precision,
+            numeric_scale
+        FROM
+            information_schema.columns
+        WHERE
+            table_name = %s
+        ORDER BY
+            ordinal_position;
+        """
+        columns = self.run_sql_query(query, (table_name,))
+
+        if not columns:
+            return f"Error: Table '{table_name}' not found."
+
+        column_definitions = []
+        for (
+            col_name,
+            udt_name,
+            is_nullable,
+            char_len,
+            num_prec,
+            num_scale,
+        ) in columns:
+            data_type = udt_name
+
+            # Append length for character types
+            if char_len is not None:
+                data_type += f"({char_len})"
+            # Append precision and scale for numeric types
+            elif udt_name in ("numeric", "decimal") and num_prec is not None:
+                data_type += f"({num_prec}, {num_scale})"
+
+            # Construct the column definition line
+            definition = f"  {col_name} {data_type}"
+            if is_nullable == "NO":
+                definition += " NOT NULL"
+            column_definitions.append(definition)
+
+        # Assemble the final CREATE TABLE string
+        return "CREATE TABLE {} (\n{}\n);".format(
+            table_name, ",\n".join(column_definitions)
+        )
+
     #########################################################################
     # API exposed to interact with a branchable database
     #########################################################################
@@ -106,10 +162,14 @@ class DBToolSuite(ABC):
         Creates a new branch. This is always timed.
         """
         done = False
-        with self.result_collector.maybe_time_ops(
-            op_type=OpType.CREATE_BRANCH, timed=True
-        ):
-            done = self._create_branch_impl(branch_name, parent_id)
+        try:
+            with self.result_collector.maybe_time_ops(
+                op_type=OpType.CREATE_BRANCH, timed=True
+            ):
+                self._create_branch_impl(branch_name, parent_id)
+                done = True
+        except Exception as e:
+            print(f"Error creating branch: {e}")
         if done:
             self.result_collector.flush_record()
         return done
@@ -121,11 +181,15 @@ class DBToolSuite(ABC):
         branch. Return a bool indicating whether the operation was successful.
         """
         done = False
-        with self.result_collector.maybe_time_ops(
-            op_type=OpType.CONNECT_BRANCH, timed=timed
-        ):
-            done = self._connect_branch_impl(branch_name)
-        if done:
+        try:
+            with self.result_collector.maybe_time_ops(
+                op_type=OpType.CONNECT_BRANCH, timed=timed
+            ):
+                self._connect_branch_impl(branch_name)
+                done = True
+        except Exception as e:
+            print(f"Error connecting to branch: {e}")
+        if done and timed:
             self.result_collector.flush_record()
         return done
 
@@ -147,7 +211,8 @@ class DBToolSuite(ABC):
         with self.result_collector.maybe_time_ops(timed, OpType.COMMIT):
             self._prepare_commit(message)
             self.conn.commit()
-        self.result_collector.flush_record()
+        if timed:
+            self.result_collector.flush_record()
 
     @_require_connection
     def execute_sql(
@@ -172,9 +237,11 @@ class DBToolSuite(ABC):
                     cur.execute(query, vars)
                     res = cur.fetchall()
                 print(f"Executed query: {query} with vars: {vars}")
-                return res
         except psycopg2.ProgrammingError:
             # No results to fetch (e.g., for INSERT/UPDATE statements).
-            return res
+            res = []
         except Exception as e:
             raise Exception(f"Error executing sql query: {query}; {vars}; {e}")
+        if timed:
+            self.result_collector.flush_record()
+        return res

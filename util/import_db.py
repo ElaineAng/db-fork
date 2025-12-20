@@ -24,6 +24,9 @@ def load_sql_file(
         FileNotFoundError: If the SQL file doesn't exist
         psycopg2.Error: If there's an error executing the SQL statements
     """
+    if not conn:
+        raise ValueError("Connection object is required")
+
     sql_file_path = Path(sql_file_path)
 
     if not sql_file_path.exists():

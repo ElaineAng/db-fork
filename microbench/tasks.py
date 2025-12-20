@@ -2,12 +2,11 @@ import os
 import random
 import pickle
 from typing import Tuple
-from pathlib import Path
 from datetime import datetime
 
 from tqdm import tqdm
 
-from dblib.db_api import DBToolSuite
+from dblib.db_api_back import DBToolSuite
 from microbench.datagen import DynamicDataGenerator
 from microbench import sampling
 
@@ -53,27 +52,6 @@ class DatabaseTask:
             self.all_tables = self.db_tools.get_all_tables()
         return self.all_tables
 
-    def preload_db_data(self, dir_path: str) -> list[str]:
-        """
-        Preloads data into all tables from CSV files located in the specified
-        directory. Each table should have a corresponding CSV file named
-        '<table_name>.csv'.
-        """
-        all_tables = self.get_all_tables()
-        loaded_tables = []
-        for table in all_tables:
-            file_path = Path(dir_path) / f"{table}.csv"
-            if not file_path.exists():
-                print(f" No data file found for table '{table}', skipping.")
-                continue
-            print(
-                f" Bulk copying data into table '{table}' from '{file_path}'..."
-            )
-            self.db_tools.bulk_copy_from_file(table, str(file_path))
-            loaded_tables.append(table)
-
-        return loaded_tables
-
     def create_branch(
         self, branch_name: str, timed: bool = True, parent_id: str = None
     ) -> bool:
@@ -116,7 +94,9 @@ class DatabaseTask:
         pk_list = []
         if pk_file or self.inserted_keys_file:
             pk_file = pk_file or self.inserted_keys_file.name
-            print(f" Loading primary keys from file '{pk_file}' preserving order...")
+            print(
+                f" Loading primary keys from file '{pk_file}' preserving order..."
+            )
             with open(pk_file, "rb") as f:
                 while True:
                     try:
@@ -446,7 +426,9 @@ class DatabaseTask:
                 f"WHERE {pk_column} >= %(start_pk)s AND {pk_column} <= %(end_pk)s;"
             )
 
-            self.db_tools.timed_update(update_sql, update_data, num_keys=rows_updated)
+            self.db_tools.timed_update(
+                update_sql, update_data, num_keys=rows_updated
+            )
 
             total_rows_updated += end_idx - start_idx + 1
 

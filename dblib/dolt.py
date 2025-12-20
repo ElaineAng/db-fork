@@ -48,22 +48,20 @@ class DoltToolSuite(DBToolSuite):
             # Ignore commit errors (e.g., no changes to commit).
             print(f"Commit failed: {e}")
 
-    def _create_branch_impl(self, branch_name: str) -> bool:
+    def _create_branch_impl(self, branch_name: str) -> None:
         """
         Creates a new branch in the Dolt database.
         """
         cmd = f"call dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
-        return True
 
-    def _connect_branch_impl(self, branch_name: str) -> bool:
+    def _connect_branch_impl(self, branch_name: str) -> None:
         """
         Connects to an existing branch in the Dolt database to allow reads and
         writes on that branch.
         """
         cmd = f"call dolt_checkout('{branch_name}');"
         super().execute_sql(cmd)
-        return True
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         # TODO: Consider cache the current branch name to avoid querying.

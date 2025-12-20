@@ -76,8 +76,6 @@ class ResultCollector:
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
 
-        # Context information for the current operation
-
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
@@ -103,14 +101,16 @@ class ResultCollector:
 
     def set_context(
         self,
-        table_name: str = "",
-        table_schema: str = "",
-        initial_db_size: int = 0,
+        table_name: str,
+        table_schema: str,
+        initial_db_size: int,
+        seed: int,
     ):
         """Set context information for the next operation to be timed."""
         self.current_table_name = table_name
         self.current_table_schema = table_schema
         self.initial_db_size = initial_db_size
+        self._seed = seed
 
     def _validate_and_set_op_type(self, op_type: OpType):
         if (
@@ -155,6 +155,7 @@ class ResultCollector:
         result.table_name = self.current_table_name
         result.table_schema = self.current_table_schema
         result.initial_db_size = self.initial_db_size
+        result.seed = self._seed
 
         # Fill in collected metrics
         result.op_type = self._current_op_type.value

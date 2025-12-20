@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package microbench;
+
+// Branch tree configuration
+message BranchConfig {
+    int32 depth = 1;   // Depth of the branch tree
+    int32 degree = 2;  // Branching factor (children per node)
+}
+
+// All supported database backends
+enum Backend {
+    NEON = 0;
+    DOLT = 1;
+}
+
+// Type of benchmark operation to perform
+enum OperationType {
+    BRANCH = 0;
+    READ = 1;
+    INSERT = 2;
+    UPDATE = 3;
+    RANGE_UPDATE = 4;
+}
+
+// Configuration for reusing an existing database
+message ExistingDatabase {
+    string branch_id = 1;        // Required: specific branch to connect to
+    string neon_project_id = 2;  // Only required for Neon backend
+}
+
+// Configuration for creating database from SQL dump.
+// The exact size of data varies, could be large or just an empty schema.
+message SqlDump {
+    string sql_dump_path = 1;      // Path to .sql file that can be imported
+}
+
+// Database setup configuration
+message DatabaseSetup {
+    string db_name = 1;
+    bool cleanup = 2;  // Whether to delete database after completion
+    
+    // Either reuse an existing database or create from SQL dump.
+    // The main difference is whether the data is hot or not.
+    oneof source {
+        ExistingDatabase existing_db = 3;
+        SqlDump sql_dump = 4;
+    }
+}
+
+// Range update configuration
+message RangeUpdateConfig {
+    int32 range_size = 1;  // Number of rows per range operation
+    SamplingConfig sampling_config = 2; // Sampling configuration for range update
+}
+
+message PointReadConfig {
+    SamplingConfig sampling_config = 1; // Sampling configuration for point read
+}
+
+// Sampling configuration
+message SamplingConfig {
+    double alpha = 1;  // Alpha parameter for beta distribution
+    double beta = 2;   // Beta parameter for beta distribution
+    double sampling_rate = 3;
+    int32 max_sample_size = 4;
+    int32 sort_idx = 5;  // Index to sort sampled results by
+}
+
+// Configuration for a benchmark task
+message TaskConfig {
+  // Unique identifier for this benchmark run
+  string run_id = 1;
+  
+  // Database backend to use
+  Backend backend = 2;
+  
+  // Set of operation type to perform.
+  repeated OperationType operations = 3;
+
+  // Number of operations to perform. This should be set to a large enough
+  // number to ensure that the benchmark performs all specified operations.
+  int32 num_ops = 4;
+  
+  // Table to benchmark (empty means any random table from the schema)
+  string table_name = 5;
+
+  // The branch to start from.
+  string starting_branch = 6;
+  
+  // Necessary setup for the database
+  DatabaseSetup database_setup = 7;
+  
+  // Range update configuration
+  RangeUpdateConfig range_update_config = 8;
+  
+  // Read operation configuration (sampling parameters)
+  PointReadConfig point_read_config = 9;
+
+  // Branch tree configuration
+  BranchConfig branch_config = 10;
+}
