@@ -113,6 +113,7 @@ class NeonToolSuite(DBToolSuite):
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
         self.autocommit = autocommit
+        self._all_branches = {}
 
     def _get_neon_branches(self) -> list[dict]:
         """
@@ -154,16 +155,10 @@ class NeonToolSuite(DBToolSuite):
             "endpoints": [{"type": "read_write"}],
             "branch": {"name": branch_name, "parent_id": parent_id},
         }
-        try:
-            # This returns the branch object which has a connection string.
-            # We could use that when we implement caching of connection strings.
-            _ = neon.branch_create(self.project_id, **branch_payload)
-        except Exception as e:
-            if "branch already exists" in str(e):
-                print(f"Branch '{branch_name}' already exists.")
-            else:
-                print(f"Failed to create branch '{branch_name}': {e}")
-                raise e
+
+        # This returns a BranchOperations object with .branch attribute
+        new_branch = neon.branch_create(self.project_id, **branch_payload)
+        self._all_branches[branch_name] = (new_branch.branch.id, "")
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -173,19 +168,19 @@ class NeonToolSuite(DBToolSuite):
         # Connecting to a specific branch involves establishing a new connection
         # to essentially a different database in Neon.
         #
-        # Note that there are two additional API calls which adds additional
-        # time. If this ends up becoming a performance issue, we could cache the
-        # connection URI per branch name.
-        all_branches = self._get_neon_branches()
-        if branch_name not in all_branches:
-            raise ValueError(f"Branch '{branch_name}' does not exist.")
-        branch_id = all_branches[branch_name][0]
-
-        uri = self.__class__._get_neon_connection_uri(
-            self.project_id,
-            branch_id,
-            self.conn.get_dsn_parameters()["dbname"],
-        )
+        # Note that the first time we connect to a branch, we need to make an API
+        # call to get the connection string, which may be add slight additional
+        # overhead.
+        branch_id = self._all_branches[branch_name][0]
+        uri = self._all_branches[branch_name][1]
+        if not uri:
+            uri = self.__class__._get_neon_connection_uri(
+                self.project_id,
+                branch_id,
+                self.conn.get_dsn_parameters()["dbname"],
+            )
+            # Cache the URI - replace tuple since tuples are immutable
+            self._all_branches[branch_name] = (branch_id, uri)
 
         self.conn.close()
         self.conn = psycopg2.connect(uri)

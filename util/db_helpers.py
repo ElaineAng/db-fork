@@ -87,7 +87,7 @@ def _get_primary_key_columns(
                 AND table_name = %s
                 AND constraint_type = 'PRIMARY KEY'
             )
-        ORDER BY ordinal_position ASC;
+        ORDER BY ordinal_position DESC;
     """
     pk_columns = _run_sql_query(conn, query, (table_name, table_name))
     return [(col[0], col[1]) for col in pk_columns]

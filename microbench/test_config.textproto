@@ -11,7 +11,7 @@ operations: UPDATE
 operations: RANGE_UPDATE
 operations: BRANCH
 
-num_ops: 100
+num_ops: 5000
 
 # Table to benchmark (empty means random table from schema)
 table_name: "orders"

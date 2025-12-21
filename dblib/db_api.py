@@ -1,3 +1,4 @@
+import tqdm
 import functools
 from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
@@ -159,41 +160,34 @@ class DBToolSuite(ABC):
     #########################################################################
 
     @_require_connection
-    def create_branch(self, branch_name: str, parent_id: str = None) -> bool:
+    def create_branch(self, branch_name: str, parent_id: str = None) -> None:
         """
         Creates a new branch. This is always timed.
         """
-        done = False
         try:
             with self.result_collector.maybe_time_ops(
                 op_type=rslt.OpType.BRANCH_CREATE, timed=True
             ):
                 self._create_branch_impl(branch_name, parent_id)
-                done = True
         except Exception as e:
-            print(f"Error creating branch: {e}")
-        if done:
-            self.result_collector.flush_record()
-        return done
+            raise Exception(f"Error creating branch: {e}")
+        self.result_collector.flush_record()
 
     @_require_connection
-    def connect_branch(self, branch_name: str, timed: bool = False) -> bool:
+    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
         """
         Connects to an existing branch to allow reading and writing data to that
         branch. Return a bool indicating whether the operation was successful.
         """
-        done = False
         try:
             with self.result_collector.maybe_time_ops(
                 op_type=rslt.OpType.BRANCH_CONNECT, timed=timed
             ):
                 self._connect_branch_impl(branch_name)
-                done = True
         except Exception as e:
-            print(f"Error connecting to branch: {e}")
-        if done and timed:
+            raise Exception(f"Error connecting to branch: {e}")
+        if timed:
             self.result_collector.flush_record()
-        return done
 
     @_require_connection
     def get_current_branch(self) -> Tuple[str, str]:

@@ -1,4 +1,4 @@
-import tqdm
+from tqdm import tqdm
 from util.import_db import load_sql_file
 import argparse
 import random
@@ -143,7 +143,8 @@ class BenchmarkSuite:
 
                 # Now get the connection uri for the benchmark database.
                 print(
-                    f"Default Neon branch name: {self._root_branch_name}, ID: {default_branch_id}"
+                    f"Default Neon branch name: {self._root_branch_name}, "
+                    f"ID: {default_branch_id}"
                 )
                 self._all_branches.append(self._root_branch_name)
                 db_tools = NeonToolSuite.init_for_bench(
@@ -229,14 +230,15 @@ class BenchmarkSuite:
             self._config.database_setup.sql_dump.sql_dump_path,
         )
 
-    def maybe_branch_and_reconnect(self, next_bid, rnd) -> bool:
+    def maybe_branch_and_reconnect(
+        self, next_bid, rnd, branch_limit_reached
+    ) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
-
-        next_branch_name = f"branch_{next_bid}"
-        created = self.db_tools.create_branch(
-            branch_name=next_branch_name, parent_id=cur_id
-        )
-        if created:
+        if not branch_limit_reached:
+            next_branch_name = f"branch_{next_bid}"
+            self.db_tools.create_branch(
+                branch_name=next_branch_name, parent_id=cur_id
+            )
             self._all_branches.append(next_branch_name)
 
             # Toss a fair coin to connect to the new branch, or stay on the
@@ -245,12 +247,12 @@ class BenchmarkSuite:
                 self.db_tools.connect_branch(next_branch_name, timed=True)
                 # clear existing pks cache if switing to a different branch.
                 self._existing_pks = []
-        else:
+        elif rnd.random() < 0.25:
+            # 1/4 chance to connect to a random branch.
             to_connect = random.choice(self._all_branches)
             self.db_tools.connect_branch(to_connect, timed=True)
             # clear existing pks cache if switing to a different branch.
             self._existing_pks = []
-        return created
 
     def _select_random_key(self, rnd, benchmark_table):
         """Select a random key from existing PKs or modified keys.
@@ -283,8 +285,7 @@ class BenchmarkSuite:
         _, key_to_read = self._select_random_key(rnd, benchmark_table)
 
         if not key_to_read:
-            print("No existing keys found, do nothing")
-            return
+            raise ValueError("No existing keys found during read, do nothing")
 
         # Build the SQL query to read the key.
         where_clause = " AND ".join(
@@ -341,16 +342,14 @@ class BenchmarkSuite:
                 break
             except Exception:
                 continue
-        return inserted
 
-    def update_op(self, rnd, benchmark_table) -> bool:
+    def update_op(self, rnd, benchmark_table) -> None:
         cur_branch_id, key_to_update = self._select_random_key(
             rnd, benchmark_table
         )
 
         if not key_to_update:
-            print("No existing keys found, do nothing")
-            return False
+            raise ValueError("No existing keys found during update, do nothing")
 
         # Get all columns and filter out PK columns to get updatable columns.
         all_columns = dbh.get_all_columns(
@@ -361,8 +360,7 @@ class BenchmarkSuite:
         ]
 
         if not non_pk_columns:
-            print("No non-PK columns to update")
-            return False
+            raise ValueError("No non-PK columns to update")
 
         # Generate new values for non-PK columns.
         row_data = self._table_datagen.generate_row()
@@ -387,21 +385,16 @@ class BenchmarkSuite:
         self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the update.
-        try:
-            self.db_tools.execute_sql(update_sql, row_data, timed=True)
-            # Track the modified key.
-            if key_to_update not in self._modified_keys.get(cur_branch_id, []):
-                self._modified_keys.setdefault(cur_branch_id, []).append(
-                    key_to_update
-                )
-            if not self.db_tools.autocommit:
-                self.db_tools.commit_changes(timed=True)
-            return True
-        except Exception as e:
-            print(f"Update failed: {e}")
-            return False
+        self.db_tools.execute_sql(update_sql, row_data, timed=True)
+        # Track the modified key.
+        if key_to_update not in self._modified_keys.get(cur_branch_id, []):
+            self._modified_keys.setdefault(cur_branch_id, []).append(
+                key_to_update
+            )
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=True)
 
-    def range_update_op(self, rnd, benchmark_table) -> int:
+    def range_update_op(self, rnd, benchmark_table) -> None:
         """Perform a range update on multiple rows.
 
         Selects two random keys to bound the range. The number of rows between
@@ -429,8 +422,9 @@ class BenchmarkSuite:
         )
 
         if not existing_pks:
-            print("No existing keys found, do nothing")
-            return 0
+            raise ValueError(
+                "No existing keys found during range update, do nothing"
+            )
 
         # Sort by all PK columns (tuple comparison).
         sorted_pks = sorted(existing_pks)
@@ -477,8 +471,7 @@ class BenchmarkSuite:
         ]
 
         if not non_pk_columns:
-            print("No non-PK columns to update")
-            return 0
+            raise ValueError("No non-PK columns to update")
 
         # Generate new values for non-PK columns.
         row_data = self._table_datagen.generate_row()
@@ -502,20 +495,16 @@ class BenchmarkSuite:
         )
 
         # Run the range update.
-        try:
-            self.db_tools.execute_sql(update_sql, row_data, timed=True)
+        self.db_tools.execute_sql(update_sql, row_data, timed=True)
 
-            # Track all actual keys in the range as modified.
-            modified_list = self._modified_keys.setdefault(cur_branch_id, [])
-            for key in keys_in_range:
-                if key not in modified_list:
-                    modified_list.append(key)
-            if not self.db_tools.autocommit:
-                self.db_tools.commit_changes(timed=True)
-            return len(keys_in_range)
-        except Exception as e:
-            print(f"Range update failed: {e}")
-            return 0
+        # Track all actual keys in the range as modified.
+        modified_list = self._modified_keys.setdefault(cur_branch_id, [])
+        for key in keys_in_range:
+            if key not in modified_list:
+                modified_list.append(key)
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=True)
+        return len(keys_in_range)
 
     def run_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
@@ -555,22 +544,34 @@ class BenchmarkSuite:
 
         # Main benchmark loop
         next_bid = 1
-        for _ in tqdm.tqdm(range(self._config.num_ops)):
+        branch_limit_reached = False
+        for _ in tqdm(range(self._config.num_ops)):
             # Get the operation
             cur_ops = random.choices(all_operations, ops_weights)[0]
-
-            if cur_ops == tp.OperationType.BRANCH:
-                created = self.maybe_branch_and_reconnect(next_bid, random)
-                if created:
+            try:
+                if cur_ops == tp.OperationType.BRANCH:
+                    try:
+                        self.maybe_branch_and_reconnect(
+                            next_bid, random, branch_limit_reached
+                        )
+                    except Exception as e:
+                        if "branches limit exceeded" in str(e):
+                            branch_limit_reached = True
+                        raise e
                     next_bid += 1
-            elif cur_ops == tp.OperationType.READ:
-                self.read_op(random, benchmark_table)
-            elif cur_ops == tp.OperationType.INSERT:
-                self.insert_op(benchmark_table)
-            elif cur_ops == tp.OperationType.UPDATE:
-                self.update_op(random, benchmark_table)
-            elif cur_ops == tp.OperationType.RANGE_UPDATE:
-                self.range_update_op(random, benchmark_table)
+                elif cur_ops == tp.OperationType.READ:
+                    try:
+                        self.read_op(random, benchmark_table)
+                    except ValueError as e:
+                        tqdm.write(f"Error reading key: {e}")
+                elif cur_ops == tp.OperationType.INSERT:
+                    self.insert_op(benchmark_table)
+                elif cur_ops == tp.OperationType.UPDATE:
+                    self.update_op(random, benchmark_table)
+                elif cur_ops == tp.OperationType.RANGE_UPDATE:
+                    self.range_update_op(random, benchmark_table)
+            except Exception as e:
+                tqdm.write(f"Error performing operation: {e}")
 
 
 if __name__ == "__main__":
