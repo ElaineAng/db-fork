@@ -28,7 +28,7 @@ message Result {
   // Number of keys touched during the operation
   int64 num_keys_touched = 8;
 
-  // Latency for operations (in milliseconds)
+  // Latency for operations (in seconds)
   double latency = 9;
 
   // Disk size of the database before the operation (in bytes)

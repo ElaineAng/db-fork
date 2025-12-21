@@ -27,6 +27,7 @@ dependencies = [
     "pyarrow",
     "tqdm",
     "setuptools",
+    "pandas",
 ]
 
 [tool.setuptools]
