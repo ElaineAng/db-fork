@@ -113,7 +113,7 @@ class NeonToolSuite(DBToolSuite):
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
         self.autocommit = autocommit
-        self._all_branches = {}
+        self._all_branches = {branch_name: (branch_id, None)}
 
     def _get_neon_branches(self) -> list[dict]:
         """
@@ -173,6 +173,11 @@ class NeonToolSuite(DBToolSuite):
         # overhead.
         branch_id = self._all_branches[branch_name][0]
         uri = self._all_branches[branch_name][1]
+        if not branch_id:
+            all_branches = self._get_neon_branches()
+            if branch_name not in all_branches:
+                raise ValueError(f"Branch '{branch_name}' does not exist.")
+            branch_id = all_branches[branch_name][0]
         if not uri:
             uri = self.__class__._get_neon_connection_uri(
                 self.project_id,

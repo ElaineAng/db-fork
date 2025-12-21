@@ -1,4 +1,3 @@
-import tqdm
 import functools
 from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
