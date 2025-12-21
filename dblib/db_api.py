@@ -1,5 +1,4 @@
 import functools
-import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
 from typing import Tuple, Optional

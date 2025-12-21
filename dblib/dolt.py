@@ -1,4 +1,3 @@
-from ast import Tuple
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from dblib.db_api import DBToolSuite

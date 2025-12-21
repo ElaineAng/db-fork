@@ -90,4 +90,7 @@ message TaskConfig {
   
   // Read operation configuration (sampling parameters)
   PointReadConfig point_read_config = 9;
+
+  // Whether to autocommit pg transactions
+  bool autocommit = 10;
 }

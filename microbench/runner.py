@@ -152,6 +152,7 @@ class BenchmarkSuite:
                     default_branch_id,
                     self._root_branch_name,
                     self._db_name,
+                    self._config.autocommit,
                 )
             else:
                 raise ValueError(f"Unsupported backend: {self._config.backend}")
@@ -335,7 +336,8 @@ class BenchmarkSuite:
                     pk_tuple
                 )
                 inserted = True
-                self.db_tools.commit_changes(timed=True)
+                if not self.db_tools.autocommit:
+                    self.db_tools.commit_changes(timed=True)
                 break
             except Exception:
                 continue
@@ -392,7 +394,8 @@ class BenchmarkSuite:
                 self._modified_keys.setdefault(cur_branch_id, []).append(
                     key_to_update
                 )
-            self.db_tools.commit_changes(timed=True)
+            if not self.db_tools.autocommit:
+                self.db_tools.commit_changes(timed=True)
             return True
         except Exception as e:
             print(f"Update failed: {e}")
@@ -507,7 +510,8 @@ class BenchmarkSuite:
             for key in keys_in_range:
                 if key not in modified_list:
                     modified_list.append(key)
-            self.db_tools.commit_changes(timed=True)
+            if not self.db_tools.autocommit:
+                self.db_tools.commit_changes(timed=True)
             return len(keys_in_range)
         except Exception as e:
             print(f"Range update failed: {e}")

@@ -1,3 +1,4 @@
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
 from typing import Tuple
 from dotenv import load_dotenv
@@ -41,16 +42,20 @@ class NeonToolSuite(DBToolSuite):
         branch_id: str,
         branch_name: str,
         database_name: str,
+        autocommit: bool,
     ):
         uri = cls._get_neon_connection_uri(project_id, branch_id, database_name)
         print(f"Initial connection to Neon with URI: {uri}")
         conn = psycopg2.connect(uri)
+        if autocommit:
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         return cls(
             connection=conn,
             result_collector=result_collector,
             project_id=project_id,
             branch_name=branch_name,
             branch_id=branch_id,
+            autocommit=autocommit,
         )
 
     @classmethod
@@ -97,15 +102,17 @@ class NeonToolSuite(DBToolSuite):
         self,
         connection: _pgconn,
         result_collector: rc.ResultCollector,
-        project_id: str = "",
-        branch_name: str = "",
-        branch_id: str = "",
+        project_id: str,
+        branch_name: str,
+        branch_id: str,
+        autocommit: bool,
     ):
         super().__init__(connection, result_collector)
         self.project_id = project_id
         self.result_collector = result_collector
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
+        self.autocommit = autocommit
 
     def _get_neon_branches(self) -> list[dict]:
         """
@@ -182,6 +189,8 @@ class NeonToolSuite(DBToolSuite):
 
         self.conn.close()
         self.conn = psycopg2.connect(uri)
+        if self.autocommit:
+            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
         self.current_branch_name = branch_name
         self.current_branch_id = branch_id

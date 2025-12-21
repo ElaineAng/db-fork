@@ -33,3 +33,6 @@ database_setup {
 range_update_config {
   range_size: 20
 }
+
+autocommit: false
+
