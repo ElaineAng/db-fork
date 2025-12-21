@@ -73,6 +73,7 @@ class ResultCollector:
         self._current_op_type = rslt.OpType.UNSPECIFIED
         self._current_latency = 0.0
         self._num_keys_touched = 0
+        self._sql_query = ""
 
     def reset(self):
         """Reset all collected timing data and proto messages."""
@@ -132,6 +133,9 @@ class ResultCollector:
     def record_num_keys_touched(self, num_keys: int) -> None:
         self._num_keys_touched = num_keys
 
+    def record_sql_query(self, sql_query: str) -> None:
+        self._sql_query = sql_query
+
     def flush_record(self):
         """
         Create a Result proto with all current context and metrics, save it, and reset.
@@ -150,6 +154,7 @@ class ResultCollector:
         result.op_type = self._current_op_type
         result.num_keys_touched = self._num_keys_touched
         result.latency = self._current_latency
+        result.sql_query = self._sql_query
 
         # Append to results
         self.results.append(result)
@@ -183,6 +188,7 @@ class ResultCollector:
                 "latency": result.latency,
                 "disk_size_before": result.disk_size_before,
                 "disk_size_after": result.disk_size_after,
+                "sql_query": result.sql_query,
             }
             rows.append(row)
 

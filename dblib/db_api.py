@@ -237,5 +237,8 @@ class DBToolSuite(ABC):
         except Exception as e:
             raise Exception(f"Error executing sql query: {query}; {vars}; {e}")
         if timed:
+            # Record query with args for debugging/analysis
+            query_with_args = f"{query} -- args: {vars}" if vars else query
+            self.result_collector.record_sql_query(query_with_args)
             self.result_collector.flush_record()
         return res

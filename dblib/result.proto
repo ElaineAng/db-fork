@@ -36,6 +36,9 @@ message Result {
 
   // Disk size of the database after the operation (in bytes)
   int64 disk_size_after = 11;
+
+  // The SQL query that was executed
+  string sql_query = 12;
 }
 
 // Enum for different types of database operations
