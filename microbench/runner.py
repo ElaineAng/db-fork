@@ -102,7 +102,7 @@ class BenchmarkSuite:
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
                 db_tools = DoltToolSuite.init_for_bench(
-                    result_collector, self._db_name
+                    result_collector, self._db_name, self._config.autocommit
                 )
                 self._root_branch_name = "main"
             elif self._config.backend == tp.Backend.NEON:
@@ -225,8 +225,9 @@ class BenchmarkSuite:
         # Setup the database and initialize the schema.
         if not self._require_db_setup:
             return
+        # Pass connection URI for psql (supports psql meta-commands)
         load_sql_file(
-            self.db_tools.get_current_connection(),
+            self.db_tools.get_uri_for_db_setup(),
             self._config.database_setup.sql_dump.sql_dump_path,
         )
 
@@ -527,13 +528,19 @@ class BenchmarkSuite:
         seed = int(time.time())
         random.seed(seed)
 
+        initial_db_size = 0
+        try:
+            initial_db_size = dbh.get_db_size(
+                self.db_tools.get_current_connection()
+            )
+        except Exception as e:
+            print(f"Error getting initial DB size: {e}")
+
         # Set context for result proto collection.
         self.db_tools.result_collector.set_context(
             table_name=benchmark_table,
             table_schema=table_schema,
-            initial_db_size=dbh.get_db_size(
-                self.db_tools.get_current_connection()
-            ),
+            initial_db_size=initial_db_size,
             seed=seed,
         )
 

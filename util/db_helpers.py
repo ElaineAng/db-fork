@@ -136,7 +136,12 @@ def get_pk_values(
     """
     if not pk_columns:
         pk_columns = get_pk_column_names(conn, table_name)
+    # Ensure we're using the public schema
+    _run_sql_query(conn, "SET search_path TO public")
 
+    # dsn = conn.get_dsn_parameters()
+    # uri = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['dbname']}"
+    # print(uri)
     sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
     all_pks = _run_sql_query(conn, sql)
 
@@ -163,6 +168,7 @@ def get_all_tables(conn: psycopg2.extensions.connection) -> list[str]:
     Returns:
         List of table names
     """
+    _run_sql_query(conn, "SET search_path TO public")
     query = """
     SELECT table_name
     FROM information_schema.tables
@@ -187,6 +193,8 @@ def get_db_size(conn: psycopg2.extensions.connection) -> int:
     db_name_query = "SELECT current_database();"
     db_name_result = _run_sql_query(conn, db_name_query)
     db_name = db_name_result[0][0] if db_name_result else None
+
+    _run_sql_query(conn, "SET search_path TO public")
 
     if not db_name:
         print("Warning: Could not determine database name, returning 0")
@@ -215,6 +223,7 @@ def get_all_columns(
     Returns:
         List of column names
     """
+    _run_sql_query(conn, "SET search_path TO public")
     query = """
     SELECT column_name
     FROM information_schema.columns
