@@ -67,9 +67,11 @@ class BenchmarkSuite:
     def __init__(
         self,
         config: tp.TaskConfig,
+        seed: int = None,
     ):
         self._db_name = config.database_setup.db_name
         self._config = config
+        self._seed = seed  # Optional seed for reproducibility
         self._require_db_setup = (
             config.database_setup.WhichOneof("source") == "sql_dump"
         )
@@ -525,8 +527,10 @@ class BenchmarkSuite:
         self._table_datagen = DynamicDataGenerator(table_schema)
 
         # Get the random seed for all remainder operations in the benchmark.
-        seed = int(time.time())
+        # Use provided seed for reproducibility, otherwise use current time.
+        seed = self._seed if self._seed is not None else int(time.time())
         random.seed(seed)
+        print(f"Using random seed: {seed}")
 
         initial_db_size = 0
         try:
@@ -593,6 +597,12 @@ if __name__ == "__main__":
         default="microbench/test_config.textproto",
         help="Path to the task configuration file (textproto format).",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible benchmark operations. If not specified, uses current timestamp.",
+    )
 
     args = parser.parse_args()
 
@@ -618,6 +628,6 @@ if __name__ == "__main__":
 
     validate_config(config)
 
-    with BenchmarkSuite(config) as bench:
+    with BenchmarkSuite(config, seed=args.seed) as bench:
         bench.maybe_setup_db()
         bench.run_benchmark()
