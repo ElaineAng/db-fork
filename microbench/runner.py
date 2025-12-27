@@ -18,6 +18,7 @@ from util import db_helpers as dbh
 from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
+from dblib.kpg import KpgToolSuite
 from microbench import sampling
 
 
@@ -104,6 +105,14 @@ class BenchmarkSuite:
                 print(f"Default Dolt connection URI: {default_uri}")
                 self.create_benchmark_database(default_uri)
                 db_tools = DoltToolSuite.init_for_bench(
+                    result_collector, self._db_name, self._config.autocommit
+                )
+                self._root_branch_name = "main"
+            elif self._config.backend == tp.Backend.KPG:
+                default_uri = KpgToolSuite.get_default_connection_uri()
+                print(f"Default KPG connection URI: {default_uri}")
+                self.create_benchmark_database(default_uri)
+                db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )
                 self._root_branch_name = "main"

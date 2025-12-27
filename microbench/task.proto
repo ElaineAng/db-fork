@@ -6,6 +6,7 @@ package microbench;
 enum Backend {
     NEON = 0;
     DOLT = 1;
+    KPG = 2;
 }
 
 // Type of benchmark operation to perform
