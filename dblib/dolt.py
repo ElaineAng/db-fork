@@ -64,9 +64,9 @@ class DoltToolSuite(DBToolSuite):
 
     def _prepare_commit(self, message: str = "") -> None:
         try:
-            cmd = "call dolt_add('.');"
+            cmd = "SELECT dolt_add('.');"
             super().execute_sql(cmd)
-            cmd = f"call dolt_commit('-m', '{message}');"
+            cmd = f"SELECT dolt_commit('-m', '{message}');"
             super().execute_sql(cmd)
         except Exception as e:
             # Ignore commit errors (e.g., no changes to commit).
@@ -76,7 +76,7 @@ class DoltToolSuite(DBToolSuite):
         """
         Creates a new branch in the Dolt database.
         """
-        cmd = f"call dolt_checkout('-b', '{branch_name}');"
+        cmd = f"SELECT dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
         # super().commit_changes(
         #     timed=True, message=f"Create branch {branch_name}"
@@ -87,7 +87,7 @@ class DoltToolSuite(DBToolSuite):
         Connects to an existing branch in the Dolt database to allow reads and
         writes on that branch.
         """
-        cmd = f"call dolt_checkout('{branch_name}');"
+        cmd = f"SELECT dolt_checkout('{branch_name}');"
         super().execute_sql(cmd)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:

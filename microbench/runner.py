@@ -341,7 +341,7 @@ class BenchmarkSuite:
                 )
                 inserted = True
                 if not self.db_tools.autocommit:
-                    self.db_tools.commit_changes(timed=True)
+                    self.db_tools.commit_changes(timed=True, message="insert")
                 break
             except Exception:
                 continue
@@ -395,7 +395,7 @@ class BenchmarkSuite:
                 key_to_update
             )
         if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True)
+            self.db_tools.commit_changes(timed=True, message="update")
 
     def range_update_op(self, rnd, benchmark_table) -> None:
         """Perform a range update on multiple rows.
@@ -506,7 +506,7 @@ class BenchmarkSuite:
             if key not in modified_list:
                 modified_list.append(key)
         if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True)
+            self.db_tools.commit_changes(timed=True, message="range update")
         return len(keys_in_range)
 
     def run_benchmark(self):
