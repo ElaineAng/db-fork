@@ -19,6 +19,7 @@ from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
+from dblib.xata import XataToolSuite
 from microbench import sampling
 
 
@@ -161,6 +162,37 @@ class BenchmarkSuite:
                 db_tools = NeonToolSuite.init_for_bench(
                     result_collector,
                     self._neon_project_id,
+                    default_branch_id,
+                    self._root_branch_name,
+                    self._db_name,
+                    self._config.autocommit,
+                )
+            elif self._config.backend == tp.Backend.XATA:
+                if self._require_db_setup:
+                    (
+                        xata_project_id,
+                        default_branch_id,
+                        default_branch_name,
+                        default_uri,
+                    ) = XataToolSuite.create_xata_project(
+                        f"project_{self._db_name}"
+                    )
+                    self._xata_project_id = xata_project_id
+                    print(
+                        f"Xata project ID: {self._xata_project_id}",
+                        f"Default Xata connection URI: {default_uri}",
+                    )
+                    # Create the benchmark database on the root branch.
+                    self.create_benchmark_database(default_uri)
+                    self._root_branch_name = default_branch_name
+                else:
+                    # TODO: implement this when we want to run the "cold data"
+                    #       experiment.
+                    raise NotImplementedError("Xata requires database setup")
+                self._all_branches.append(self._root_branch_name)
+                db_tools = XataToolSuite.init_for_bench(
+                    result_collector,
+                    self._xata_project_id,
                     default_branch_id,
                     self._root_branch_name,
                     self._db_name,
