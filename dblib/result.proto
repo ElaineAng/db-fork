@@ -39,6 +39,9 @@ message Result {
 
   // The SQL query that was executed
   string sql_query = 12;
+
+  // Thread ID for multi-threaded benchmark runs
+  int32 thread_id = 13;
 }
 
 // Enum for different types of database operations

@@ -1,6 +1,7 @@
 import os
 import uuid
 import time
+import threading
 from contextlib import contextmanager
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -60,10 +61,19 @@ def str_to_op_type(op_str: str) -> rslt.OpType:
 
 
 class ResultCollector:
-    def __init__(self, run_id: str = None, output_dir: str = "/tmp/run_stats"):
+    def __init__(
+        self,
+        run_id: str = None,
+        output_dir: str = "/tmp/run_stats",
+        thread_id: int = 0,
+    ):
         self.reset()
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
+        self.thread_id = thread_id
+
+        # Lock for thread-safe result collection
+        self._lock = threading.Lock()
 
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -155,10 +165,12 @@ class ResultCollector:
         result.num_keys_touched = self._num_keys_touched
         result.latency = self._current_latency
         result.sql_query = self._sql_query
+        result.thread_id = self.thread_id
 
-        # Append to results
-        self.results.append(result)
-        self.iteration_counter += 1
+        # Append to results (thread-safe)
+        with self._lock:
+            self.results.append(result)
+            self.iteration_counter += 1
 
         # Reset metric fields for next record
         self._reset_metrics()
@@ -178,6 +190,7 @@ class ResultCollector:
         for result in self.results:
             row = {
                 "run_id": result.run_id,
+                "thread_id": result.thread_id,
                 "random_seed": result.random_seed,
                 "iteration_number": result.iteration_number,
                 "op_type": result.op_type,  # Convert enum value to name

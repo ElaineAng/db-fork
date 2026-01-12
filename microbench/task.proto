@@ -95,4 +95,7 @@ message TaskConfig {
 
   // Whether to autocommit pg transactions
   bool autocommit = 10;
+
+  // Number of worker threads for parallel benchmark execution (default: 1)
+  int32 num_threads = 11;
 }
