@@ -56,7 +56,6 @@ class NeonToolSuite(DBToolSuite):
             branch_name=branch_name,
             branch_id=branch_id,
             autocommit=autocommit,
-            connection_uri=uri,
         )
 
     @classmethod
@@ -107,7 +106,6 @@ class NeonToolSuite(DBToolSuite):
         branch_name: str,
         branch_id: str,
         autocommit: bool,
-        connection_uri: str = None,
     ):
         super().__init__(connection, result_collector)
         self.project_id = project_id
@@ -115,12 +113,7 @@ class NeonToolSuite(DBToolSuite):
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
         self.autocommit = autocommit
-        self._connection_uri = connection_uri
         self._all_branches = {branch_name: (branch_id, None)}
-
-    def get_uri_for_db_setup(self) -> str:
-        """Returns the connection URI for database setup operations (e.g., psql)."""
-        return self._connection_uri
 
     def _get_neon_branches(self) -> list[dict]:
         """

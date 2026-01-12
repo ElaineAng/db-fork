@@ -9,6 +9,26 @@ from dblib import result_pb2 as rslt
 from util.sql_parse import get_sql_operation_keyword
 
 
+# Thread-local storage for thread_id
+_thread_local = threading.local()
+
+
+def set_current_thread_id(thread_id: int) -> None:
+    """Set the thread ID for the current thread.
+
+    This should be called once at the start of each worker thread.
+    """
+    _thread_local.thread_id = thread_id
+
+
+def get_current_thread_id() -> int:
+    """Get the thread ID for the current thread.
+
+    Returns 0 if not set (main thread default).
+    """
+    return getattr(_thread_local, "thread_id", 0)
+
+
 def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
     """
     Determine the operation type from a SQL statement.
@@ -65,12 +85,10 @@ class ResultCollector:
         self,
         run_id: str = None,
         output_dir: str = "/tmp/run_stats",
-        thread_id: int = 0,
     ):
         self.reset()
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
-        self.thread_id = thread_id
 
         # Lock for thread-safe result collection
         self._lock = threading.Lock()
@@ -149,6 +167,8 @@ class ResultCollector:
     def flush_record(self):
         """
         Create a Result proto with all current context and metrics, save it, and reset.
+
+        Uses the thread-local thread_id set via set_current_thread_id().
         """
 
         # Create and fill the Result proto
@@ -165,7 +185,7 @@ class ResultCollector:
         result.num_keys_touched = self._num_keys_touched
         result.latency = self._current_latency
         result.sql_query = self._sql_query
-        result.thread_id = self.thread_id
+        result.thread_id = get_current_thread_id()
 
         # Append to results (thread-safe)
         with self._lock:

@@ -47,20 +47,6 @@ message DatabaseSetup {
 // Range update configuration
 message RangeUpdateConfig {
     int32 range_size = 1;  // Number of rows per range operation
-    SamplingConfig sampling_config = 2; // Sampling configuration for range update
-}
-
-message PointReadConfig {
-    SamplingConfig sampling_config = 1; // Sampling configuration for point read
-}
-
-// Sampling configuration
-message SamplingConfig {
-    double alpha = 1;  // Alpha parameter for beta distribution
-    double beta = 2;   // Beta parameter for beta distribution
-    double sampling_rate = 3;
-    int32 max_sample_size = 4;
-    int32 sort_idx = 5;  // Index to sort sampled results by
 }
 
 // Configuration for a benchmark task
@@ -89,9 +75,6 @@ message TaskConfig {
   
   // Range update configuration
   RangeUpdateConfig range_update_config = 8;
-  
-  // Read operation configuration (sampling parameters)
-  PointReadConfig point_read_config = 9;
 
   // Whether to autocommit pg transactions
   bool autocommit = 10;

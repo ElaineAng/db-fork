@@ -4,6 +4,7 @@ import argparse
 import random
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Self, Tuple, Optional
@@ -22,11 +23,6 @@ from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
-from microbench import sampling
-
-
-def BETA_DIST(sample_size):
-    return sampling.beta_distribution(sample_size, alpha=10, beta=1.0)
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -71,6 +67,8 @@ def validate_config(config: tp.TaskConfig):
 class BackendInfo:
     """Backend-specific connection and project information."""
 
+    # NOTE: Default URI isn't the URI for the benchmark database. The benchmark
+    # runs on a separate database
     default_uri: str = ""
     default_branch_id: str = ""
     default_branch_name: str = ""
@@ -78,19 +76,250 @@ class BackendInfo:
     xata_project_id: Optional[str] = None
 
 
+def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
+    """Create backend-specific project and return connection info.
+
+    This is a standalone function that can be called before creating any
+    BenchmarkSuite instances. It handles project creation for cloud backends
+    (NEON, XATA) and returns connection info for all backends.
+
+    Args:
+        config: Task configuration containing backend type and database setup.
+
+    Returns:
+        BackendInfo containing connection URI, branch info, and project IDs.
+    """
+    backend = config.backend
+    db_name = config.database_setup.db_name
+    require_db_setup = config.database_setup.WhichOneof("source") == "sql_dump"
+    info = BackendInfo()
+
+    if backend == tp.Backend.DOLT:
+        info.default_uri = DoltToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default Dolt connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.KPG:
+        info.default_uri = KpgToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default KPG connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.NEON:
+        if require_db_setup:
+            # Create a new Neon project for the benchmark.
+            neon_project = NeonToolSuite.create_neon_project(
+                f"project_{db_name}"
+            )
+            info.neon_project_id = neon_project["project"]["id"]
+            info.default_uri = (
+                neon_project["connection_uris"][0]["connection_uri"]
+                if neon_project["connection_uris"]
+                else ""
+            )
+            info.default_branch_id = neon_project["branch"]["id"]
+            info.default_branch_name = neon_project["branch"]["name"]
+            print(f"Neon project ID: {info.neon_project_id}")
+            print(f"Default Neon connection URI: {info.default_uri}")
+        else:
+            # Reuse existing Neon project from config.
+            info.neon_project_id = (
+                config.database_setup.existing_db.neon_project_id
+            )
+            proj_branches = NeonToolSuite.get_project_branches(
+                info.neon_project_id
+            )
+            for branch in proj_branches["branches"]:
+                if branch["default"]:
+                    info.default_branch_name = branch["name"]
+                    info.default_branch_id = branch["id"]
+                    break
+
+    elif backend == tp.Backend.XATA:
+        if require_db_setup:
+            (
+                xata_project_id,
+                default_branch_id,
+                default_branch_name,
+                default_uri,
+            ) = XataToolSuite.create_xata_project(f"project_{db_name}")
+            info.xata_project_id = xata_project_id
+            info.default_uri = default_uri
+            info.default_branch_id = default_branch_id
+            info.default_branch_name = default_branch_name
+            print(
+                f"Xata project ID: {info.xata_project_id}, "
+                f"Default Xata connection URI: {info.default_uri}"
+            )
+        else:
+            raise NotImplementedError("Xata requires database setup")
+
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    # Create the benchmark database and load contents from a SQL dump file if required.
+    if require_db_setup:
+        create_benchmark_database(info.default_uri, db_name)
+        # Load the database contents from a SQL dump file into the benchmark
+        # database.
+        db_uri = get_initial_connection_uri(config, info)
+        load_sql_file(db_uri, config.database_setup.sql_dump.sql_dump_path)
+
+    return info
+
+
+def get_initial_connection_uri(
+    config: tp.TaskConfig, backend_info: BackendInfo
+) -> str:
+    """Get the connection URI for the benchmark database.
+
+    Each backend has its own way to construct the database-specific URI.
+
+    Args:
+        config: Task configuration containing backend and database info.
+        backend_info: Backend info from create_backend_project().
+
+    Returns:
+        Connection URI for the benchmark database.
+    """
+    db_name = config.database_setup.db_name
+    backend = config.backend
+
+    if backend == tp.Backend.DOLT:
+        return DoltToolSuite.get_initial_connection_uri(db_name)
+
+    elif backend == tp.Backend.KPG:
+        return KpgToolSuite.get_initial_connection_uri(db_name)
+
+    elif backend == tp.Backend.NEON:
+        return NeonToolSuite._get_neon_connection_uri(
+            backend_info.neon_project_id,
+            backend_info.default_branch_id,
+            db_name,
+        )
+
+    elif backend == tp.Backend.XATA:
+        return XataToolSuite._get_xata_connection_uri(
+            backend_info.xata_project_id,
+            backend_info.default_branch_id,
+            db_name,
+        )
+
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+
+def create_benchmark_database(uri: str, db_name: str) -> None:
+    """Create the benchmark database on the given connection URI.
+
+    Args:
+        uri: PostgreSQL connection URI for the database server.
+        db_name: Name of the database to create.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(uri)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = conn.cursor()
+        create_db_command = f"CREATE DATABASE {db_name};"
+        try:
+            cur.execute(create_db_command)
+            print("Database created successfully.")
+        except psycopg2.errors.DuplicateDatabase:
+            print(f"Database '{db_name}' already exists.")
+    except Exception as e:
+        print(f"Error creating database: {e}")
+    finally:
+        if cur:
+            cur.close()
+            conn.close()
+
+
+def cleanup_backend(
+    config: tp.TaskConfig, backend_info: BackendInfo, db_tools=None
+) -> None:
+    """Clean up backend-specific resources (projects, databases).
+
+    Args:
+        config: Task configuration with cleanup settings.
+        backend_info: Backend info containing project IDs.
+        db_tools: Optional db_tools for deleting database. If None, skips db deletion.
+    """
+    if not config.database_setup.cleanup:
+        return
+
+    # Delete the database if db_tools is provided.
+    if db_tools:
+        try:
+            db_tools.delete_db(config.database_setup.db_name)
+            print("Database deleted successfully.")
+        except Exception as e:
+            if "database not found" in str(e):
+                print("Database not found. Assuming it was already deleted.")
+            else:
+                print(f"Error deleting database: {e}")
+
+    # Delete backend-specific project if applicable.
+    if backend_info.neon_project_id:
+        NeonToolSuite.delete_project(backend_info.neon_project_id)
+    elif backend_info.xata_project_id:
+        XataToolSuite.delete_project(backend_info.xata_project_id)
+
+
+class SharedBranchManager:
+    """Thread-safe manager for branch IDs and branch list across threads."""
+
+    def __init__(self, initial_branch_id: int = 1):
+        self._next_branch_id = initial_branch_id
+        self._branches: list[str] = []
+        self._lock = threading.Lock()
+
+    def get_next_branch_id(self) -> int:
+        """Atomically get the next branch ID and increment the counter."""
+        with self._lock:
+            current = self._next_branch_id
+            self._next_branch_id += 1
+            return current
+
+    def add_branch(self, branch_name: str) -> None:
+        """Add a branch to the shared list."""
+        with self._lock:
+            self._branches.append(branch_name)
+
+    def get_random_branch(self, rnd) -> Optional[str]:
+        """Get a random branch from the list."""
+        with self._lock:
+            if not self._branches:
+                return None
+            return rnd.choice(self._branches)
+
+    def get_all_branches(self) -> list[str]:
+        """Get a copy of all branches."""
+        with self._lock:
+            return list(self._branches)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._branches)
+
+
 class BenchmarkSuite:
     def __init__(
         self,
         config: tp.TaskConfig,
+        backend_info: BackendInfo,
         seed: int = None,
         thread_id: int = 0,
         result_collector: Optional[rc.ResultCollector] = None,
+        branch_manager: Optional[SharedBranchManager] = None,
     ):
         self._db_name = config.database_setup.db_name
         self._config = config
+        self._backend_info = backend_info
         self._seed = seed  # Optional seed for reproducibility
         self._thread_id = thread_id
         self._shared_result_collector = result_collector
+        self._shared_branch_manager = branch_manager
         self._require_db_setup = (
             config.database_setup.WhichOneof("source") == "sql_dump"
         )
@@ -112,111 +341,20 @@ class BenchmarkSuite:
         # Cache for pk columns.
         self._pk_columns = []
 
-        # Backend info from _create_backend_project() - used by __enter__().
-        self._backend_info: Optional[BackendInfo] = None
-
-    def _create_backend_project(self) -> BackendInfo:
-        """Create backend-specific project and return connection info.
-
-        Returns:
-            BackendInfo containing connection URI, branch info, and project IDs.
-        """
-        backend = self._config.backend
-        info = BackendInfo()
-
-        if backend == tp.Backend.DOLT:
-            info.default_uri = DoltToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default Dolt connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.KPG:
-            info.default_uri = KpgToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default KPG connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.NEON:
-            if self._require_db_setup:
-                # Create a new Neon project for the benchmark.
-                neon_project = NeonToolSuite.create_neon_project(
-                    f"project_{self._db_name}"
-                )
-                info.neon_project_id = neon_project["project"]["id"]
-                info.default_uri = (
-                    neon_project["connection_uris"][0]["connection_uri"]
-                    if neon_project["connection_uris"]
-                    else ""
-                )
-                info.default_branch_id = neon_project["branch"]["id"]
-                info.default_branch_name = neon_project["branch"]["name"]
-                print(f"Neon project ID: {info.neon_project_id}")
-                print(f"Default Neon connection URI: {info.default_uri}")
-            else:
-                # Reuse existing Neon project from config.
-                info.neon_project_id = (
-                    self._config.database_setup.existing_db.neon_project_id
-                )
-                proj_branches = NeonToolSuite.get_project_branches(
-                    info.neon_project_id
-                )
-                for branch in proj_branches["branches"]:
-                    if branch["default"]:
-                        info.default_branch_name = branch["name"]
-                        info.default_branch_id = branch["id"]
-                        break
-
-        elif backend == tp.Backend.XATA:
-            if self._require_db_setup:
-                (
-                    xata_project_id,
-                    default_branch_id,
-                    default_branch_name,
-                    default_uri,
-                ) = XataToolSuite.create_xata_project(
-                    f"project_{self._db_name}"
-                )
-                info.xata_project_id = xata_project_id
-                info.default_uri = default_uri
-                info.default_branch_id = default_branch_id
-                info.default_branch_name = default_branch_name
-                print(
-                    f"Xata project ID: {info.xata_project_id}, "
-                    f"Default Xata connection URI: {info.default_uri}"
-                )
-            else:
-                raise NotImplementedError("Xata requires database setup")
-
+    def _add_branch(self, branch_name: str) -> None:
+        """Add a branch to the shared or local branch list."""
+        if self._shared_branch_manager:
+            self._shared_branch_manager.add_branch(branch_name)
         else:
-            raise ValueError(f"Unsupported backend: {backend}")
+            self._all_branches.append(branch_name)
 
-        # Create the benchmark database if required.
-        if self._require_db_setup:
-            self.create_benchmark_database(info.default_uri)
-
-        # Store the backend info for use by __enter__().
-        self._backend_info = info
-        return info
-
-    def _cleanup_backend(self) -> None:
-        """Clean up backend-specific resources (projects, databases)."""
-        if not self._config.database_setup.cleanup:
-            return
-
-        # Delete the database.
-        try:
-            self.db_tools.delete_db(self._db_name)
-            print("Database deleted successfully.")
-        except Exception as e:
-            if "database not found" in str(e):
-                print("Database not found. Assuming it was already deleted.")
-            else:
-                print(f"Error deleting database: {e}")
-
-        # Delete backend-specific project if applicable.
-        if self._backend_info:
-            if self._backend_info.neon_project_id:
-                NeonToolSuite.delete_project(self._backend_info.neon_project_id)
-            elif self._backend_info.xata_project_id:
-                XataToolSuite.delete_project(self._backend_info.xata_project_id)
+    def _get_random_branch(self, rnd) -> Optional[str]:
+        """Get a random branch from the shared or local branch list."""
+        if self._shared_branch_manager:
+            return self._shared_branch_manager.get_random_branch(rnd)
+        elif self._all_branches:
+            return rnd.choice(self._all_branches)
+        return None
 
     def __enter__(self) -> Self:
         db_tools = None
@@ -231,11 +369,7 @@ class BenchmarkSuite:
             )
 
         try:
-            # Use backend info from prior _create_backend_project() call.
-            if self._backend_info is None:
-                raise RuntimeError(
-                    "_create_backend_project() must be called before __enter__()"
-                )
+            # Use backend info passed to constructor.
             default_branch_id = self._backend_info.default_branch_id
             self._root_branch_name = self._backend_info.default_branch_name
 
@@ -253,7 +387,6 @@ class BenchmarkSuite:
                     f"Default Neon branch name: {self._root_branch_name}, "
                     f"ID: {default_branch_id}"
                 )
-                self._all_branches.append(self._root_branch_name)
                 db_tools = NeonToolSuite.init_for_bench(
                     result_collector,
                     self._backend_info.neon_project_id,
@@ -263,7 +396,6 @@ class BenchmarkSuite:
                     self._config.autocommit,
                 )
             elif self._config.backend == tp.Backend.XATA:
-                self._all_branches.append(self._root_branch_name)
                 db_tools = XataToolSuite.init_for_bench(
                     result_collector,
                     self._backend_info.xata_project_id,
@@ -272,7 +404,10 @@ class BenchmarkSuite:
                     self._db_name,
                     self._config.autocommit,
                 )
+            else:
+                raise ValueError(f"Unsupported backend: {self._config.backend}")
 
+            self._add_branch(self._root_branch_name)
             self.db_tools = db_tools
             return self
 
@@ -297,47 +432,10 @@ class BenchmarkSuite:
         # (main thread will aggregate and write for all workers).
         if self._shared_result_collector is None:
             self.db_tools.result_collector.write_to_parquet()
-
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
         self.db_tools.close_connection()
-
-    def create_benchmark_database(self, uri):
-        """
-        Creates the benchmark database on the root branch.
-        """
-        if not self._require_db_setup:
-            return
-        try:
-            # Create a new database over a separate connection.
-            conn = psycopg2.connect(uri)
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-
-            cur = conn.cursor()
-            create_db_command = f"CREATE DATABASE {self._db_name};"
-            try:
-                cur.execute(create_db_command)
-                print("Database created successfully.")
-            except psycopg2.errors.DuplicateDatabase:
-                print(f"Database '{self._db_name}' already exists.")
-        except Exception as e:
-            print(f"Error creating database: {e}")
-        finally:
-            if cur:
-                cur.close()
-            if conn:
-                conn.close()
-
-    def maybe_setup_db(self) -> None:
-        # Setup the database and initialize the schema.
-        if not self._require_db_setup:
-            return
-        # Pass connection URI for psql (supports psql meta-commands)
-        load_sql_file(
-            self.db_tools.get_uri_for_db_setup(),
-            self._config.database_setup.sql_dump.sql_dump_path,
-        )
 
     def maybe_branch_and_reconnect(
         self, next_bid, rnd, branch_limit_reached
@@ -348,7 +446,7 @@ class BenchmarkSuite:
             self.db_tools.create_branch(
                 branch_name=next_branch_name, parent_id=cur_id
             )
-            self._all_branches.append(next_branch_name)
+            self._add_branch(next_branch_name)
 
             # Toss a fair coin to connect to the new branch, or stay on the
             # current branch.
@@ -358,10 +456,11 @@ class BenchmarkSuite:
                 self._existing_pks = []
         elif rnd.random() < 0.25:
             # 1/4 chance to connect to a random branch.
-            to_connect = random.choice(self._all_branches)
-            self.db_tools.connect_branch(to_connect, timed=True)
-            # clear existing pks cache if switing to a different branch.
-            self._existing_pks = []
+            to_connect = self._get_random_branch(random)
+            if to_connect:
+                self.db_tools.connect_branch(to_connect, timed=True)
+                # clear existing pks cache if switing to a different branch.
+                self._existing_pks = []
 
     def _select_random_key(self, rnd, benchmark_table):
         """Select a random key from existing PKs or modified keys.
@@ -660,13 +759,21 @@ class BenchmarkSuite:
         ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
         # Main benchmark loop
-        next_bid = 1
+        # Use shared counter if available (multi-threaded), otherwise local.
         branch_limit_reached = False
         for _ in tqdm(range(self._config.num_ops)):
             # Get the operation
             cur_ops = random.choices(all_operations, ops_weights)[0]
             try:
                 if cur_ops == tp.OperationType.BRANCH:
+                    # Get next unique branch ID (thread-safe if using shared manager).
+                    if self._shared_branch_manager:
+                        next_bid = (
+                            self._shared_branch_manager.get_next_branch_id()
+                        )
+                    else:
+                        next_bid = getattr(self, "_local_next_bid", 1)
+                        self._local_next_bid = next_bid + 1
                     try:
                         self.maybe_branch_and_reconnect(
                             next_bid, random, branch_limit_reached
@@ -675,7 +782,6 @@ class BenchmarkSuite:
                         if "branches limit exceeded" in str(e):
                             branch_limit_reached = True
                         raise e
-                    next_bid += 1
                 elif cur_ops == tp.OperationType.READ:
                     try:
                         self.read_op(random, benchmark_table)
@@ -736,40 +842,37 @@ if __name__ == "__main__":
 
     num_threads = config.num_threads if config.num_threads > 0 else 1
     print(f"Running benchmark with {num_threads} thread(s)")
-
     # Shared result collector for all worker threads.
     shared_result_collector = rc.ResultCollector(run_id=config.run_id)
 
-    # Main thread BenchmarkSuite for setup/cleanup.
-    main_bench = BenchmarkSuite(config, seed=args.seed)
+    # Shared branch manager for unique branch IDs and branch list across threads.
+    shared_branch_manager = SharedBranchManager()
+
+    # Setup backend project, database, and schema.
+    backend_info = create_backend_project(config)
 
     def worker_benchmark(thread_id: int) -> None:
         """Worker function that runs benchmark in its own thread with its own connection."""
+        # Set thread-local thread ID for result collection
+        rc.set_current_thread_id(thread_id)
+
         # Each worker gets its own seed based on the main seed for reproducibility.
         worker_seed = (args.seed + thread_id) if args.seed is not None else None
 
-        # Create worker's own BenchmarkSuite with shared result collector.
-        # Copy backend info from main bench so workers don't recreate projects.
+        # Create worker's own BenchmarkSuite with shared resources.
         worker_bench = BenchmarkSuite(
             config,
+            backend_info,
             seed=worker_seed,
             thread_id=thread_id,
             result_collector=shared_result_collector,
+            branch_manager=shared_branch_manager,
         )
-        # Copy backend info from main thread.
-        worker_bench._backend_info = main_bench._backend_info
 
         with worker_bench:
             worker_bench.run_benchmark()
 
     try:
-        # Setup backend project (main thread responsibility).
-        main_bench._create_backend_project()
-
-        # Setup the database schema (main thread only).
-        with main_bench:
-            main_bench.maybe_setup_db()
-
         if num_threads == 1:
             # Single-threaded mode: run directly.
             worker_benchmark(thread_id=0)
@@ -792,4 +895,4 @@ if __name__ == "__main__":
 
     finally:
         # Cleanup backend resources (main thread responsibility).
-        main_bench._cleanup_backend()
+        cleanup_backend(config, backend_info)

@@ -22,13 +22,17 @@ class KpgToolSuite(DBToolSuite):
         )
 
     @classmethod
+    def get_initial_connection_uri(cls, db_name: str) -> str:
+        return dbutil.format_db_uri(KPG_USER, "", KPG_HOST, KPG_PORT, db_name)
+
+    @classmethod
     def init_for_bench(
         cls,
         collector: rc.ResultCollector,
         db_name: str,
         autocommit: bool,
     ):
-        uri = dbutil.format_db_uri(KPG_USER, "", KPG_HOST, KPG_PORT, db_name)
+        uri = cls.get_initial_connection_uri(db_name)
 
         conn = psycopg2.connect(uri)
         if autocommit:
@@ -36,7 +40,6 @@ class KpgToolSuite(DBToolSuite):
         return cls(
             connection=conn,
             collector=collector,
-            connection_uri=uri,
             autocommit=autocommit,
         )
 
@@ -44,11 +47,9 @@ class KpgToolSuite(DBToolSuite):
         self,
         connection: _pgconn,
         collector: rc.ResultCollector,
-        connection_uri: str,
         autocommit: bool,
     ):
         super().__init__(connection, result_collector=collector)
-        self._connection_uri = connection_uri
         self.autocommit = autocommit
         self._fork_name_to_id = {"main": 0}
         self._fork_id_to_name = {0: "main"}
@@ -74,10 +75,6 @@ class KpgToolSuite(DBToolSuite):
                 cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
         finally:
             conn.close()
-
-    def get_uri_for_db_setup(self) -> str:
-        """Returns the connection URI for database setup operations (e.g., psql)."""
-        return self._connection_uri
 
     def list_branches(self) -> list[str]:
         # KPG currently does not support listing branches.

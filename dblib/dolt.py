@@ -23,6 +23,12 @@ class DoltToolSuite(DBToolSuite):
         )
 
     @classmethod
+    def get_initial_connection_uri(cls, db_name: str) -> str:
+        return dbutil.format_db_uri(
+            DOLT_USER, DOLT_PASSWORD, DOLT_HOST, DOLT_PORT, db_name
+        )
+
+    @classmethod
     def init_for_bench(
         cls,
         collector: rc.ResultCollector,
@@ -39,7 +45,6 @@ class DoltToolSuite(DBToolSuite):
         return cls(
             connection=conn,
             collector=collector,
-            connection_uri=uri,
             autocommit=autocommit,
         )
 
@@ -47,16 +52,10 @@ class DoltToolSuite(DBToolSuite):
         self,
         connection: _pgconn,
         collector: rc.ResultCollector,
-        connection_uri: str,
         autocommit: bool,
     ):
         super().__init__(connection, result_collector=collector)
-        self._connection_uri = connection_uri
         self.autocommit = autocommit
-
-    def get_uri_for_db_setup(self) -> str:
-        """Returns the connection URI for database setup operations (e.g., psql)."""
-        return self._connection_uri
 
     def list_branches(self) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"

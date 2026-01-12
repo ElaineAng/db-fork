@@ -46,14 +46,6 @@ class DBToolSuite(ABC):
     def get_current_connection(self) -> _pgconn:
         return self.conn
 
-    @abstractmethod
-    def get_uri_for_db_setup(self) -> str:
-        """
-        Returns the connection URI for database setup operations (e.g., psql).
-        This is needed because psql requires a full connection URI with credentials.
-        """
-        pass
-
     ######################################################################
     # Protected methods
     ######################################################################
