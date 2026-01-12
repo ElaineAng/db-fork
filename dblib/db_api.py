@@ -170,6 +170,7 @@ class DBToolSuite(ABC):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
+        self.result_collector.record_num_keys_touched(0)
         self.result_collector.flush_record()
 
     @_require_connection
@@ -186,6 +187,7 @@ class DBToolSuite(ABC):
         except Exception as e:
             raise Exception(f"Error connecting to branch: {e}")
         if timed:
+            self.result_collector.record_num_keys_touched(0)
             self.result_collector.flush_record()
 
     @_require_connection

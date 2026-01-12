@@ -35,9 +35,7 @@ class DoltToolSuite(DBToolSuite):
         db_name: str,
         autocommit: bool,
     ):
-        uri = dbutil.format_db_uri(
-            DOLT_USER, DOLT_PASSWORD, DOLT_HOST, DOLT_PORT, db_name
-        )
+        uri = cls.get_initial_connection_uri(db_name)
 
         conn = psycopg2.connect(uri)
         if autocommit:

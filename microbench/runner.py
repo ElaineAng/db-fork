@@ -272,6 +272,7 @@ class SharedBranchManager:
     def __init__(self, initial_branch_id: int = 1):
         self._next_branch_id = initial_branch_id
         self._branches: list[str] = []
+        self._branch_limit_reached = False
         self._lock = threading.Lock()
 
     def get_next_branch_id(self) -> int:
@@ -301,6 +302,16 @@ class SharedBranchManager:
     def __len__(self) -> int:
         with self._lock:
             return len(self._branches)
+
+    def is_branch_limit_reached(self) -> bool:
+        """Check if the branch limit has been reached."""
+        with self._lock:
+            return self._branch_limit_reached
+
+    def set_branch_limit_reached(self) -> None:
+        """Mark that the branch limit has been reached."""
+        with self._lock:
+            self._branch_limit_reached = True
 
 
 class BenchmarkSuite:
@@ -342,19 +353,12 @@ class BenchmarkSuite:
         self._pk_columns = []
 
     def _add_branch(self, branch_name: str) -> None:
-        """Add a branch to the shared or local branch list."""
-        if self._shared_branch_manager:
-            self._shared_branch_manager.add_branch(branch_name)
-        else:
-            self._all_branches.append(branch_name)
+        """Add a branch to the shared branch list."""
+        self._shared_branch_manager.add_branch(branch_name)
 
     def _get_random_branch(self, rnd) -> Optional[str]:
-        """Get a random branch from the shared or local branch list."""
-        if self._shared_branch_manager:
-            return self._shared_branch_manager.get_random_branch(rnd)
-        elif self._all_branches:
-            return rnd.choice(self._all_branches)
-        return None
+        """Get a random branch from the shared branch list."""
+        return self._shared_branch_manager.get_random_branch(rnd)
 
     def __enter__(self) -> Self:
         db_tools = None
@@ -437,10 +441,16 @@ class BenchmarkSuite:
         # thread after all worker threads have finished.
         self.db_tools.close_connection()
 
-    def maybe_branch_and_reconnect(
-        self, next_bid, rnd, branch_limit_reached
-    ) -> None:
+    def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
+        # Check shared branch limit status. This is still buggy since there's a
+        # extended period between reading the limit and checking if it's reached.
+        # Multiple threads can be checking the limit before it's updated and all
+        # decide that a limit isn't reached.
+        # TODO: Fix the race here. Low priority.
+        branch_limit_reached = (
+            self._shared_branch_manager.is_branch_limit_reached()
+        )
         if not branch_limit_reached:
             next_branch_name = f"branch_{next_bid}"
             self.db_tools.create_branch(
@@ -456,7 +466,7 @@ class BenchmarkSuite:
                 self._existing_pks = []
         elif rnd.random() < 0.25:
             # 1/4 chance to connect to a random branch.
-            to_connect = self._get_random_branch(random)
+            to_connect = self._get_random_branch(rnd)
             if to_connect:
                 self.db_tools.connect_branch(to_connect, timed=True)
                 # clear existing pks cache if switing to a different branch.
@@ -734,7 +744,8 @@ class BenchmarkSuite:
         # Get the random seed for all remainder operations in the benchmark.
         # Use provided seed for reproducibility, otherwise use current time.
         seed = self._seed if self._seed is not None else int(time.time())
-        random.seed(seed)
+        # Create thread-local random instance to avoid interference between threads
+        rnd = random.Random(seed)
         print(f"Using random seed: {seed}")
 
         initial_db_size = 0
@@ -759,42 +770,35 @@ class BenchmarkSuite:
         ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
         # Main benchmark loop
-        # Use shared counter if available (multi-threaded), otherwise local.
-        branch_limit_reached = False
         for _ in tqdm(range(self._config.num_ops)):
             # Get the operation
-            cur_ops = random.choices(all_operations, ops_weights)[0]
+            cur_ops = rnd.choices(all_operations, ops_weights)[0]
             try:
                 if cur_ops == tp.OperationType.BRANCH:
-                    # Get next unique branch ID (thread-safe if using shared manager).
-                    if self._shared_branch_manager:
-                        next_bid = (
-                            self._shared_branch_manager.get_next_branch_id()
-                        )
-                    else:
-                        next_bid = getattr(self, "_local_next_bid", 1)
-                        self._local_next_bid = next_bid + 1
+                    next_bid = self._shared_branch_manager.get_next_branch_id()
+
                     try:
-                        self.maybe_branch_and_reconnect(
-                            next_bid, random, branch_limit_reached
-                        )
+                        self.maybe_branch_and_reconnect(next_bid, rnd)
                     except Exception as e:
                         if "branches limit exceeded" in str(e):
-                            branch_limit_reached = True
+                            # Update shared state so all threads know
+                            self._shared_branch_manager.set_branch_limit_reached()
                         raise e
                 elif cur_ops == tp.OperationType.READ:
                     try:
-                        self.read_op(random, benchmark_table)
+                        self.read_op(rnd, benchmark_table)
                     except ValueError as e:
                         tqdm.write(f"Error reading key: {e}")
                 elif cur_ops == tp.OperationType.INSERT:
                     self.insert_op(benchmark_table)
                 elif cur_ops == tp.OperationType.UPDATE:
-                    self.update_op(random, benchmark_table)
+                    self.update_op(rnd, benchmark_table)
                 elif cur_ops == tp.OperationType.RANGE_UPDATE:
-                    self.range_update_op(random, benchmark_table)
+                    self.range_update_op(rnd, benchmark_table)
             except Exception as e:
-                tqdm.write(f"Error performing operation: {e}")
+                tqdm.write(
+                    f"[Thread {self._thread_id}] Error performing operation: {e}"
+                )
 
 
 if __name__ == "__main__":
@@ -873,26 +877,22 @@ if __name__ == "__main__":
             worker_bench.run_benchmark()
 
     try:
-        if num_threads == 1:
-            # Single-threaded mode: run directly.
-            worker_benchmark(thread_id=0)
-        else:
-            # Multi-threaded mode: spawn worker threads.
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = [
-                    executor.submit(worker_benchmark, thread_id=i)
-                    for i in range(num_threads)
-                ]
-                # Wait for all workers to complete and collect any exceptions.
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"Worker thread failed: {e}")
+        # Spawn worker threads.
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [
+                executor.submit(worker_benchmark, thread_id=i)
+                for i in range(num_threads)
+            ]
+            # Wait for all workers to complete and collect any exceptions.
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Worker thread failed: {e}")
 
-        # Write all collected results to parquet (main thread).
+        # Write all collected results to parquet.
         shared_result_collector.write_to_parquet()
 
     finally:
-        # Cleanup backend resources (main thread responsibility).
+        # Cleanup backend resources.
         cleanup_backend(config, backend_info)

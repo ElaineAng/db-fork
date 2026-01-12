@@ -1,17 +1,15 @@
 # Example benchmark task configuration
 # This configuration runs a mixed workload benchmark on Neon
 
-run_id: "benchmark_001"
+run_id: "benchmark_neon_006_50ops_100threads_no_updates"
 backend: NEON
 
 # Operations to perform in the benchmark
 operations: READ
 operations: INSERT
-operations: UPDATE
-operations: RANGE_UPDATE
 operations: BRANCH
 
-num_ops: 5000
+num_ops: 50
 
 # Table to benchmark (empty means random table from schema)
 table_name: "orders"
@@ -34,5 +32,7 @@ range_update_config {
   range_size: 20
 }
 
-autocommit: false
+autocommit: true
+
+num_threads: 100
 
