@@ -116,6 +116,7 @@ class ResultCollector:
         self.current_table_name = ""
         self.current_table_schema = ""
         self.initial_db_size = 0
+        self._seed = 0  # Default to 0 for benchmarks without randomness
 
     def set_context(
         self,

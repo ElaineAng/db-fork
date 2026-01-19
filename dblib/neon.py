@@ -174,6 +174,10 @@ class NeonToolSuite(DBToolSuite):
         branch_id = self._all_branches[branch_name][0]
         uri = self._all_branches[branch_name][1]
         if not branch_id:
+            print(
+                f"WARNING: Branch '{branch_name}' not cached. "
+                "Fetching from API."
+            )
             all_branches = self._get_neon_branches()
             if branch_name not in all_branches:
                 raise ValueError(f"Branch '{branch_name}' does not exist.")

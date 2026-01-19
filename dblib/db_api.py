@@ -159,19 +159,27 @@ class DBToolSuite(ABC):
     #########################################################################
 
     @_require_connection
-    def create_branch(self, branch_name: str, parent_id: str = None) -> None:
+    def create_branch(
+        self, branch_name: str, parent_id: str = None, timed: bool = True
+    ) -> None:
         """
-        Creates a new branch. This is always timed.
+        Creates a new branch.
+
+        Args:
+            branch_name: Name of the new branch.
+            parent_id: ID of the parent branch to branch from.
+            timed: Whether to time and record this operation (default True).
         """
         try:
             with self.result_collector.maybe_time_ops(
-                op_type=rslt.OpType.BRANCH_CREATE, timed=True
+                op_type=rslt.OpType.BRANCH_CREATE, timed=timed
             ):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
-        self.result_collector.record_num_keys_touched(0)
-        self.result_collector.flush_record()
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
 
     @_require_connection
     def connect_branch(self, branch_name: str, timed: bool = False) -> None:

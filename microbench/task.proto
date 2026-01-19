@@ -49,6 +49,36 @@ message RangeUpdateConfig {
     int32 range_size = 1;  // Number of rows per range operation
 }
 
+// Shape of branch topology for Nth operation setup
+enum BranchShape {
+    SPINE = 0;    // Linear chain: main -> b1 -> b2 -> ... -> bN
+    FAN_OUT = 1;  // All branches from root: main -> b1, main -> b2, ...
+}
+
+// Configuration for pre-benchmark setup (used with NthOperationBenchmark)
+message BenchmarkSetup {
+    int32 num_branches = 1;        // Number of branches to create during setup
+    BranchShape branch_shape = 2;  // Topology shape for branch creation
+    int32 inserts_per_branch = 3;  // Number of data inserts per branch during setup
+}
+
+// Configuration for measuring the Nth operation deterministically
+message NthOperationBenchmark {
+    OperationType operation = 1;   // The specific operation to measure (BRANCH, READ, INSERT, UPDATE, RANGE_UPDATE)
+    BenchmarkSetup setup = 2;      // Setup configuration for creating state before measurement
+}
+
+// Configuration for randomized average-cost benchmark mode
+message RandomizedBenchmark {
+    // Set of operation types to perform. Operations are selected randomly
+    // based on weighted probabilities.
+    repeated OperationType operations = 1;
+
+    // Number of operations to perform. This should be set to a large enough
+    // number to ensure that the benchmark performs all specified operations.
+    int32 num_ops = 2;
+}
+
 // Configuration for a benchmark task
 message TaskConfig {
   // Unique identifier for this benchmark run
@@ -56,13 +86,6 @@ message TaskConfig {
   
   // Database backend to use
   Backend backend = 2;
-  
-  // Set of operation type to perform.
-  repeated OperationType operations = 3;
-
-  // Number of operations to perform. This should be set to a large enough
-  // number to ensure that the benchmark performs all specified operations.
-  int32 num_ops = 4;
   
   // Table to benchmark (empty means any random table from the schema)
   string table_name = 5;
@@ -81,4 +104,15 @@ message TaskConfig {
 
   // Number of worker threads for parallel benchmark execution (default: 1)
   int32 num_threads = 11;
+
+  // Benchmark mode: either randomized average-cost or deterministic Nth operation.
+  oneof benchmark_mode {
+    // Randomized mode: runs multiple random operations and measures average cost.
+    RandomizedBenchmark randomized_benchmark = 12;
+
+    // Nth-op mode: performs deterministic setup (branches + data) then measures 
+    // the cost of a single specified operation.
+    NthOperationBenchmark nth_op_benchmark = 13;
+  }
 }
+

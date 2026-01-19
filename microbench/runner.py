@@ -164,6 +164,10 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         db_uri = get_initial_connection_uri(config, info)
         load_sql_file(db_uri, config.database_setup.sql_dump.sql_dump_path)
 
+    # Perform Nth operation setup if configured (create branches + insert data).
+    if config.HasField("nth_op_benchmark"):
+        perform_nth_op_setup(config, info)
+
     return info
 
 
@@ -264,6 +268,57 @@ def cleanup_backend(
         NeonToolSuite.delete_project(backend_info.neon_project_id)
     elif backend_info.xata_project_id:
         XataToolSuite.delete_project(backend_info.xata_project_id)
+
+
+def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
+    """Create branches and insert data for Nth operation benchmark setup.
+
+    This function is called during the setup phase (before measurement) to
+    create the required state for measuring the Nth operation. It creates
+    branches according to the specified shape and inserts data on each branch.
+
+    Args:
+        config: Task configuration containing nth_op_benchmark settings.
+        backend_info: Backend info from create_backend_project().
+    """
+    setup = config.nth_op_benchmark.setup
+    num_branches = setup.num_branches
+    shape = setup.branch_shape
+    inserts_per_branch = setup.inserts_per_branch
+
+    print(
+        f"Nth-op setup: Creating {num_branches} branches "
+        f"({'SPINE' if shape == tp.BranchShape.SPINE else 'FAN_OUT'} shape) "
+        f"with {inserts_per_branch} inserts per branch..."
+    )
+
+    # Create a temporary BenchmarkSuite for setup operations (not timed).
+    # Use a dummy result collector since we don't want to record setup ops.
+    setup_result_collector = rc.ResultCollector(
+        run_id=f"{config.run_id}_setup",
+    )
+    setup_branch_manager = SharedBranchManager()
+
+    with BenchmarkSuite(
+        config,
+        backend_info,
+        seed=42,  # Fixed seed for reproducible setup
+        thread_id=0,
+        result_collector=setup_result_collector,
+        branch_manager=setup_branch_manager,
+    ) as setup_bench:
+        last_branch_name, last_branch_id = setup_bench.setup_nth_op_branches(
+            num_branches, shape, inserts_per_branch
+        )
+
+    # Store the last branch info in BackendInfo for measurement phase.
+    backend_info.default_branch_name = last_branch_name
+    backend_info.default_branch_id = last_branch_id
+
+    print(
+        f"Nth-op setup complete. Created {num_branches} branches. "
+        f"Last branch: {last_branch_name}"
+    )
 
 
 class SharedBranchManager:
@@ -369,7 +424,6 @@ class BenchmarkSuite:
         else:
             result_collector = rc.ResultCollector(
                 run_id=self._config.run_id,
-                thread_id=self._thread_id,
             )
 
         try:
@@ -462,7 +516,7 @@ class BenchmarkSuite:
             # current branch.
             if rnd.random() < 0.5:
                 self.db_tools.connect_branch(next_branch_name, timed=True)
-                # clear existing pks cache if switing to a different branch.
+                # clear existing pks cache if switching to a different branch.
                 self._existing_pks = []
         elif rnd.random() < 0.25:
             # 1/4 chance to connect to a random branch.
@@ -471,6 +525,34 @@ class BenchmarkSuite:
                 self.db_tools.connect_branch(to_connect, timed=True)
                 # clear existing pks cache if switing to a different branch.
                 self._existing_pks = []
+
+    def branch_and_connect(self, next_bid: int) -> str:
+        """Create a new branch and connect to it, timing both operations.
+
+        This is used for deterministic Nth-op benchmarks where we always want
+        to create and connect to measure the combined latency.
+
+        Args:
+            next_bid: The branch ID number to use for naming.
+
+        Returns:
+            The name of the newly created branch.
+        """
+        _, cur_id = self.db_tools.get_current_branch()
+        next_branch_name = f"branch_{next_bid}"
+
+        # Create branch (timed)
+        self.db_tools.create_branch(
+            branch_name=next_branch_name, parent_id=cur_id, timed=True
+        )
+        self._add_branch(next_branch_name)
+
+        # Connect to the new branch (timed)
+        self.db_tools.connect_branch(next_branch_name, timed=True)
+        # Clear existing pks cache since we're on a new branch
+        self._existing_pks = []
+
+        return next_branch_name
 
     def _select_random_key(self, rnd, benchmark_table):
         """Select a random key from existing PKs or modified keys.
@@ -724,7 +806,162 @@ class BenchmarkSuite:
             self.db_tools.commit_changes(timed=True, message="range update")
         return len(keys_in_range)
 
-    def run_benchmark(self):
+    def setup_nth_op_branches(
+        self, num_branches: int, shape: tp.BranchShape, inserts_per_branch: int
+    ):
+        """Setup branches and data for Nth operation measurement.
+
+        Creates the specified number of branches according to the shape pattern
+        and inserts data on each branch. This is run during setup (not timed).
+
+        Args:
+            num_branches: Number of branches to create.
+            shape: SPINE (linear chain) or FAN_OUT (all from root).
+            inserts_per_branch: Number of inserts per branch.
+        """
+        # Initialize datagen for inserts.
+        benchmark_table = self._config.table_name
+        if not benchmark_table:
+            all_tables = dbh.get_all_tables(
+                self.db_tools.get_current_connection()
+            )
+            benchmark_table = random.choice(all_tables)
+
+        table_schema = self.db_tools.get_table_schema(benchmark_table)
+        if not table_schema:
+            raise ValueError(
+                f"Could not fetch DDL for table {benchmark_table}."
+            )
+
+        self._table_datagen = DynamicDataGenerator(table_schema)
+        self.maybe_load_pk_columns(benchmark_table)
+
+        # Get column info for inserts.
+        col_names = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
+        )
+
+        _, current_parent_id = self.db_tools.get_current_branch()
+        root_branch_id = current_parent_id
+
+        for i in tqdm(range(num_branches)):
+            branch_name = f"setup_branch_{i + 1}"
+
+            if shape == tp.BranchShape.SPINE:
+                # Linear: branch from current
+                self.db_tools.create_branch(
+                    branch_name, current_parent_id, timed=False
+                )
+                self.db_tools.connect_branch(branch_name, timed=False)
+                _, current_parent_id = self.db_tools.get_current_branch()
+            else:  # FAN_OUT
+                # Fan-out: always branch from root
+                self.db_tools.create_branch(
+                    branch_name, root_branch_id, timed=False
+                )
+                self.db_tools.connect_branch(branch_name, timed=False)
+
+            # Insert data on this branch (untimed).
+            for _ in range(inserts_per_branch):
+                self._insert_without_timing(benchmark_table, col_names)
+            # Commit all inserts together
+            if not self.db_tools.autocommit:
+                self.db_tools.commit_changes(timed=False, message="insert")
+
+            self._add_branch(branch_name)
+
+        # Get the last branch info to return.
+        last_branch_name, last_branch_id = self.db_tools.get_current_branch()
+
+        print(
+            f"Setup complete: {num_branches} branches created, "
+            f"{inserts_per_branch} inserts per branch."
+        )
+
+        return last_branch_name, last_branch_id
+
+    def _insert_without_timing(self, benchmark_table: str, col_names: list):
+        """Insert a row without timing (used during setup phase)."""
+        _, cur_branch_id = self.db_tools.get_current_branch()
+
+        placeholders = ", ".join([f"%({name})s" for name in col_names])
+        insert_sql = f"INSERT INTO {benchmark_table} ({', '.join(col_names)}) VALUES ({placeholders});"
+
+        for _ in range(5):
+            row_data = self._table_datagen.generate_row()
+            pk_tuple = tuple(row_data[pk] for pk in self._pk_columns)
+
+            try:
+                # Execute without timing.
+                self.db_tools.execute_sql(insert_sql, row_data, timed=False)
+                self._modified_keys.setdefault(cur_branch_id, []).append(
+                    pk_tuple
+                )
+                break
+            except Exception:
+                continue
+
+    def run_nth_op_benchmark(self):
+        """Measure the cost of a single Nth operation.
+
+        This is called when nth_op_benchmark is configured. The setup (branches
+        and data) has already been created by perform_nth_op_setup(), and we
+        should already be connected to the latest created branch.
+        """
+        benchmark_table = self._config.table_name
+        if not benchmark_table:
+            all_tables = dbh.get_all_tables(
+                self.db_tools.get_current_connection()
+            )
+            benchmark_table = random.choice(all_tables)
+
+        table_schema = self.db_tools.get_table_schema(benchmark_table)
+        if not table_schema:
+            raise ValueError(
+                f"Could not fetch DDL for table {benchmark_table}."
+            )
+
+        self._table_datagen = DynamicDataGenerator(table_schema)
+
+        seed = self._seed if self._seed is not None else int(time.time())
+        rnd = random.Random(seed)
+        print(f"Nth-op measurement using seed: {seed}")
+
+        initial_db_size = 0
+        try:
+            initial_db_size = dbh.get_db_size(
+                self.db_tools.get_current_connection()
+            )
+        except Exception as e:
+            print(f"Error getting initial DB size: {e}")
+
+        # Set context for result collection.
+        self.db_tools.result_collector.set_context(
+            table_name=benchmark_table,
+            table_schema=table_schema,
+            initial_db_size=initial_db_size,
+            seed=seed,
+        )
+
+        # Execute single timed operation.
+        op = self._config.nth_op_benchmark.operation
+        print(f"Measuring Nth operation: {tp.OperationType.Name(op)}")
+
+        if op == tp.OperationType.BRANCH:
+            next_bid = self._shared_branch_manager.get_next_branch_id()
+            self.branch_and_connect(next_bid)
+        elif op == tp.OperationType.READ:
+            self.read_op(rnd, benchmark_table)
+        elif op == tp.OperationType.INSERT:
+            self.insert_op(benchmark_table)
+        elif op == tp.OperationType.UPDATE:
+            self.update_op(rnd, benchmark_table)
+        elif op == tp.OperationType.RANGE_UPDATE:
+            self.range_update_op(rnd, benchmark_table)
+
+        print("Nth operation measurement complete.")
+
+    def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
         benchmark_table = self._config.table_name
         if not benchmark_table:
@@ -766,11 +1003,12 @@ class BenchmarkSuite:
 
         # Get the list of operations to perform, and the probability of each
         # operation.
-        all_operations = self._config.operations
+        randomized_config = self._config.randomized_benchmark
+        all_operations = randomized_config.operations
         ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
         # Main benchmark loop
-        for _ in tqdm(range(self._config.num_ops)):
+        for _ in tqdm(range(randomized_config.num_ops)):
             # Get the operation
             cur_ops = rnd.choices(all_operations, ops_weights)[0]
             try:
@@ -799,6 +1037,19 @@ class BenchmarkSuite:
                 tqdm.write(
                     f"[Thread {self._thread_id}] Error performing operation: {e}"
                 )
+
+    def run_benchmark(self):
+        # Check which benchmark mode is configured.
+        benchmark_mode = self._config.WhichOneof("benchmark_mode")
+        if benchmark_mode == "nth_op_benchmark":
+            self.run_nth_op_benchmark()
+        elif benchmark_mode == "randomized_benchmark":
+            self.run_randomized_avg_benchmark()
+        else:
+            raise ValueError(
+                "No benchmark mode configured. Set either "
+                "randomized_benchmark or nth_op_benchmark."
+            )
 
 
 if __name__ == "__main__":
@@ -831,9 +1082,7 @@ if __name__ == "__main__":
         print(f"Loaded configuration from {args.config}")
         print(f"Run ID: {config.run_id}")
         print(f"Backend: {tp.Backend.Name(config.backend)}")
-        print(
-            f"Operations: {[tp.OperationType.Name(op) for op in config.operations]}"
-        )
+        print(f"Benchmark mode: {config.WhichOneof('benchmark_mode')}")
 
     except FileNotFoundError:
         print(f"Error: Config file not found: {args.config}")
