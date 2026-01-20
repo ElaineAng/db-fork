@@ -14,9 +14,10 @@ enum Backend {
 enum OperationType {
     BRANCH = 0;
     READ = 1;
-    INSERT = 2;
-    UPDATE = 3;
-    RANGE_UPDATE = 4;
+    CONNECT = 2;    
+    INSERT = 3;
+    UPDATE = 4;
+    RANGE_UPDATE = 5;
 }
 
 // Configuration for reusing an existing database
@@ -66,6 +67,7 @@ message BenchmarkSetup {
 message NthOperationBenchmark {
     OperationType operation = 1;   // The specific operation to measure (BRANCH, READ, INSERT, UPDATE, RANGE_UPDATE)
     BenchmarkSetup setup = 2;      // Setup configuration for creating state before measurement
+    int32 num_ops = 3;             // Number of operations to perform and record (default: 1)
 }
 
 // Configuration for randomized average-cost benchmark mode

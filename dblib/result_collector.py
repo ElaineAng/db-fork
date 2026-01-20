@@ -197,7 +197,10 @@ class ResultCollector:
         self._reset_metrics()
 
     def write_to_parquet(self, filename: str = None):
-        """Write all collected benchmark results to a parquet file."""
+        """Write all collected benchmark results to a parquet file.
+
+        If the file already exists, appends to it instead of overwriting.
+        """
 
         if not self.results:
             print("No results to write.")
@@ -226,8 +229,23 @@ class ResultCollector:
             }
             rows.append(row)
 
-        # Create PyArrow table and write to parquet
-        table = pa.Table.from_pylist(rows)
-        pq.write_table(table, filepath)
+        # Create PyArrow table from new results
+        new_table = pa.Table.from_pylist(rows)
 
-        print(f"Wrote {len(rows)} benchmark results to {filepath}")
+        # If file exists, read existing data and concatenate
+        if os.path.exists(filepath):
+            try:
+                existing_table = pq.read_table(filepath)
+                combined_table = pa.concat_tables([existing_table, new_table])
+                pq.write_table(combined_table, filepath)
+                print(
+                    f"Appended {len(rows)} results to {filepath} "
+                    f"(total: {len(combined_table)} rows)"
+                )
+            except Exception as e:
+                print(f"Error reading existing file, overwriting: {e}")
+                pq.write_table(new_table, filepath)
+                print(f"Wrote {len(rows)} benchmark results to {filepath}")
+        else:
+            pq.write_table(new_table, filepath)
+            print(f"Wrote {len(rows)} benchmark results to {filepath}")

@@ -19,7 +19,7 @@ from microbench.datagen import DynamicDataGenerator
 from util import db_helpers as dbh
 
 from dblib import result_collector as rc
-from dblib.dolt import DoltToolSuite
+from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
@@ -74,6 +74,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    setup_branches: list = None  # Branches created during Nth-op setup
 
 
 def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
@@ -164,9 +165,14 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         db_uri = get_initial_connection_uri(config, info)
         load_sql_file(db_uri, config.database_setup.sql_dump.sql_dump_path)
 
+        # Commit to ensure schema changes are visible for certain backends.
+        if backend == tp.Backend.DOLT:
+            commit_dolt_schema(db_uri)
+
     # Perform Nth operation setup if configured (create branches + insert data).
     if config.HasField("nth_op_benchmark"):
-        perform_nth_op_setup(config, info)
+        setup_branches = perform_nth_op_setup(config, info)
+        info.setup_branches = setup_branches
 
     return info
 
@@ -240,28 +246,37 @@ def create_benchmark_database(uri: str, db_name: str) -> None:
 
 
 def cleanup_backend(
-    config: tp.TaskConfig, backend_info: BackendInfo, db_tools=None
+    config: tp.TaskConfig, backend_info: BackendInfo, db_name: str = None
 ) -> None:
     """Clean up backend-specific resources (projects, databases).
 
     Args:
         config: Task configuration with cleanup settings.
-        backend_info: Backend info containing project IDs.
-        db_tools: Optional db_tools for deleting database. If None, skips db deletion.
+        backend_info: Backend info containing project IDs and connection URI.
+        db_name: Name of the database to delete. If None, uses config value.
     """
     if not config.database_setup.cleanup:
         return
 
-    # Delete the database if db_tools is provided.
-    if db_tools:
+    db_name = db_name or config.database_setup.db_name
+
+    # Delete the database using a direct connection through default_uri.
+    if backend_info.default_uri and db_name:
+        conn = None
+        cur = None
         try:
-            db_tools.delete_db(config.database_setup.db_name)
-            print("Database deleted successfully.")
+            conn = psycopg2.connect(backend_info.default_uri)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cur = conn.cursor()
+            cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
+            print(f"Database '{db_name}' deleted successfully.")
         except Exception as e:
-            if "database not found" in str(e):
-                print("Database not found. Assuming it was already deleted.")
-            else:
-                print(f"Error deleting database: {e}")
+            print(f"Error deleting database: {e}")
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
     # Delete backend-specific project if applicable.
     if backend_info.neon_project_id:
@@ -315,18 +330,27 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
     backend_info.default_branch_name = last_branch_name
     backend_info.default_branch_id = last_branch_id
 
+    # Get all branches created during setup to pass to worker threads.
+    setup_branches = setup_branch_manager.get_all_branches()
+
     print(
         f"Nth-op setup complete. Created {num_branches} branches. "
         f"Last branch: {last_branch_name}"
     )
 
+    return setup_branches
+
 
 class SharedBranchManager:
     """Thread-safe manager for branch IDs and branch list across threads."""
 
-    def __init__(self, initial_branch_id: int = 1):
+    def __init__(
+        self, initial_branch_id: int = 1, initial_branches: list[str] = None
+    ):
         self._next_branch_id = initial_branch_id
-        self._branches: list[str] = []
+        self._branches: list[str] = (
+            list(initial_branches) if initial_branches else []
+        )
         self._branch_limit_reached = False
         self._lock = threading.Lock()
 
@@ -434,7 +458,10 @@ class BenchmarkSuite:
             # Initialize the appropriate db_tools for the backend.
             if self._config.backend == tp.Backend.DOLT:
                 db_tools = DoltToolSuite.init_for_bench(
-                    result_collector, self._db_name, self._config.autocommit
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
+                    self._backend_info.default_branch_name,
                 )
             elif self._config.backend == tp.Backend.KPG:
                 db_tools = KpgToolSuite.init_for_bench(
@@ -485,11 +512,7 @@ class BenchmarkSuite:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         print(f"Exiting BenchmarkSuite context (thread {self._thread_id})...")
-
-        # Only write parquet if not using shared result collector
-        # (main thread will aggregate and write for all workers).
-        if self._shared_result_collector is None:
-            self.db_tools.result_collector.write_to_parquet()
+        # We do parquet writing in the main thread.
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
@@ -506,7 +529,7 @@ class BenchmarkSuite:
             self._shared_branch_manager.is_branch_limit_reached()
         )
         if not branch_limit_reached:
-            next_branch_name = f"branch_{next_bid}"
+            next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
             self.db_tools.create_branch(
                 branch_name=next_branch_name, parent_id=cur_id
             )
@@ -539,7 +562,7 @@ class BenchmarkSuite:
             The name of the newly created branch.
         """
         _, cur_id = self.db_tools.get_current_branch()
-        next_branch_name = f"branch_{next_bid}"
+        next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
 
         # Create branch (timed)
         self.db_tools.create_branch(
@@ -553,6 +576,23 @@ class BenchmarkSuite:
         self._existing_pks = []
 
         return next_branch_name
+
+    def connect_to_branch(self, rnd) -> None:
+        """Connect to a random existing branch (timed).
+
+        This is used for deterministic Nth-op benchmarks to measure
+        the cost of connecting to an existing branch.
+
+        Args:
+            rnd: Random instance for selecting branch.
+        """
+        to_connect = self._get_random_branch(rnd)
+        if to_connect:
+            self.db_tools.connect_branch(to_connect, timed=True)
+            # Clear existing pks cache since we're on a different branch
+            self._existing_pks = []
+        else:
+            raise ValueError("No branches available to connect to")
 
     def _select_random_key(self, rnd, benchmark_table):
         """Select a random key from existing PKs or modified keys.
@@ -864,6 +904,7 @@ class BenchmarkSuite:
             # Insert data on this branch (untimed).
             for _ in range(inserts_per_branch):
                 self._insert_without_timing(benchmark_table, col_names)
+
             # Commit all inserts together
             if not self.db_tools.autocommit:
                 self.db_tools.commit_changes(timed=False, message="insert")
@@ -886,7 +927,8 @@ class BenchmarkSuite:
 
         placeholders = ", ".join([f"%({name})s" for name in col_names])
         insert_sql = f"INSERT INTO {benchmark_table} ({', '.join(col_names)}) VALUES ({placeholders});"
-
+        inserted = False
+        error_msg = ""
         for _ in range(5):
             row_data = self._table_datagen.generate_row()
             pk_tuple = tuple(row_data[pk] for pk in self._pk_columns)
@@ -897,9 +939,12 @@ class BenchmarkSuite:
                 self._modified_keys.setdefault(cur_branch_id, []).append(
                     pk_tuple
                 )
+                inserted = True
                 break
-            except Exception:
+            except Exception as e:
+                error_msg = str(e)
                 continue
+        assert inserted, f"Failed to insert row: {error_msg}"
 
     def run_nth_op_benchmark(self):
         """Measure the cost of a single Nth operation.
@@ -943,23 +988,29 @@ class BenchmarkSuite:
             seed=seed,
         )
 
-        # Execute single timed operation.
+        # Execute timed operation(s).
         op = self._config.nth_op_benchmark.operation
-        print(f"Measuring Nth operation: {tp.OperationType.Name(op)}")
+        num_ops = self._config.nth_op_benchmark.num_ops or 1
+        print(
+            f"Measuring Nth operation: {tp.OperationType.Name(op)} x {num_ops}"
+        )
 
-        if op == tp.OperationType.BRANCH:
-            next_bid = self._shared_branch_manager.get_next_branch_id()
-            self.branch_and_connect(next_bid)
-        elif op == tp.OperationType.READ:
-            self.read_op(rnd, benchmark_table)
-        elif op == tp.OperationType.INSERT:
-            self.insert_op(benchmark_table)
-        elif op == tp.OperationType.UPDATE:
-            self.update_op(rnd, benchmark_table)
-        elif op == tp.OperationType.RANGE_UPDATE:
-            self.range_update_op(rnd, benchmark_table)
+        for i in tqdm(range(num_ops)):
+            if op == tp.OperationType.BRANCH:
+                next_bid = self._shared_branch_manager.get_next_branch_id()
+                self.branch_and_connect(next_bid)
+            elif op == tp.OperationType.READ:
+                self.read_op(rnd, benchmark_table)
+            elif op == tp.OperationType.INSERT:
+                self.insert_op(benchmark_table)
+            elif op == tp.OperationType.UPDATE:
+                self.update_op(rnd, benchmark_table)
+            elif op == tp.OperationType.RANGE_UPDATE:
+                self.range_update_op(rnd, benchmark_table)
+            elif op == tp.OperationType.CONNECT:
+                self.connect_to_branch(rnd)
 
-        print("Nth operation measurement complete.")
+        print(f"Nth operation measurement complete ({num_ops} ops).")
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
@@ -1095,53 +1146,88 @@ if __name__ == "__main__":
 
     num_threads = config.num_threads if config.num_threads > 0 else 1
     print(f"Running benchmark with {num_threads} thread(s)")
-    # Shared result collector for all worker threads.
+
+    # Number of runs for Nth-op benchmarks to average out noise
+    NTH_OP_NUM_RUNS = 5
+
+    # Determine number of iterations based on benchmark mode
+    benchmark_mode = config.WhichOneof("benchmark_mode")
+    num_iterations = (
+        NTH_OP_NUM_RUNS if benchmark_mode == "nth_op_benchmark" else 1
+    )
+
+    if num_iterations > 1:
+        print(f"Running {num_iterations} iterations for averaging")
+
+    # Shared result collector across all runs (appends to same parquet)
     shared_result_collector = rc.ResultCollector(run_id=config.run_id)
 
-    # Shared branch manager for unique branch IDs and branch list across threads.
-    shared_branch_manager = SharedBranchManager()
+    # Generate a fixed seed once to use across all iterations for reproducibility.
+    # If args.seed is provided, use it; otherwise generate one from time.
+    fixed_seed = args.seed if args.seed is not None else int(time.time())
+    print(f"Using fixed seed across all iterations: {fixed_seed}")
 
-    # Setup backend project, database, and schema.
-    backend_info = create_backend_project(config)
+    for run_idx in range(num_iterations):
+        if num_iterations > 1:
+            print(f"\n{'=' * 60}")
+            print(f"Run {run_idx + 1}/{num_iterations}")
+            print(f"{'=' * 60}")
 
-    def worker_benchmark(thread_id: int) -> None:
-        """Worker function that runs benchmark in its own thread with its own connection."""
-        # Set thread-local thread ID for result collection
-        rc.set_current_thread_id(thread_id)
+        # Setup backend project, database, and schema for this run.
+        backend_info = create_backend_project(config)
 
-        # Each worker gets its own seed based on the main seed for reproducibility.
-        worker_seed = (args.seed + thread_id) if args.seed is not None else None
+        # Get branches created during setup (if nth_op_benchmark mode).
+        setup_branches = backend_info.setup_branches or []
 
-        # Create worker's own BenchmarkSuite with shared resources.
-        worker_bench = BenchmarkSuite(
-            config,
-            backend_info,
-            seed=worker_seed,
-            thread_id=thread_id,
-            result_collector=shared_result_collector,
-            branch_manager=shared_branch_manager,
+        # Shared branch manager for unique branch IDs and branch list across threads.
+        # Initialize with branches from setup phase.
+        shared_branch_manager = SharedBranchManager(
+            initial_branches=setup_branches
         )
 
-        with worker_bench:
-            worker_bench.run_benchmark()
+        def worker_benchmark(thread_id: int, backend_info: BackendInfo) -> None:
+            """Worker function that runs benchmark in its own thread with its own connection."""
+            # Set thread-local thread ID for result collection
+            rc.set_current_thread_id(thread_id)
 
-    try:
-        # Spawn worker threads.
-        with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            futures = [
-                executor.submit(worker_benchmark, thread_id=i)
-                for i in range(num_threads)
-            ]
-            # Wait for all workers to complete and collect any exceptions.
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Worker thread failed: {e}")
+            # Each worker gets its own seed based on the fixed seed for reproducibility.
+            worker_seed = fixed_seed + thread_id
 
-        # Write all collected results to parquet.
-        shared_result_collector.write_to_parquet()
+            # Create worker's own BenchmarkSuite with shared resources.
+            worker_bench = BenchmarkSuite(
+                config,
+                backend_info,
+                seed=worker_seed,
+                thread_id=thread_id,
+                result_collector=shared_result_collector,
+                branch_manager=shared_branch_manager,
+            )
 
-    finally:
-        # Cleanup backend resources.
-        cleanup_backend(config, backend_info)
+            with worker_bench:
+                worker_bench.run_benchmark()
+
+        try:
+            # Spawn worker threads.
+            with ThreadPoolExecutor(max_workers=num_threads) as executor:
+                futures = [
+                    executor.submit(
+                        worker_benchmark, thread_id=i, backend_info=backend_info
+                    )
+                    for i in range(num_threads)
+                ]
+                # Wait for all workers to complete and collect any exceptions.
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Worker thread failed: {e}")
+
+        finally:
+            # Cleanup backend resources after each run.
+            cleanup_backend(
+                config,
+                backend_info,
+            )
+
+    # Write all collected results to parquet (appends across runs).
+    shared_result_collector.write_to_parquet()

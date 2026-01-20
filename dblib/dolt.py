@@ -11,6 +11,31 @@ DOLT_HOST = "localhost"
 DOLT_PORT = 5432
 
 
+def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
+    """Commit schema changes over db_uri.
+
+    Args:
+        db_uri: Connection URI for the Dolt database.
+        message: Commit message.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(db_uri)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cur = conn.cursor()
+        cur.execute("SELECT dolt_add('-A');")
+        cur.execute(f"SELECT dolt_commit('-m', '{message}');")
+        print(f"Dolt schema committed: {message}")
+    except Exception as e:
+        print(f"Warning: Dolt schema commit failed (may be okay): {e}")
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
 class DoltToolSuite(DBToolSuite):
     """
     A suite of tools for interacting with a Dolt database on a shared connection.
@@ -34,6 +59,7 @@ class DoltToolSuite(DBToolSuite):
         collector: rc.ResultCollector,
         db_name: str,
         autocommit: bool,
+        default_branch_name: str,
     ):
         uri = cls.get_initial_connection_uri(db_name)
 
@@ -44,6 +70,7 @@ class DoltToolSuite(DBToolSuite):
             connection=conn,
             collector=collector,
             autocommit=autocommit,
+            default_branch_name=default_branch_name,
         )
 
     def __init__(
@@ -51,8 +78,10 @@ class DoltToolSuite(DBToolSuite):
         connection: _pgconn,
         collector: rc.ResultCollector,
         autocommit: bool,
+        default_branch_name: str,
     ):
         super().__init__(connection, result_collector=collector)
+        self._connect_branch_impl(default_branch_name)
         self.autocommit = autocommit
 
     def list_branches(self) -> list[str]:
@@ -73,11 +102,9 @@ class DoltToolSuite(DBToolSuite):
         """
         Creates a new branch in the Dolt database.
         """
+        self._connect_branch_impl(parent_id)
         cmd = f"SELECT dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
-        # super().commit_changes(
-        #     timed=True, message=f"Create branch {branch_name}"
-        # )
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """

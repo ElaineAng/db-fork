@@ -1,15 +1,9 @@
 # Example benchmark task configuration
-# This configuration runs a mixed workload benchmark on Neon
+# This configuration runs a Nth operation benchmark measuring READ cost
+# after creating 5 spine branches with 100 inserts each.
 
-run_id: "benchmark_neon_006_50ops_100threads_no_updates"
-backend: NEON
-
-# Operations to perform in the benchmark
-operations: READ
-operations: INSERT
-operations: BRANCH
-
-num_ops: 50
+run_id: "benchmark_dolt_nth_op_1024_spine"
+backend: DOLT
 
 # Table to benchmark (empty means random table from schema)
 table_name: "orders"
@@ -27,12 +21,35 @@ database_setup {
   }
 }
 
-# Range update configuration
+# Range update configuration (used when operation is RANGE_UPDATE)
 range_update_config {
   range_size: 20
 }
 
 autocommit: true
 
-num_threads: 100
+num_threads: 1
+
+# Benchmark mode (choose one):
+
+# Option 1: Randomized average-cost benchmark mode
+# randomized_benchmark {
+#   operations: READ
+#   operations: INSERT
+#   operations: BRANCH
+#   operations: RANGE_UPDATE
+#   num_ops: 1000
+# }
+
+# Option 2: Nth operation benchmark mode
+# Creates setup state (branches + data) then measures the operation num_ops times.
+nth_op_benchmark {
+  operation: RANGE_UPDATE
+  num_ops: 1
+  setup {
+    num_branches: 1024
+    branch_shape: SPINE
+    inserts_per_branch: 50
+  }
+}
 
