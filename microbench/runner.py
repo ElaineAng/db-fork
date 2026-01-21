@@ -1153,7 +1153,10 @@ if __name__ == "__main__":
     # Determine number of iterations based on benchmark mode
     benchmark_mode = config.WhichOneof("benchmark_mode")
     num_iterations = (
-        NTH_OP_NUM_RUNS if benchmark_mode == "nth_op_benchmark" else 1
+        NTH_OP_NUM_RUNS
+        if benchmark_mode == "nth_op_benchmark"
+        and config.nth_op_benchmark.num_ops == 1
+        else 1
     )
 
     if num_iterations > 1:

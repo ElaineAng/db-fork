@@ -171,8 +171,9 @@ class NeonToolSuite(DBToolSuite):
         # Note that the first time we connect to a branch, we need to make an API
         # call to get the connection string, which may be add slight additional
         # overhead.
-        branch_id = self._all_branches[branch_name][0]
-        uri = self._all_branches[branch_name][1]
+        branch_info = self._all_branches.get(branch_name)
+        branch_id = branch_info[0] if branch_info else None
+        uri = branch_info[1] if branch_info else None
         if not branch_id:
             print(
                 f"WARNING: Branch '{branch_name}' not cached. "
