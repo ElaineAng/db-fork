@@ -1148,7 +1148,7 @@ if __name__ == "__main__":
     print(f"Running benchmark with {num_threads} thread(s)")
 
     # Number of runs for Nth-op benchmarks to average out noise
-    NTH_OP_NUM_RUNS = 5
+    NTH_OP_NUM_RUNS = 3
 
     # Determine number of iterations based on benchmark mode
     benchmark_mode = config.WhichOneof("benchmark_mode")

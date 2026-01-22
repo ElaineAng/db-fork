@@ -7,15 +7,17 @@
 
 set -e
 
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <backend> <sql_dump_path>"
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    echo "Usage: $0 <backend> <sql_dump_path> [max_branches]"
     echo "  backend: dolt, neon"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
+    echo "  max_branches: (optional) Only run experiments with num_branches <= this value"
     exit 1
 fi
 
 BACKEND=$1
 SQL_DUMP_PATH=$2
+MAX_BRANCHES=${3:-9999}  # Default to large number if not specified
 
 # Convert backend to uppercase for proto config
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
@@ -33,8 +35,7 @@ if [ ! -f "$SQL_DUMP_PATH" ]; then
 fi
 
 # Configuration parameters
-# NUM_BRANCHES_LIST=(4 8 16 32 128 256 512 1024)
-NUM_BRANCHES_LIST=(4 8 16)
+NUM_BRANCHES_LIST=(4 8 16 32 128 256 512 1024)
 OPERATIONS=(CONNECT READ RANGE_UPDATE)
 
 # Other fixed config values
@@ -44,7 +45,7 @@ INSERTS_PER_BRANCH=50
 NUM_OPS=1000  # 1000 operations per run for multi-op benchmark
 
 # Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/multi_op_config.XXXXXX.textproto)
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_${SQL_PREFIX}_multi_op_config.XXXXXX.textproto)
 
 cleanup() {
     rm -f "$TEMP_CONFIG"
@@ -66,6 +67,11 @@ echo "==================================================="
 
 # Loop through all combinations
 for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
+    # Skip if exceeds max_branches
+    if [ "$NUM_BRANCHES" -gt "$MAX_BRANCHES" ]; then
+        echo "Skipping num_branches=$NUM_BRANCHES (exceeds max_branches=$MAX_BRANCHES)"
+        continue
+    fi
     for OPERATION in "${OPERATIONS[@]}"; do
         RUN_ID="${BACKEND}_${SQL_PREFIX}_multiop_${NUM_BRANCHES}_spine"
         

@@ -7,15 +7,17 @@
 
 set -e
 
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <backend> <sql_dump_path>"
+if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    echo "Usage: $0 <backend> <sql_dump_path> [max_branches]"
     echo "  backend: dolt, neon, kpg, xata"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
+    echo "  max_branches: (optional) Only run experiments with num_branches <= this value"
     exit 1
 fi
 
 BACKEND=$1
 SQL_DUMP_PATH=$2
+MAX_BRANCHES=${3:-9999}  # Default to large number if not specified
 
 # Convert backend to uppercase for proto config
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
@@ -64,6 +66,11 @@ echo "==================================================="
 
 # Loop through all combinations
 for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
+    # Skip if exceeds max_branches
+    if [ "$NUM_BRANCHES" -gt "$MAX_BRANCHES" ]; then
+        echo "Skipping num_branches=$NUM_BRANCHES (exceeds max_branches=$MAX_BRANCHES)"
+        continue
+    fi
     for OPERATION in "${OPERATIONS[@]}"; do
         RUN_ID="${BACKEND}_${SQL_PREFIX}_nth_op_${NUM_BRANCHES}_spine"
         

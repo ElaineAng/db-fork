@@ -2,8 +2,8 @@
 # This configuration runs a Nth operation benchmark measuring READ cost
 # after creating 5 spine branches with 100 inserts each.
 
-run_id: "benchmark_neon_multiop_4_spine"
-backend: NEON
+run_id: "benchmark_dolt_multiop_32_spine"
+backend: DOLT
 
 # Table to benchmark (empty means random table from schema)
 table_name: "orders"
@@ -44,10 +44,10 @@ num_threads: 1
 # Option 2: Nth operation benchmark mode
 # Creates setup state (branches + data) then measures the operation num_ops times.
 nth_op_benchmark {
-  operation: CONNECT
+  operation: READ
   num_ops: 1000
   setup {
-    num_branches: 4
+    num_branches: 32
     branch_shape: SPINE
     inserts_per_branch: 50
   }
