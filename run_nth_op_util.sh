@@ -43,17 +43,21 @@ INSERTS_PER_BRANCH=50
 NUM_OPS=1  # Single operation per run (will be repeated across iterations)
 
 # Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/nth_op_config.XXXXXX.textproto)
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_nth_op_config.XXXXXX.textproto)
 
 cleanup() {
     rm -f "$TEMP_CONFIG"
 }
 trap cleanup EXIT
 
+# Extract first 4 chars of sql_dump filename for run_id
+SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
+SQL_PREFIX=${SQL_BASENAME:0:4}
+
 echo "==================================================="
 echo "Nth-Op Benchmark Automation Script"
 echo "Backend: $BACKEND"
-echo "SQL Dump: $SQL_DUMP_PATH"
+echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
 echo "Operations: ${OPERATIONS[*]}"
 echo "Num Branches: ${NUM_BRANCHES_LIST[*]}"
 echo "==================================================="
@@ -61,7 +65,7 @@ echo "==================================================="
 # Loop through all combinations
 for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
     for OPERATION in "${OPERATIONS[@]}"; do
-        RUN_ID="benchmark_${BACKEND}_nth_op_${NUM_BRANCHES}_spine"
+        RUN_ID="${BACKEND}_${SQL_PREFIX}_nth_op_${NUM_BRANCHES}_spine"
         
         echo ""
         echo "---------------------------------------------------"
@@ -110,6 +114,9 @@ EOF
         # Run the benchmark
         echo "Starting benchmark..."
         python -m microbench.runner --config "$TEMP_CONFIG"
+        
+        # Clean up dropped databases to prevent disk space explosion
+        rm -rf ~/doltgres/databases/.dolt_dropped_databases/*
         
         echo "Completed: $RUN_ID with operation $OPERATION"
     done
