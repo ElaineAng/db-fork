@@ -20,7 +20,7 @@ class DynamicDataGenerator:
 
     def _parse_ddl(self) -> None:
         """Parses DDL to extract table name, columns, and primary keys."""
-        print(f"Parsing DDL schema...\n{self.ddl}\n")
+        #  print(f"Parsing DDL schema...\n{self.ddl}\n")
         # Extract table name
         table_match = re.search(
             r"CREATE TABLE\s+([\w\.]+)\s*\(", self.ddl, re.IGNORECASE
@@ -67,9 +67,9 @@ class DynamicDataGenerator:
                     "precision": precision,
                 }
 
-        print(
-            f"✅ Schema parsed for table '{self.table_name}' with {len(self.columns)} columns."
-        )
+        # print(
+        #     f"✅ Schema parsed for table '{self.table_name}' with {len(self.columns)} columns."
+        # )
 
         # for col_name, col_def in self.columns.items():
         #     print(f" - Column: {col_name}, Definition: {col_def}")

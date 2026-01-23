@@ -393,6 +393,29 @@ class SharedBranchManager:
             self._branch_limit_reached = True
 
 
+class SharedProgress:
+    """Thread-safe shared progress bar across multiple threads."""
+
+    def __init__(self, total: int, desc: str = "Progress"):
+        self._pbar = tqdm(total=total, desc=desc, position=0, leave=True)
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def update(self, n: int = 1) -> None:
+        """Thread-safe update of progress bar."""
+        with self._lock:
+            self._pbar.update(n)
+            self._count += n
+
+    def close(self) -> None:
+        """Close the progress bar."""
+        self._pbar.close()
+
+    def write(self, msg: str) -> None:
+        """Thread-safe write message above progress bar."""
+        tqdm.write(msg)
+
+
 class BenchmarkSuite:
     def __init__(
         self,
@@ -402,6 +425,7 @@ class BenchmarkSuite:
         thread_id: int = 0,
         result_collector: Optional[rc.ResultCollector] = None,
         branch_manager: Optional[SharedBranchManager] = None,
+        shared_progress: Optional[SharedProgress] = None,
     ):
         self._db_name = config.database_setup.db_name
         self._config = config
@@ -410,6 +434,7 @@ class BenchmarkSuite:
         self._thread_id = thread_id
         self._shared_result_collector = result_collector
         self._shared_branch_manager = branch_manager
+        self._shared_progress = shared_progress
         self._require_db_setup = (
             config.database_setup.WhichOneof("source") == "sql_dump"
         )
@@ -509,7 +534,8 @@ class BenchmarkSuite:
             raise e
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        print(f"Exiting BenchmarkSuite context (thread {self._thread_id})...")
+        if self._thread_id == 0:
+            print("Exiting BenchmarkSuite context (thread 0)...")
         # We do parquet writing in the main thread.
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
@@ -977,7 +1003,8 @@ class BenchmarkSuite:
 
         seed = self._seed if self._seed is not None else int(time.time())
         rnd = random.Random(seed)
-        print(f"Nth-op measurement using seed: {seed}")
+        if self._thread_id == 0:
+            print(f"Thread {self._thread_id} using seed: {seed}")
 
         initial_db_size = 0
         try:
@@ -985,7 +1012,8 @@ class BenchmarkSuite:
                 self.db_tools.get_current_connection()
             )
         except Exception as e:
-            print(f"Error getting initial DB size: {e}")
+            if self._thread_id == 0:
+                print(f"Error getting initial DB size: {e}")
 
         # Set context for result collection.
         self.db_tools.result_collector.set_context(
@@ -998,11 +1026,11 @@ class BenchmarkSuite:
         # Execute timed operation(s).
         op = self._config.nth_op_benchmark.operation
         num_ops = self._config.nth_op_benchmark.num_ops or 1
-        print(
-            f"Measuring Nth operation: {tp.OperationType.Name(op)} x {num_ops}"
-        )
 
-        for i in tqdm(range(num_ops)):
+        # Use shared progress if available (multi-threaded), else use local tqdm
+        use_shared_progress = self._shared_progress is not None
+
+        for i in range(num_ops):
             if op == tp.OperationType.BRANCH:
                 next_bid = self._shared_branch_manager.get_next_branch_id()
                 self.branch_and_connect(next_bid)
@@ -1017,7 +1045,9 @@ class BenchmarkSuite:
             elif op == tp.OperationType.CONNECT:
                 self.connect_to_branch(rnd)
 
-        print(f"Nth operation measurement complete ({num_ops} ops).")
+            # Update progress
+            if use_shared_progress:
+                self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
@@ -1049,7 +1079,8 @@ class BenchmarkSuite:
                 self.db_tools.get_current_connection()
             )
         except Exception as e:
-            print(f"Error getting initial DB size: {e}")
+            if self._thread_id == 0:
+                print(f"Error getting initial DB size: {e}")
 
         # Set context for result proto collection.
         self.db_tools.result_collector.set_context(
@@ -1065,8 +1096,11 @@ class BenchmarkSuite:
         all_operations = randomized_config.operations
         ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
+        # Use shared progress if available (multi-threaded)
+        use_shared_progress = self._shared_progress is not None
+
         # Main benchmark loop
-        for _ in tqdm(range(randomized_config.num_ops)):
+        for _ in range(randomized_config.num_ops):
             # Get the operation
             cur_ops = rnd.choices(all_operations, ops_weights)[0]
             try:
@@ -1084,7 +1118,12 @@ class BenchmarkSuite:
                     try:
                         self.read_op(rnd, benchmark_table)
                     except ValueError as e:
-                        tqdm.write(f"Error reading key: {e}")
+                        if use_shared_progress:
+                            self._shared_progress.write(
+                                f"Error reading key: {e}"
+                            )
+                        else:
+                            tqdm.write(f"Error reading key: {e}")
                 elif cur_ops == tp.OperationType.INSERT:
                     self.insert_op(benchmark_table)
                 elif cur_ops == tp.OperationType.UPDATE:
@@ -1092,9 +1131,15 @@ class BenchmarkSuite:
                 elif cur_ops == tp.OperationType.RANGE_UPDATE:
                     self.range_update_op(rnd, benchmark_table)
             except Exception as e:
-                tqdm.write(
-                    f"[Thread {self._thread_id}] Error performing operation: {e}"
-                )
+                msg = f"[Thread {self._thread_id}] Error performing operation: {e}"
+                if use_shared_progress:
+                    self._shared_progress.write(msg)
+                else:
+                    tqdm.write(msg)
+
+            # Update progress
+            if use_shared_progress:
+                self._shared_progress.update(1)
 
     def run_benchmark(self):
         # Check which benchmark mode is configured.
@@ -1141,6 +1186,7 @@ if __name__ == "__main__":
         print(f"Run ID: {config.run_id}")
         print(f"Backend: {tp.Backend.Name(config.backend)}")
         print(f"Benchmark mode: {config.WhichOneof('benchmark_mode')}")
+        print(f"Table name: {config.table_name}")
 
     except FileNotFoundError:
         print(f"Error: Config file not found: {args.config}")
@@ -1195,6 +1241,19 @@ if __name__ == "__main__":
             initial_branches=setup_branches
         )
 
+        # Calculate total operations for shared progress bar
+        benchmark_mode = config.WhichOneof("benchmark_mode")
+        if benchmark_mode == "nth_op_benchmark":
+            ops_per_thread = config.nth_op_benchmark.num_ops or 1
+        else:
+            ops_per_thread = config.randomized_benchmark.num_ops
+        total_ops = ops_per_thread * num_threads
+
+        # Create shared progress bar for all threads
+        shared_progress = SharedProgress(
+            total=total_ops, desc=f"Benchmark ({num_threads} threads)"
+        )
+
         def worker_benchmark(thread_id: int, backend_info: BackendInfo) -> None:
             """Worker function that runs benchmark in its own thread with its own connection."""
             # Set thread-local thread ID for result collection
@@ -1211,6 +1270,7 @@ if __name__ == "__main__":
                 thread_id=thread_id,
                 result_collector=shared_result_collector,
                 branch_manager=shared_branch_manager,
+                shared_progress=shared_progress,
             )
 
             with worker_bench:
@@ -1231,6 +1291,9 @@ if __name__ == "__main__":
                         future.result()
                     except Exception as e:
                         print(f"Worker thread failed: {e}")
+
+            # Close shared progress bar
+            shared_progress.close()
 
         finally:
             # Cleanup backend resources after each run.

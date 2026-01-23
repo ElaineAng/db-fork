@@ -112,7 +112,7 @@ def get_pk_column_names(
     all_columns = [col[0] for col in _get_primary_key_columns(conn, table_name)]
     if not all_columns:
         raise ValueError(f"Table {table_name} has no primary key.")
-    print(f" PK columns: {all_columns}")
+    #  print(f" PK columns: {all_columns}")
     return all_columns
 
 
