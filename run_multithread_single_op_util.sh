@@ -1,23 +1,23 @@
 #!/bin/bash
-# run_nth_op_util.sh - Automate multiple runs of microbench/runner.py
+# run_multithread_util.sh - Automate multi-threaded benchmark runs
 #
-# Usage: ./run_nth_op_util.sh <backend> <sql_dump_path>
-# Example: ./run_nth_op_util.sh DOLT db_setup/tpcc_schema.sql
-#          ./run_nth_op_util.sh NEON db_setup/tpcc_schema.sql
+# Usage: ./run_multithread_util.sh <backend> <sql_dump_path> [max_threads]
+# Example: ./run_multithread_util.sh dolt db_setup/tpcc_schema.sql
+#          ./run_multithread_util.sh neon db_setup/tpcc_schema.sql 64
 
 set -e
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> [max_branches]"
-    echo "  backend: dolt, neon, kpg, xata"
+    echo "Usage: $0 <backend> <sql_dump_path> [max_threads]"
+    echo "  backend: dolt, neon"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
-    echo "  max_branches: (optional) Only run experiments with num_branches <= this value"
+    echo "  max_threads: (optional) Only run experiments with num_threads <= this value"
     exit 1
 fi
 
 BACKEND=$1
 SQL_DUMP_PATH=$2
-MAX_BRANCHES=${3:-9999}  # Default to large number if not specified
+MAX_THREADS=${3:-9999}  # Default to large number if not specified
 
 # Convert backend to uppercase for proto config
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
@@ -34,58 +34,70 @@ if [ ! -f "$SQL_DUMP_PATH" ]; then
     exit 1
 fi
 
+# Extract first 4 chars of sql_dump filename for run_id
+SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
+SQL_PREFIX=${SQL_BASENAME:0:4}
+
 # Configuration parameters
-NUM_BRANCHES_LIST=(4 8 16 32 128 256 512 1024)
-OPERATIONS=(BRANCH READ UPDATE RANGE_UPDATE)
+NUM_THREADS_LIST=(1 4 8 16 32 64 128 256 512 1024)
+OPERATIONS=(BRANCH READ RANGE_UPDATE)
 
 # Other fixed config values
 TABLE_NAME="orders"
 DB_NAME="microbench"
-INSERTS_PER_BRANCH=50
-NUM_OPS=1  # Single operation per run (will be repeated across iterations)
+INSERTS_PER_BRANCH=1000
+NUM_OPS=1  # Single operation per thread
 
 # Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_nth_op_config.XXXXXX.textproto)
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_multithread_config.XXXXXX.textproto)
 
 cleanup() {
     rm -f "$TEMP_CONFIG"
 }
 trap cleanup EXIT
 
-# Extract first 4 chars of sql_dump filename for run_id
-SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
-SQL_PREFIX=${SQL_BASENAME:0:4}
-
 # Generate a random seed for reproducibility across all runs
 RANDOM_SEED=$RANDOM$RANDOM
 
 echo "==================================================="
-echo "Nth-Op Benchmark Automation Script"
+echo "Multi-Threaded Benchmark Automation Script"
 echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
 echo "Operations: ${OPERATIONS[*]}"
-echo "Num Branches: ${NUM_BRANCHES_LIST[*]}"
+echo "Num Threads: ${NUM_THREADS_LIST[*]}"
+echo "Max Threads: $MAX_THREADS"
 echo "Random Seed: $RANDOM_SEED"
 echo "==================================================="
 
 # Loop through all combinations
-for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
-    # Skip if exceeds max_branches
-    if [ "$NUM_BRANCHES" -gt "$MAX_BRANCHES" ]; then
-        echo "Skipping num_branches=$NUM_BRANCHES (exceeds max_branches=$MAX_BRANCHES)"
+for NUM_THREADS in "${NUM_THREADS_LIST[@]}"; do
+    # Skip if exceeds max_threads
+    if [ "$NUM_THREADS" -gt "$MAX_THREADS" ]; then
+        echo "Skipping num_threads=$NUM_THREADS (exceeds max_threads=$MAX_THREADS)"
         continue
     fi
+    
     for OPERATION in "${OPERATIONS[@]}"; do
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_nth_op_${NUM_BRANCHES}_spine"
+        RUN_ID="${BACKEND}_${SQL_PREFIX}_multithread_${NUM_THREADS}_fanout"
+        
+        # Set num_branches based on operation:
+        # - BRANCH: 0 (we're measuring branch creation from scratch)
+        # - READ/RANGE_UPDATE: same as num_threads (one branch per thread to read from)
+        if [ "$OPERATION" = "BRANCH" ]; then
+            NUM_BRANCHES=0
+        else
+            NUM_BRANCHES=$NUM_THREADS
+        fi
         
         echo ""
         echo "---------------------------------------------------"
         echo "Running: $RUN_ID with operation $OPERATION"
+        echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES"
         echo "---------------------------------------------------"
         
         # Generate config file
         cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for nth-op benchmark
+# Auto-generated config for multi-threaded benchmark
 run_id: "${RUN_ID}"
 backend: ${BACKEND_UPPER}
 
@@ -105,14 +117,14 @@ range_update_config {
 }
 
 autocommit: true
-num_threads: 1
+num_threads: ${NUM_THREADS}
 
 nth_op_benchmark {
   operation: ${OPERATION}
   num_ops: ${NUM_OPS}
   setup {
     num_branches: ${NUM_BRANCHES}
-    branch_shape: SPINE
+    branch_shape: FAN_OUT
     inserts_per_branch: ${INSERTS_PER_BRANCH}
   }
 }

@@ -56,6 +56,9 @@ trap cleanup EXIT
 SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
 SQL_PREFIX=${SQL_BASENAME:0:4}
 
+# Generate a random seed for reproducibility across all runs
+RANDOM_SEED=$RANDOM$RANDOM
+
 echo "==================================================="
 echo "Multi-Op Benchmark Automation Script"
 echo "Backend: $BACKEND"
@@ -63,6 +66,7 @@ echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
 echo "Operations: ${OPERATIONS[*]}"
 echo "Num Branches: ${NUM_BRANCHES_LIST[*]}"
 echo "Num Ops per run: $NUM_OPS"
+echo "Random Seed: $RANDOM_SEED"
 echo "==================================================="
 
 # Loop through all combinations
@@ -127,7 +131,7 @@ EOF
         
         # Run the benchmark
         echo "Starting benchmark..."
-        python -m microbench.runner --config "$TEMP_CONFIG"
+        python -m microbench.runner --config "$TEMP_CONFIG" --seed $RANDOM_SEED
         
         # Clean up dropped databases to prevent disk space explosion
         rm -rf ~/doltgres/databases/.dolt_dropped_databases/*
