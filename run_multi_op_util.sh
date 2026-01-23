@@ -73,6 +73,12 @@ for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
         continue
     fi
     for OPERATION in "${OPERATIONS[@]}"; do
+        # Reduce num_ops for RANGE_UPDATE on Neon (too slow)
+        OP_NUM_OPS=$NUM_OPS
+        if [ "$BACKEND_UPPER" = "NEON" ] && [ "$OPERATION" = "RANGE_UPDATE" ]; then
+            OP_NUM_OPS=200
+        fi
+        
         RUN_ID="${BACKEND}_${SQL_PREFIX}_multiop_${NUM_BRANCHES}_spine"
         
         echo ""
@@ -106,7 +112,7 @@ num_threads: 1
 
 nth_op_benchmark {
   operation: ${OPERATION}
-  num_ops: ${NUM_OPS}
+  num_ops: ${OP_NUM_OPS}
   setup {
     num_branches: ${NUM_BRANCHES}
     branch_shape: SPINE

@@ -126,6 +126,7 @@ def plot_latency_by_branches(df: pd.DataFrame, output_path: str = None):
     plt.xscale(
         "log", base=2
     )  # Log scale for branch counts (typically powers of 2)
+    plt.yscale("log")  # Log scale for latency
 
     # Add minor gridlines
     plt.grid(True, which="minor", alpha=0.1)

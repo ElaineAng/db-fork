@@ -147,6 +147,7 @@ def plot_latency_percentiles(df: pd.DataFrame, output_path: str = None):
     )
     plt.grid(True, alpha=0.3)
     plt.xscale("log", base=2)
+    plt.yscale("log")  # Log scale for latency
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
 
