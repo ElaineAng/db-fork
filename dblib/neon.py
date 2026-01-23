@@ -23,7 +23,13 @@ class NeonToolSuite(DBToolSuite):
 
     @classmethod
     def create_neon_project(cls, project_name: str) -> str:
-        project_dict = {"project": {"pg_version": 17, "name": project_name}}
+        project_dict = {
+            "project": {
+                "pg_version": 17,
+                "name": project_name,
+                "region_id": "aws-us-east-1",
+            }
+        }
         # TODO: Handle project creation failures.
         return cls._request("POST", "projects", json=project_dict)
 
@@ -110,7 +116,7 @@ class NeonToolSuite(DBToolSuite):
         super().__init__(connection, result_collector)
         self.project_id = project_id
         self.result_collector = result_collector
-        self.current_branch_name = branch_name or "production"
+        self.current_branch_name = branch_name
         self.current_branch_id = branch_id
         self.autocommit = autocommit
         self._all_branches = {branch_name: (branch_id, None)}

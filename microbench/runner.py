@@ -443,12 +443,10 @@ class BenchmarkSuite:
         db_tools = None
         # Use shared result collector if provided (for worker threads),
         # otherwise create a new one.
-        if self._shared_result_collector is not None:
-            result_collector = self._shared_result_collector
-        else:
-            result_collector = rc.ResultCollector(
-                run_id=self._config.run_id,
-            )
+        assert self._shared_result_collector is not None, (
+            "Shared result collector must be provided for worker threads"
+        )
+        result_collector = self._shared_result_collector
 
         try:
             # Use backend info passed to constructor.
@@ -883,6 +881,15 @@ class BenchmarkSuite:
 
         _, current_parent_id = self.db_tools.get_current_branch()
         root_branch_id = current_parent_id
+
+        print(f"Inserting {inserts_per_branch} rows on root branch...")
+        # Insert data on root branch (untimed).
+        for _ in tqdm(range(inserts_per_branch)):
+            self._insert_without_timing(benchmark_table, col_names)
+
+        # Commit all inserts together
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=False, message="insert")
 
         for i in tqdm(range(num_branches)):
             branch_name = f"setup_branch_{i + 1}"

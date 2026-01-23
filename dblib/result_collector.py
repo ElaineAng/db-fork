@@ -86,37 +86,50 @@ class ResultCollector:
         run_id: str = None,
         output_dir: str = "/tmp/run_stats",
     ):
-        self.reset()
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
 
         # Lock for thread-safe result collection
         self._lock = threading.Lock()
 
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
+        # Thread-local storage for per-thread context and metrics
+        self._thread_local = threading.local()
 
-    def _reset_metrics(self):
-        """Reset all metric fields for a new record."""
-        self._current_op_type = rslt.OpType.UNSPECIFIED
-        self._current_latency = 0.0
-        self._num_keys_touched = 0
-        self._sql_query = ""
-
-    def reset(self):
-        """Reset all collected timing data and proto messages."""
-        # Proto messages collected during benchmark
+        # Shared results list (protected by lock)
         self.results = []
         self.iteration_counter = 0
 
-        # Reset metrics
-        self._reset_metrics()
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Reset context
-        self.current_table_name = ""
-        self.current_table_schema = ""
-        self.initial_db_size = 0
-        self._seed = 0  # Default to 0 for benchmarks without randomness
+    def _get_thread_state(self):
+        """Get or initialize thread-local state for the current thread."""
+        if not hasattr(self._thread_local, "initialized"):
+            # Initialize thread-local state
+            self._thread_local.initialized = True
+            self._thread_local.current_table_name = ""
+            self._thread_local.current_table_schema = ""
+            self._thread_local.initial_db_size = 0
+            self._thread_local.seed = 0
+            self._thread_local.current_op_type = rslt.OpType.UNSPECIFIED
+            self._thread_local.current_latency = 0.0
+            self._thread_local.num_keys_touched = 0
+            self._thread_local.sql_query = ""
+        return self._thread_local
+
+    def _reset_metrics(self):
+        """Reset all metric fields for a new record (thread-local)."""
+        state = self._get_thread_state()
+        state.current_op_type = rslt.OpType.UNSPECIFIED
+        state.current_latency = 0.0
+        state.num_keys_touched = 0
+        state.sql_query = ""
+
+    def reset(self):
+        """Reset all collected timing data and proto messages (shared state only)."""
+        with self._lock:
+            self.results = []
+            self.iteration_counter = 0
 
     def set_context(
         self,
@@ -125,21 +138,23 @@ class ResultCollector:
         initial_db_size: int,
         seed: int,
     ):
-        """Set context information for the next operation to be timed."""
-        self.current_table_name = table_name
-        self.current_table_schema = table_schema
-        self.initial_db_size = initial_db_size
-        self._seed = seed
+        """Set context information for the next operation to be timed (thread-local)."""
+        state = self._get_thread_state()
+        state.current_table_name = table_name
+        state.current_table_schema = table_schema
+        state.initial_db_size = initial_db_size
+        state.seed = seed
 
     def _validate_and_set_op_type(self, op_type: rslt.OpType):
+        state = self._get_thread_state()
         if (
-            self._current_op_type != rslt.OpType.UNSPECIFIED
-            and self._current_op_type != op_type
+            state.current_op_type != rslt.OpType.UNSPECIFIED
+            and state.current_op_type != op_type
         ):
             raise ValueError(
-                f"Operation type changed mid-operation: was {self._current_op_type}, now {op_type}"
+                f"Operation type changed mid-operation: was {state.current_op_type}, now {op_type}"
             )
-        self._current_op_type = op_type
+        state.current_op_type = op_type
 
     @contextmanager
     def maybe_time_ops(self, timed: bool, op_type: rslt.OpType):
@@ -157,13 +172,16 @@ class ResultCollector:
         else:
             end_time = time.perf_counter()
             self._validate_and_set_op_type(op_type)
-            self._current_latency = end_time - start_time
+            state = self._get_thread_state()
+            state.current_latency = end_time - start_time
 
     def record_num_keys_touched(self, num_keys: int) -> None:
-        self._num_keys_touched = num_keys
+        state = self._get_thread_state()
+        state.num_keys_touched = num_keys
 
     def record_sql_query(self, sql_query: str) -> None:
-        self._sql_query = sql_query
+        state = self._get_thread_state()
+        state.sql_query = sql_query
 
     def flush_record(self):
         """
@@ -171,21 +189,22 @@ class ResultCollector:
 
         Uses the thread-local thread_id set via set_current_thread_id().
         """
+        state = self._get_thread_state()
 
         # Create and fill the Result proto
         result = rslt.Result()
         result.run_id = self.run_id
         result.iteration_number = self.iteration_counter
-        result.table_name = self.current_table_name
-        result.table_schema = self.current_table_schema
-        result.initial_db_size = self.initial_db_size
-        result.random_seed = self._seed
+        result.table_name = state.current_table_name
+        result.table_schema = state.current_table_schema
+        result.initial_db_size = state.initial_db_size
+        result.random_seed = state.seed
 
         # Fill in collected metrics
-        result.op_type = self._current_op_type
-        result.num_keys_touched = self._num_keys_touched
-        result.latency = self._current_latency
-        result.sql_query = self._sql_query
+        result.op_type = state.current_op_type
+        result.num_keys_touched = state.num_keys_touched
+        result.latency = state.current_latency
+        result.sql_query = state.sql_query
         result.thread_id = get_current_thread_id()
 
         # Append to results (thread-safe)
