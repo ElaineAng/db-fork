@@ -104,7 +104,9 @@ OP_COLORS = {
 }
 
 
-def plot_latency_percentiles(df: pd.DataFrame, output_path: str = None):
+def plot_latency_percentiles(
+    df: pd.DataFrame, output_path: str = None, log_scale: bool = True
+):
     """Create a line plot of p50/p99 latency vs num_branches for each operation type."""
     plt.figure(figsize=(14, 9))
 
@@ -147,7 +149,8 @@ def plot_latency_percentiles(df: pd.DataFrame, output_path: str = None):
     )
     plt.grid(True, alpha=0.3)
     plt.xscale("log", base=2)
-    plt.yscale("log")  # Log scale for latency
+    if log_scale:
+        plt.yscale("log")  # Log scale for latency
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
 
@@ -173,6 +176,12 @@ def main():
         type=str,
         default=None,
         help="Output file path for the figure.",
+    )
+    parser.add_argument(
+        "--log-scale",
+        action="store_true",
+        default=False,
+        help="Use log scale for y-axis (latency).",
     )
 
     args = parser.parse_args()
@@ -203,7 +212,7 @@ def main():
     try:
         df = load_and_compute_percentiles(parquet_files)
         print(f"Aggregated data:\n{df}")
-        plot_latency_percentiles(df, args.output)
+        plot_latency_percentiles(df, args.output, log_scale=args.log_scale)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

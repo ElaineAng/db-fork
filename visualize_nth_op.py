@@ -98,7 +98,9 @@ OP_TYPE_NAMES = {
 }
 
 
-def plot_latency_by_branches(df: pd.DataFrame, output_path: str = None):
+def plot_latency_by_branches(
+    df: pd.DataFrame, output_path: str = None, log_scale: bool = True
+):
     """Create a line plot of latency vs num_branches for each operation type."""
     plt.figure(figsize=(12, 8))
 
@@ -126,7 +128,8 @@ def plot_latency_by_branches(df: pd.DataFrame, output_path: str = None):
     plt.xscale(
         "log", base=2
     )  # Log scale for branch counts (typically powers of 2)
-    plt.yscale("log")  # Log scale for latency
+    if log_scale:
+        plt.yscale("log")  # Log scale for latency
 
     # Add minor gridlines
     plt.grid(True, which="minor", alpha=0.1)
@@ -155,6 +158,12 @@ def main():
         type=str,
         default=None,
         help="Output file path for the figure (e.g., output.png). If not specified, displays interactively.",
+    )
+    parser.add_argument(
+        "--log-scale",
+        action="store_true",
+        default=False,
+        help="Use log scale for y-axis (latency).",
     )
 
     args = parser.parse_args()
@@ -185,7 +194,7 @@ def main():
     try:
         df = load_and_aggregate(parquet_files)
         print(f"Aggregated data:\n{df}")
-        plot_latency_by_branches(df, args.output)
+        plot_latency_by_branches(df, args.output, log_scale=args.log_scale)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
