@@ -51,7 +51,6 @@ class NeonToolSuite(DBToolSuite):
         autocommit: bool,
     ):
         uri = cls._get_neon_connection_uri(project_id, branch_id, database_name)
-        print(f"Initial connection to Neon with URI: {uri}")
         conn = psycopg2.connect(uri)
         if autocommit:
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)

@@ -39,13 +39,14 @@ SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
 SQL_PREFIX=${SQL_BASENAME:0:4}
 
 # Configuration parameters
-NUM_THREADS_LIST=(1 4 8 16 32 64 128 256 512 1024)
+# NUM_THREADS_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
+NUM_THREADS_LIST=(1024)
 OPERATIONS=(BRANCH READ RANGE_UPDATE)
 
 # Other fixed config values
 TABLE_NAME="orders"
 DB_NAME="microbench"
-INSERTS_PER_BRANCH=1000
+INSERTS_PER_BRANCH=50
 NUM_OPS=1  # Single operation per thread
 
 # Create temporary config file
@@ -56,8 +57,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Generate a random seed for reproducibility across all runs
-RANDOM_SEED=$RANDOM$RANDOM
+# Generate a random seed for reproducibility across all runs (limited to 2^31-1)
+RANDOM_SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 
 echo "==================================================="
 echo "Multi-Threaded Benchmark Automation Script"

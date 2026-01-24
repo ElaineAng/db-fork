@@ -35,7 +35,7 @@ if [ ! -f "$SQL_DUMP_PATH" ]; then
 fi
 
 # Configuration parameters
-NUM_BRANCHES_LIST=(4 8 16 32 128 256 512 1024)
+NUM_BRANCHES_LIST=(1 2 4 8 16 32 128 256 512 1024)
 OPERATIONS=(CONNECT READ RANGE_UPDATE)
 
 # Other fixed config values
@@ -56,8 +56,8 @@ trap cleanup EXIT
 SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
 SQL_PREFIX=${SQL_BASENAME:0:4}
 
-# Generate a random seed for reproducibility across all runs
-RANDOM_SEED=$RANDOM$RANDOM
+# Generate a random seed for reproducibility across all runs (limited to 2^31-1)
+RANDOM_SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 
 echo "==================================================="
 echo "Multi-Op Benchmark Automation Script"

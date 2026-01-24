@@ -426,6 +426,7 @@ class BenchmarkSuite:
         result_collector: Optional[rc.ResultCollector] = None,
         branch_manager: Optional[SharedBranchManager] = None,
         shared_progress: Optional[SharedProgress] = None,
+        assigned_branches: Optional[list] = None,
     ):
         self._db_name = config.database_setup.db_name
         self._config = config
@@ -435,6 +436,9 @@ class BenchmarkSuite:
         self._shared_result_collector = result_collector
         self._shared_branch_manager = branch_manager
         self._shared_progress = shared_progress
+        self._assigned_branches = (
+            assigned_branches or []
+        )  # Per-thread exclusive branches
         self._require_db_setup = (
             config.database_setup.WhichOneof("source") == "sql_dump"
         )
@@ -517,6 +521,16 @@ class BenchmarkSuite:
 
             self._add_branch(self._root_branch_name)
             self.db_tools = db_tools
+
+            # If this thread has assigned branches (FAN_OUT mode), connect to the first one
+            if self._assigned_branches:
+                initial_branch = self._assigned_branches[0]
+                if self._thread_id == 0:
+                    print(
+                        f"Thread {self._thread_id} connecting to assigned branch: {initial_branch}"
+                    )
+                self.db_tools.connect_branch(initial_branch, timed=False)
+
             return self
 
         except Exception as e:
@@ -534,8 +548,6 @@ class BenchmarkSuite:
             raise e
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._thread_id == 0:
-            print("Exiting BenchmarkSuite context (thread 0)...")
         # We do parquet writing in the main thread.
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
@@ -1254,7 +1266,33 @@ if __name__ == "__main__":
             total=total_ops, desc=f"Benchmark ({num_threads} threads)"
         )
 
-        def worker_benchmark(thread_id: int, backend_info: BackendInfo) -> None:
+        # Partition setup branches among threads for FAN_OUT shape
+        # Each thread gets exclusive branches to work with
+        is_fan_out = (
+            benchmark_mode == "nth_op_benchmark"
+            and config.nth_op_benchmark.setup.branch_shape
+            == tp.BranchShape.FAN_OUT
+        )
+        thread_branch_assignments = {}
+        if is_fan_out and setup_branches and num_threads > 1:
+            # Distribute branches evenly among threads
+            branches_per_thread = len(setup_branches) // num_threads
+            for tid in range(num_threads):
+                start_idx = tid * branches_per_thread
+                end_idx = start_idx + branches_per_thread
+                # Last thread gets any remainder
+                if tid == num_threads - 1:
+                    end_idx = len(setup_branches)
+                thread_branch_assignments[tid] = setup_branches[
+                    start_idx:end_idx
+                ]
+            print(
+                f"FAN_OUT mode: {branches_per_thread}+ branches assigned per thread"
+            )
+
+        def worker_benchmark(
+            thread_id: int, backend_info: BackendInfo, assigned_branches: list
+        ) -> None:
             """Worker function that runs benchmark in its own thread with its own connection."""
             # Set thread-local thread ID for result collection
             rc.set_current_thread_id(thread_id)
@@ -1271,6 +1309,7 @@ if __name__ == "__main__":
                 result_collector=shared_result_collector,
                 branch_manager=shared_branch_manager,
                 shared_progress=shared_progress,
+                assigned_branches=assigned_branches,
             )
 
             with worker_bench:
@@ -1281,7 +1320,10 @@ if __name__ == "__main__":
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = [
                     executor.submit(
-                        worker_benchmark, thread_id=i, backend_info=backend_info
+                        worker_benchmark,
+                        thread_id=i,
+                        backend_info=backend_info,
+                        assigned_branches=thread_branch_assignments.get(i, []),
                     )
                     for i in range(num_threads)
                 ]
