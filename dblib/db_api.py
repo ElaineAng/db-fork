@@ -46,6 +46,25 @@ class DBToolSuite(ABC):
     def get_current_connection(self) -> _pgconn:
         return self.conn
 
+    def get_total_storage_bytes(self) -> int:
+        """Get the total storage used by the current database/branch.
+
+        Override in subclasses to provide backend-specific storage measurement
+        (e.g., sum across all branches for backends where branches are separate DBs).
+
+        Returns:
+            Total storage in bytes, or 0 if not supported.
+        """
+        # Default implementation: use pg_database_size for current database
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT pg_database_size(current_database());")
+                result = cur.fetchone()
+                return int(result[0]) if result else 0
+        except Exception as e:
+            print(f"Warning: Could not get database size: {e}")
+            return 0
+
     ######################################################################
     # Protected methods
     ######################################################################
@@ -170,6 +189,11 @@ class DBToolSuite(ABC):
             parent_id: ID of the parent branch to branch from.
             timed: Whether to time and record this operation (default True).
         """
+        # TODO: Separate storage calculation from `timed` parameter
+        if timed:
+            size_before = self.get_total_storage_bytes()
+            self.result_collector.record_disk_size_before(size_before)
+
         try:
             with self.result_collector.maybe_time_ops(
                 op_type=rslt.OpType.BRANCH_CREATE, timed=timed
@@ -177,7 +201,10 @@ class DBToolSuite(ABC):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
+
         if timed:
+            size_after = self.get_total_storage_bytes()
+            self.result_collector.record_disk_size_after(size_after)
             self.result_collector.record_num_keys_touched(0)
             self.result_collector.flush_record()
 

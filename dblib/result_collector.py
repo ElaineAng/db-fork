@@ -115,6 +115,8 @@ class ResultCollector:
             self._thread_local.current_latency = 0.0
             self._thread_local.num_keys_touched = 0
             self._thread_local.sql_query = ""
+            self._thread_local.disk_size_before = 0
+            self._thread_local.disk_size_after = 0
         return self._thread_local
 
     def _reset_metrics(self):
@@ -124,6 +126,8 @@ class ResultCollector:
         state.current_latency = 0.0
         state.num_keys_touched = 0
         state.sql_query = ""
+        state.disk_size_before = 0
+        state.disk_size_after = 0
 
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
@@ -183,6 +187,16 @@ class ResultCollector:
         state = self._get_thread_state()
         state.sql_query = sql_query
 
+    def record_disk_size_before(self, size_bytes: int) -> None:
+        """Record disk size before an operation (thread-local)."""
+        state = self._get_thread_state()
+        state.disk_size_before = size_bytes
+
+    def record_disk_size_after(self, size_bytes: int) -> None:
+        """Record disk size after an operation (thread-local)."""
+        state = self._get_thread_state()
+        state.disk_size_after = size_bytes
+
     def flush_record(self):
         """
         Create a Result proto with all current context and metrics, save it, and reset.
@@ -206,6 +220,8 @@ class ResultCollector:
         result.latency = state.current_latency
         result.sql_query = state.sql_query
         result.thread_id = get_current_thread_id()
+        result.disk_size_before = state.disk_size_before
+        result.disk_size_after = state.disk_size_after
 
         # Append to results (thread-safe)
         with self._lock:
