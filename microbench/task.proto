@@ -8,6 +8,7 @@ enum Backend {
     DOLT = 1;
     KPG = 2;
     XATA = 3;
+    FILE_COPY = 4;
 }
 
 // Type of benchmark operation to perform

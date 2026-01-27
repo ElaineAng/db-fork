@@ -11,7 +11,7 @@ PGSQL_HOST = "localhost"
 PGSQL_PORT = 5432
 
 
-class PgsqlToolSuite(DBToolSuite):
+class FileCopyToolSuite(DBToolSuite):
     """
     A suite of tools for interacting with a PGSQL database on a shared connection.
     """
@@ -35,7 +35,7 @@ class PgsqlToolSuite(DBToolSuite):
         db_name: str,
         autocommit: bool,
     ):
-        uri = PgsqlToolSuite.get_branch_uri(db_name)
+        uri = FileCopyToolSuite.get_branch_uri(db_name)
 
         conn = psycopg2.connect(uri)
         if autocommit:
@@ -66,7 +66,7 @@ class PgsqlToolSuite(DBToolSuite):
 
         # Create a uri for "postgres" database to have somewhere to switch 
         # during cleanup to delete all created databases
-        self._all_branches["postgres"] = PgsqlToolSuite.get_default_connection_uri()
+        self._all_branches["postgres"] = FileCopyToolSuite.get_default_connection_uri()
 
     def get_uri_for_db_setup(self) -> str:
         """Returns the connection URI for database setup operations (e.g., PGSQL)."""
@@ -103,14 +103,14 @@ class PgsqlToolSuite(DBToolSuite):
         cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
         super().execute_sql(cmd)
         self.current_branch_name = branch_name
-        self._all_branches[branch_name] = PgsqlToolSuite.get_branch_uri(branch_name)
+        self._all_branches[branch_name] = FileCopyToolSuite.get_branch_uri(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         if branch_name not in self._all_branches:
             raise ValueError(f"Branch '{branch_name}' does not exist.")
         uri = self._all_branches[branch_name]
         if not uri:
-            uri = PgsqlToolSuite.get_branch_uri(branch_name)
+            uri = FileCopyToolSuite.get_branch_uri(branch_name)
             # Cache the URI
             self._all_branches[branch_name] = uri
 
