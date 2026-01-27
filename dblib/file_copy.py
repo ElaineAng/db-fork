@@ -41,6 +41,7 @@ class FileCopyToolSuite(DBToolSuite):
         collector: rc.ResultCollector,
         db_name: str,
         autocommit: bool,
+        default_branch_name: str,
     ):
         uri = FileCopyToolSuite.get_branch_uri(db_name)
 
@@ -52,6 +53,7 @@ class FileCopyToolSuite(DBToolSuite):
             collector=collector,
             connection_uri=uri,
             autocommit=autocommit,
+            default_branch_name=default_branch_name,
         )
 
     def __init__(
@@ -60,16 +62,17 @@ class FileCopyToolSuite(DBToolSuite):
         collector: rc.ResultCollector,
         connection_uri: str,
         autocommit: bool,
+        default_branch_name: str,
     ):
         super().__init__(connection, result_collector=collector)
         self._connection_uri = connection_uri
         self.autocommit = autocommit
 
-        cmd = "SELECT CURRENT_DATABASE();"
-        res = super().execute_sql(cmd)
-        self.current_branch_name = res[0][0]
-        self.main_branch_name = self.current_branch_name
-        self._all_branches = {self.current_branch_name: connection_uri}
+        self.current_branch_name = default_branch_name
+        self.main_branch_name = default_branch_name
+        self._all_branches = {}
+        self._create_branch_impl(default_branch_name, None)
+        self._connect_branch_impl(default_branch_name)
 
         # Create a uri for "postgres" database to have somewhere to switch 
         # during cleanup to delete all created databases
@@ -80,11 +83,12 @@ class FileCopyToolSuite(DBToolSuite):
         return self._connection_uri
 
     def delete_db(self, db_name: str) -> None:
+        pass 
+    
         """
         Deletes all or a single database depending on db_name.
         If db_name == main branch, delete all branch databases.
         Else delete the database associated with db_name.
-        """
         try:
             # This function gets called with config.db_name in the __exit__
             # cleanup function, so delete all branches in that case
@@ -102,21 +106,25 @@ class FileCopyToolSuite(DBToolSuite):
                 super().execute_sql(cmd)
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
+        """
         
 
     # Use parent_name instead of parent_id since there's no inherent id 
     # so it is simpler to just use names
     def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
-        cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
+        if parent_name:
+            cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
+        else:
+            cmd = f"CREATE DATABASE {branch_name}"
         super().execute_sql(cmd)
         self.current_branch_name = branch_name
         self._all_branches[branch_name] = FileCopyToolSuite.get_branch_uri(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
-        if branch_name not in self._all_branches:
-            raise ValueError(f"Branch '{branch_name}' does not exist.")
-        uri = self._all_branches[branch_name]
-        if not uri:
+        # TODO threading issue? kpg doesn't check at all
+        if branch_name in self._all_branches:
+            uri = self._all_branches[branch_name]
+        else:
             uri = FileCopyToolSuite.get_branch_uri(branch_name)
             # Cache the URI
             self._all_branches[branch_name] = uri

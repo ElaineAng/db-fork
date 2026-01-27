@@ -107,7 +107,6 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         print(f"Default KPG connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.FILE_COPY:
-        print("HERE")
         info.default_uri = FileCopyToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default FILE_COPY connection URI: {info.default_uri}")
@@ -507,7 +506,10 @@ class BenchmarkSuite:
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
-                    result_collector, self._db_name, self._config.autocommit
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
+                    self._backend_info.default_branch_name,
                 )
             elif self._config.backend == tp.Backend.NEON:
                 print(
