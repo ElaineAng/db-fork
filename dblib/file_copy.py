@@ -75,24 +75,11 @@ class FileCopyToolSuite(DBToolSuite):
 
         self.old_file_copy_method = self.change_file_copy_method("clone")
 
-        '''
-        self.current_branch_name = default_branch_name
-        self.main_branch_name = default_branch_name
-        self._all_branches = {}
-        self._create_branch_impl(default_branch_name, None)
-        self._connect_branch_impl(default_branch_name)
-        '''
-
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
         self.current_branch_name = res[0][0]
-        self.main_branch_name = self.current_branch_name
         self.shared_branches.append(self.current_branch_name)
         self._all_branches = {self.current_branch_name: connection_uri}
-
-        # Create a uri for "postgres" database to have somewhere to switch 
-        # during cleanup to delete all created databases
-        self._all_branches["postgres"] = FileCopyToolSuite.get_default_connection_uri()
 
     def change_file_copy_method(self, method: str) -> str:
         """Changes file_copy_method and returns old method"""
@@ -112,6 +99,7 @@ class FileCopyToolSuite(DBToolSuite):
         # TODO change file_copy_method back to copy?
         conn = None
         cur = None
+        main_branch = shared_branches[0] if len(shared_branches) > 0 else None
         try:
             uri = FileCopyToolSuite.get_default_connection_uri()
             conn = psycopg2.connect(uri)
@@ -119,8 +107,8 @@ class FileCopyToolSuite(DBToolSuite):
             cur = conn.cursor()
             for branch in shared_branches:
                 cur.execute(f"DROP DATABASE IF EXISTS {branch};")
-                # TODO remove after testing
-                print(f"Database '{branch}' deleted successfully.")
+            if main_branch:
+                print(f"Database '{main_branch}' deleted successfully.")
         except Exception as e:
             print(f"Error deleting database: {e}")
         finally:
@@ -164,7 +152,6 @@ class FileCopyToolSuite(DBToolSuite):
         self.shared_branches.append(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
-        # TODO threading issue? kpg doesn't check at all
         if branch_name in self._all_branches:
             uri = self._all_branches[branch_name]
         else:
