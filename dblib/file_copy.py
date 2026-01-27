@@ -68,11 +68,20 @@ class FileCopyToolSuite(DBToolSuite):
         self._connection_uri = connection_uri
         self.autocommit = autocommit
 
+        '''
         self.current_branch_name = default_branch_name
         self.main_branch_name = default_branch_name
         self._all_branches = {}
         self._create_branch_impl(default_branch_name, None)
         self._connect_branch_impl(default_branch_name)
+        '''
+
+        cmd = "SELECT CURRENT_DATABASE();"
+        res = super().execute_sql(cmd)
+        self.current_branch_name = res[0][0]
+        #print(self.current_branch_name)
+        self.main_branch_name = self.current_branch_name
+        self._all_branches = {self.current_branch_name: connection_uri}
 
         # Create a uri for "postgres" database to have somewhere to switch 
         # during cleanup to delete all created databases
