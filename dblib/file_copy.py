@@ -4,6 +4,7 @@ from psycopg2.extensions import connection as _pgconn
 from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
+from collections import deque #TODO needed??
 
 PGSQL_USER = "postgres"
 PGSQL_PASSWORD = "password" #TODO env variable?
@@ -42,6 +43,7 @@ class FileCopyToolSuite(DBToolSuite):
         db_name: str,
         autocommit: bool,
         default_branch_name: str,
+        shared_branches: deque,
     ):
         uri = FileCopyToolSuite.get_branch_uri(db_name)
 
@@ -54,6 +56,7 @@ class FileCopyToolSuite(DBToolSuite):
             connection_uri=uri,
             autocommit=autocommit,
             default_branch_name=default_branch_name,
+            shared_branches=shared_branches,
         )
 
     def __init__(
@@ -63,10 +66,12 @@ class FileCopyToolSuite(DBToolSuite):
         connection_uri: str,
         autocommit: bool,
         default_branch_name: str,
+        shared_branches: deque,
     ):
         super().__init__(connection, result_collector=collector)
         self._connection_uri = connection_uri
         self.autocommit = autocommit
+        self.shared_branches = shared_branches
 
         self.old_file_copy_method = self.change_file_copy_method("clone")
 
@@ -81,8 +86,8 @@ class FileCopyToolSuite(DBToolSuite):
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
         self.current_branch_name = res[0][0]
-        print(self.current_branch_name)
         self.main_branch_name = self.current_branch_name
+        self.shared_branches.append(self.current_branch_name)
         self._all_branches = {self.current_branch_name: connection_uri}
 
         # Create a uri for "postgres" database to have somewhere to switch 
@@ -102,32 +107,48 @@ class FileCopyToolSuite(DBToolSuite):
         """Returns the connection URI for database setup operations (e.g., PGSQL)."""
         return self._connection_uri
 
-    def delete_db(self, db_name: str) -> None:
-        """
-        Deletes all or a single database depending on db_name.
-        If db_name == main branch, delete all branch databases.
-        Else delete the database associated with db_name.
-        """
+    @classmethod
+    def cleanup(cls, shared_branches: deque):
+        # TODO change file_copy_method back to copy?
+        conn = None
+        cur = None
         try:
-            # This function gets called with config.db_name in the __exit__
-            # cleanup function, so delete all branches in that case
-            if db_name == self.main_branch_name:
-                self._connect_branch_impl("postgres")
-                for branch, _ in self._all_branches.items():
-                    if branch == "postgres":
-                        continue
-                    cmd = f"DROP DATABASE {branch};"
-                    super().execute_sql(cmd)
-            # Other wise just delete the specfic branch this function was 
-            # called on
-            else:
-                cmd = f"DROP DATABASE {db_name}"
-                super().execute_sql(cmd)
+            uri = FileCopyToolSuite.get_default_connection_uri()
+            conn = psycopg2.connect(uri)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            cur = conn.cursor()
+            for branch in shared_branches:
+                cur.execute(f"DROP DATABASE IF EXISTS {branch};")
+                # TODO remove after testing
+                print(f"Database '{branch}' deleted successfully.")
+        except Exception as e:
+            print(f"Error deleting database: {e}")
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
+
+    def delete_db(self, db_name: str) -> None:
+        # Close current connection first
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+        # Connect to the default postgres database
+        default_uri = self.__class__.get_default_connection_uri()
+        conn = psycopg2.connect(default_uri)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
 
             # Change system file copy method back to what it was before run
-            self.change_file_copy_method(self.old_file_copy_method)
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
+        finally:
+            conn.close()
         
 
     # Use parent_name instead of parent_id since there's no inherent id 
@@ -140,6 +161,7 @@ class FileCopyToolSuite(DBToolSuite):
         super().execute_sql(cmd)
         self.current_branch_name = branch_name
         self._all_branches[branch_name] = FileCopyToolSuite.get_branch_uri(branch_name)
+        self.shared_branches.append(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         # TODO threading issue? kpg doesn't check at all

@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Self, Tuple, Optional
+from collections import deque # thread safe
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -75,6 +76,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    file_copy_branches: Optional[deque] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -107,6 +109,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         print(f"Default KPG connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.FILE_COPY:
+        info.file_copy_branches = deque()
         info.default_uri = FileCopyToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default FILE_COPY connection URI: {info.default_uri}")
@@ -271,7 +274,9 @@ def cleanup_backend(
     db_name = db_name or config.database_setup.db_name
 
     # Delete the database using a direct connection through default_uri.
-    if backend_info.default_uri and db_name:
+    if backend_info.file_copy_branches:
+        FileCopyToolSuite.cleanup(backend_info.file_copy_branches)
+    elif backend_info.default_uri and db_name:
         conn = None
         cur = None
         try:
@@ -510,6 +515,7 @@ class BenchmarkSuite:
                     self._db_name,
                     self._config.autocommit,
                     self._backend_info.default_branch_name,
+                    self._backend_info.file_copy_branches,
                 )
             elif self._config.backend == tp.Backend.NEON:
                 print(
