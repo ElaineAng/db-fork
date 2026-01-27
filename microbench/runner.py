@@ -396,8 +396,12 @@ class SharedBranchManager:
 class SharedProgress:
     """Thread-safe shared progress bar across multiple threads."""
 
-    def __init__(self, total: int, desc: str = "Progress"):
-        self._pbar = tqdm(total=total, desc=desc, position=0, leave=True)
+    def __init__(
+        self, total: int, desc: str = "Progress", disable: bool = False
+    ):
+        self._pbar = tqdm(
+            total=total, desc=desc, position=0, leave=True, disable=disable
+        )
         self._lock = threading.Lock()
         self._count = 0
 
@@ -1185,6 +1189,11 @@ if __name__ == "__main__":
         default=None,
         help="Random seed for reproducible benchmark operations. If not specified, uses current timestamp.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bar (useful for running in background/tmux).",
+    )
 
     args = parser.parse_args()
 
@@ -1263,7 +1272,9 @@ if __name__ == "__main__":
 
         # Create shared progress bar for all threads
         shared_progress = SharedProgress(
-            total=total_ops, desc=f"Benchmark ({num_threads} threads)"
+            total=total_ops,
+            desc=f"Benchmark ({num_threads} threads)",
+            disable=args.no_progress,
         )
 
         # Partition setup branches among threads for FAN_OUT shape
