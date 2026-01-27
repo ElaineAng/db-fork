@@ -79,7 +79,7 @@ class FileCopyToolSuite(DBToolSuite):
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
         self.current_branch_name = res[0][0]
-        #print(self.current_branch_name)
+        print(self.current_branch_name)
         self.main_branch_name = self.current_branch_name
         self._all_branches = {self.current_branch_name: connection_uri}
 
