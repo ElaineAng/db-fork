@@ -68,6 +68,8 @@ class FileCopyToolSuite(DBToolSuite):
         self._connection_uri = connection_uri
         self.autocommit = autocommit
 
+        self.old_file_copy_method = self.change_file_copy_method("clone")
+
         '''
         self.current_branch_name = default_branch_name
         self.main_branch_name = default_branch_name
@@ -87,17 +89,25 @@ class FileCopyToolSuite(DBToolSuite):
         # during cleanup to delete all created databases
         self._all_branches["postgres"] = FileCopyToolSuite.get_default_connection_uri()
 
+    def change_file_copy_method(self, method: str) -> str:
+        """Changes file_copy_method and returns old method"""
+        res = super().execute_sql("SHOW file_copy_method;")
+        prev_mode = res[0][0]
+        super().execute_sql(f"ALTER SYSTEM SET file_copy_method = '{method}';")
+        super().execute_sql("SELECT pg_reload_conf();")
+        return prev_mode
+
+
     def get_uri_for_db_setup(self) -> str:
         """Returns the connection URI for database setup operations (e.g., PGSQL)."""
         return self._connection_uri
 
     def delete_db(self, db_name: str) -> None:
-        pass 
-    
         """
         Deletes all or a single database depending on db_name.
         If db_name == main branch, delete all branch databases.
         Else delete the database associated with db_name.
+        """
         try:
             # This function gets called with config.db_name in the __exit__
             # cleanup function, so delete all branches in that case
@@ -113,9 +123,11 @@ class FileCopyToolSuite(DBToolSuite):
             else:
                 cmd = f"DROP DATABASE {db_name}"
                 super().execute_sql(cmd)
+
+            # Change system file copy method back to what it was before run
+            self.change_file_copy_method(self.old_file_copy_method)
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
-        """
         
 
     # Use parent_name instead of parent_id since there's no inherent id 
