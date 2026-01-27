@@ -22,10 +22,17 @@ class FileCopyToolSuite(DBToolSuite):
             PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres"
         )
 
+    # TODO superfluous now with get_initial_connection_uri ??
     @classmethod
     def get_branch_uri(cls, branch_name) -> str:
         return dbutil.format_db_uri(
             PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, branch_name
+        )
+
+    @classmethod
+    def get_initial_connection_uri(cls, db_name: str) -> str:
+        return dbutil.format_db_uri(
+            PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, db_name
         )
 
     @classmethod
