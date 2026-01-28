@@ -4,10 +4,10 @@ from psycopg2.extensions import connection as _pgconn
 from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
-from collections import deque #TODO needed??
+from collections import deque
 
 PGSQL_USER = "postgres"
-PGSQL_PASSWORD = "password" #TODO env variable?
+PGSQL_PASSWORD = "password"
 PGSQL_HOST = "localhost"
 PGSQL_PORT = 5432
 
@@ -23,7 +23,6 @@ class FileCopyToolSuite(DBToolSuite):
             PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres"
         )
 
-    # TODO superfluous now with get_initial_connection_uri ??
     @classmethod
     def get_branch_uri(cls, branch_name) -> str:
         return dbutil.format_db_uri(
@@ -73,10 +72,13 @@ class FileCopyToolSuite(DBToolSuite):
         self.autocommit = autocommit
         self.shared_branches = shared_branches
 
-        self.old_file_copy_method = self.change_file_copy_method("clone")
+        # TODO do we need to change back to old method?
+        #self.old_file_copy_method = self.change_file_copy_method("clone")
+        self.change_file_copy_method("clone")
 
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
+
         self.current_branch_name = res[0][0]
         self.shared_branches.append(self.current_branch_name)
         self._all_branches = {self.current_branch_name: connection_uri}
@@ -131,16 +133,11 @@ class FileCopyToolSuite(DBToolSuite):
         try:
             with conn.cursor() as cur:
                 cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
-
-            # Change system file copy method back to what it was before run
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
         finally:
             conn.close()
         
-
-    # Use parent_name instead of parent_id since there's no inherent id 
-    # so it is simpler to just use names
     def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
         if parent_name:
             cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
@@ -166,5 +163,7 @@ class FileCopyToolSuite(DBToolSuite):
         self.current_branch_name = branch_name
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
-        return (self.current_branch_name, self.current_branch_name) # branch_id not implemented
+        # branch_name substituted for branch_id, allows _create_branch_impl to 
+        # work correctly with the way the API is called in runner.py
+        return (self.current_branch_name, self.current_branch_name)
 
