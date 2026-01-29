@@ -215,7 +215,8 @@ class FileCopyToolSuite(DBToolSuite):
     def get_shared_lock(self, branch_id: str) -> bool:
         try:
             shared = f"SELECT pg_try_advisory_lock_shared({branch_id});"
-            return super().execute_sql(shared)[0]
+            res = super().execute_sql(shared)
+            return res[0][0]
         except Exception as e:
             print(f"Error obtaining shared lock: {e}")
         self.lock = (LockType.SHARED, branch_id)
@@ -238,7 +239,8 @@ class FileCopyToolSuite(DBToolSuite):
                 pass # Unreachable
         try:
             exclusive = f"SELECT pg_try_advisory_lock({branch_id});"
-            return super().execute_sql(exclusive)[0]
+            res = super().execute_sql(exclusive)
+            return res[0][0]
         except Exception as e:
             print(f"Error obtaining exclusive lock: {e}")
 
