@@ -170,12 +170,10 @@ class FileCopyToolSuite(DBToolSuite):
         parent_name = None
         if parent_id in self._ids_to_names:
             parent_name = self._ids_to_names[parent_id]
-            # Get exclusive lock
             self.get_exclusive_lock(parent_id)
         if parent_name:
             cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
             super().execute_sql(cmd)
-            # Drop exclusive lock
             self.drop_exclusive_lock(parent_id)
         else:
             cmd = f"CREATE DATABASE {branch_name}"
@@ -196,7 +194,6 @@ class FileCopyToolSuite(DBToolSuite):
             # Cache the URI
             self._all_branches[branch_name] = (hash(branch_name), uri)
 
-        # Drop lock
         self.drop_shared_lock(self.current_branch_id)
         self.conn.close()
 
@@ -204,14 +201,11 @@ class FileCopyToolSuite(DBToolSuite):
         self.current_branch_id   = hash(branch_name)
 
         self.conn = psycopg2.connect(uri)
-        # Get lock
         self.get_shared_lock(self.current_branch_id)
         if self.autocommit:
             self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
-        # branch_name substituted for branch_id, allows _create_branch_impl to 
-        # work correctly with the way the API is called in runner.py
         return (self.current_branch_name, self.current_branch_id)
 
     def get_shared_lock(self, branch_id: str):
@@ -237,8 +231,7 @@ class FileCopyToolSuite(DBToolSuite):
             elif self.lock[1] == branch_id:
                 return
             else:
-                pass 
-                # TODO what to do if already hold other exclusive lock?
+                pass # Unreachable
         try:
             exclusive = f"SELECT pg_try_advisory_lock({branch_id});"
             super().execute_sql(exclusive)
