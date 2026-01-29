@@ -161,6 +161,8 @@ class FileCopyToolSuite(DBToolSuite):
                 cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
                 if locked:
                     self.drop_exclusive_lock(self._all_branches[db_name][1])
+                else:
+                    print("Delete: Failed to get lock")
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
         finally:
