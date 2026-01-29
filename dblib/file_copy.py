@@ -5,12 +5,16 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 from collections import deque
+from enum import Enum
 
 PGSQL_USER = "postgres"
 PGSQL_PASSWORD = "password"
 PGSQL_HOST = "localhost"
 PGSQL_PORT = 5432
 
+class LockType(Enum):
+    SHARED = 1
+    EXCLUSIVE = 2
 
 class FileCopyToolSuite(DBToolSuite):
     """
@@ -76,6 +80,7 @@ class FileCopyToolSuite(DBToolSuite):
         #self.old_file_copy_method = self.change_file_copy_method("clone")
         self.change_file_copy_method("clone")
 
+        # Initial connection to default database
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
 
@@ -87,6 +92,18 @@ class FileCopyToolSuite(DBToolSuite):
                 (self.current_branch_id, connection_uri)
                  }
         self._ids_to_names = {self.current_branch_id: self.current_branch_name}
+
+        # Get lock
+        self.lock = None
+        self.get_shared_lock(self.current_branch_id)
+
+        # Switch to main
+        # TODO need a faster solution
+        if default_branch_name in self.shared_branches:
+            self._connect_branch_impl(default_branch_name)
+        else:
+            self._create_branch_impl(default_branch_name, self.current_branch_id)
+            self._connect_branch_impl(default_branch_name)
 
     def change_file_copy_method(self, method: str) -> str:
         """Changes file_copy_method and returns old method"""
@@ -137,7 +154,13 @@ class FileCopyToolSuite(DBToolSuite):
 
         try:
             with conn.cursor() as cur:
+                locked = False
+                if db_name in self._all_branches:
+                    self.get_exclusive_lock(self._all_branches[db_name][1])
+                    locked = True
                 cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
+                if locked:
+                    self.drop_exclusive_lock(self._all_branches[db_name][1])
         except Exception as e:
             raise Exception(f"Error deleting database: {e}")
         finally:
@@ -147,11 +170,16 @@ class FileCopyToolSuite(DBToolSuite):
         parent_name = None
         if parent_id in self._ids_to_names:
             parent_name = self._ids_to_names[parent_id]
+            # Get exclusive lock
+            self.get_exclusive_lock(parent_id)
         if parent_name:
             cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
+            super().execute_sql(cmd)
+            # Drop exclusive lock
+            self.drop_exclusive_lock(parent_id)
         else:
             cmd = f"CREATE DATABASE {branch_name}"
-        super().execute_sql(cmd)
+            super().execute_sql(cmd)
         branch_id = hash(branch_name)
         self._all_branches[branch_name] = (
                 branch_id, FileCopyToolSuite.get_branch_uri(branch_name)
@@ -160,6 +188,7 @@ class FileCopyToolSuite(DBToolSuite):
         self.shared_branches.append(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
+
         if branch_name in self._all_branches:
             uri = self._all_branches[branch_name][1]
         else:
@@ -167,14 +196,59 @@ class FileCopyToolSuite(DBToolSuite):
             # Cache the URI
             self._all_branches[branch_name] = (hash(branch_name), uri)
 
+        # Drop lock
+        self.drop_shared_lock(self.current_branch_id)
         self.conn.close()
-        self.conn = psycopg2.connect(uri)
-        if self.autocommit:
-            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+
         self.current_branch_name = branch_name
         self.current_branch_id   = hash(branch_name)
+
+        self.conn = psycopg2.connect(uri)
+        # Get lock
+        self.get_shared_lock(self.current_branch_id)
+        if self.autocommit:
+            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         # branch_name substituted for branch_id, allows _create_branch_impl to 
         # work correctly with the way the API is called in runner.py
         return (self.current_branch_name, self.current_branch_id)
+
+    def get_shared_lock(self, branch_id: str):
+        try:
+            shared = f"SELECT pg_try_advisory_lock_shared({branch_id});"
+            super().execute_sql(shared)
+        except Exception as e:
+            print(f"Error obtaining shared lock: {e}")
+        self.lock = (LockType.SHARED, branch_id)
+
+    def drop_shared_lock(self, branch_id: str):
+        try:
+            shared = f"SELECT pg_advisory_unlock_shared({branch_id});"
+            super().execute_sql(shared)
+        except Exception as e:
+            print(f"Error dropping shared lock: {e}")
+        self.lock = None
+
+    def get_exclusive_lock(self, branch_id: str):
+        if self.lock:
+            if self.lock[0] == LockType.SHARED:
+                self.drop_shared_lock(self.lock[1])
+            elif self.lock[1] == branch_id:
+                return
+            else:
+                pass 
+                # TODO what to do if already hold other exclusive lock?
+        try:
+            exclusive = f"SELECT pg_try_advisory_lock({branch_id});"
+            super().execute_sql(exclusive)
+        except Exception as e:
+            print(f"Error obtaining exclusive lock: {e}")
+
+    def drop_exclusive_lock(self, branch_id: str):
+        try:
+            exclusive = f"SELECT pg_advisory_unlock({branch_id});"
+            super().execute_sql(exclusive)
+        except Exception as e:
+            print(f"Error dropping exclusive lock: {e}")
+        self.lock = None
