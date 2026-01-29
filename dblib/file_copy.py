@@ -80,8 +80,13 @@ class FileCopyToolSuite(DBToolSuite):
         res = super().execute_sql(cmd)
 
         self.current_branch_name = res[0][0]
+        self.current_branch_id   = hash(self.current_branch_name)
         self.shared_branches.append(self.current_branch_name)
-        self._all_branches = {self.current_branch_name: connection_uri}
+        self._all_branches = {
+                self.current_branch_name:
+                (self.current_branch_id, connection_uri)
+                 }
+        self._ids_to_names = {self.current_branch_id: self.current_branch_name}
 
     def change_file_copy_method(self, method: str) -> str:
         """Changes file_copy_method and returns old method"""
@@ -138,32 +143,38 @@ class FileCopyToolSuite(DBToolSuite):
         finally:
             conn.close()
         
-    def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
+    def _create_branch_impl(self, branch_name: str, parent_id: str) -> None:
+        parent_name = None
+        if parent_id in self._ids_to_names:
+            parent_name = self._ids_to_names[parent_id]
         if parent_name:
             cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
         else:
             cmd = f"CREATE DATABASE {branch_name}"
         super().execute_sql(cmd)
-        self.current_branch_name = branch_name
-        self._all_branches[branch_name] = FileCopyToolSuite.get_branch_uri(branch_name)
+        branch_id = hash(branch_name)
+        self._all_branches[branch_name] = (
+                branch_id, FileCopyToolSuite.get_branch_uri(branch_name)
+                )
+        self._ids_to_names[branch_id] = branch_name
         self.shared_branches.append(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         if branch_name in self._all_branches:
-            uri = self._all_branches[branch_name]
+            uri = self._all_branches[branch_name][1]
         else:
             uri = FileCopyToolSuite.get_branch_uri(branch_name)
             # Cache the URI
-            self._all_branches[branch_name] = uri
+            self._all_branches[branch_name] = (hash(branch_name), uri)
 
         self.conn.close()
         self.conn = psycopg2.connect(uri)
         if self.autocommit:
             self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         self.current_branch_name = branch_name
+        self.current_branch_id   = hash(branch_name)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         # branch_name substituted for branch_id, allows _create_branch_impl to 
         # work correctly with the way the API is called in runner.py
-        return (self.current_branch_name, self.current_branch_name)
-
+        return (self.current_branch_name, self.current_branch_id)
