@@ -95,7 +95,8 @@ class FileCopyToolSuite(DBToolSuite):
 
         # Get lock
         self.lock = None
-        self.get_shared_lock(self.current_branch_id)
+        if not self.get_shared_lock(self.current_branch_id):
+            print("Init: Failed to get lock")
 
         # Switch to main
         # TODO need a faster solution
@@ -156,8 +157,7 @@ class FileCopyToolSuite(DBToolSuite):
             with conn.cursor() as cur:
                 locked = False
                 if db_name in self._all_branches:
-                    self.get_exclusive_lock(self._all_branches[db_name][1])
-                    locked = True
+                    locked = self.get_exclusive_lock(self._all_branches[db_name][1])
                 cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
                 if locked:
                     self.drop_exclusive_lock(self._all_branches[db_name][1])
@@ -170,7 +170,9 @@ class FileCopyToolSuite(DBToolSuite):
         parent_name = None
         if parent_id in self._ids_to_names:
             parent_name = self._ids_to_names[parent_id]
-            self.get_exclusive_lock(parent_id)
+            if not self.get_exclusive_lock(parent_id):
+                print("Create: Failed to get lock")
+                return
         if parent_name:
             cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
             super().execute_sql(cmd)
@@ -201,17 +203,19 @@ class FileCopyToolSuite(DBToolSuite):
         self.current_branch_id   = hash(branch_name)
 
         self.conn = psycopg2.connect(uri)
-        self.get_shared_lock(self.current_branch_id)
+        if not self.get_shared_lock(self.current_branch_id):
+            print("Connect: Failed to get lock")
+
         if self.autocommit:
             self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
 
-    def get_shared_lock(self, branch_id: str):
+    def get_shared_lock(self, branch_id: str) -> bool:
         try:
             shared = f"SELECT pg_try_advisory_lock_shared({branch_id});"
-            super().execute_sql(shared)
+            return super().execute_sql(shared)[0]
         except Exception as e:
             print(f"Error obtaining shared lock: {e}")
         self.lock = (LockType.SHARED, branch_id)
@@ -224,7 +228,7 @@ class FileCopyToolSuite(DBToolSuite):
             print(f"Error dropping shared lock: {e}")
         self.lock = None
 
-    def get_exclusive_lock(self, branch_id: str):
+    def get_exclusive_lock(self, branch_id: str) -> bool:
         if self.lock:
             if self.lock[0] == LockType.SHARED:
                 self.drop_shared_lock(self.lock[1])
@@ -234,7 +238,7 @@ class FileCopyToolSuite(DBToolSuite):
                 pass # Unreachable
         try:
             exclusive = f"SELECT pg_try_advisory_lock({branch_id});"
-            super().execute_sql(exclusive)
+            return super().execute_sql(exclusive)[0]
         except Exception as e:
             print(f"Error obtaining exclusive lock: {e}")
 
