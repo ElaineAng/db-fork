@@ -207,3 +207,28 @@ class NeonToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage used by the Neon project (all branches).
+
+        Returns:
+            Total storage in bytes across all branches, or 0 if unavailable.
+        """
+        try:
+            endpoint = f"projects/{self.project_id}"
+            response = self.__class__._request("GET", endpoint)
+            project = response.get("project", {})
+
+            # synthetic_storage_size is a CoW-aware billing metric (logical_size + WAL),
+            # not physical disk. We treat it as our storage cost metric to avoid
+            # double-counting shared data across branches.
+            # Reference: https://github.com/neondatabase/neon/blob/main/docs/synthetic-size.md
+            storage = project.get("synthetic_storage_size")
+            if storage is None:
+                print("Warning: synthetic_storage_size not available in Neon API")
+                return 0
+
+            return int(storage)
+        except Exception as e:
+            print(f"Warning: Could not get Neon project storage: {e}")
+            return 0

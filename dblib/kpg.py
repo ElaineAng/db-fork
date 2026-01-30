@@ -1,3 +1,5 @@
+import os
+
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
@@ -8,6 +10,7 @@ import dblib.util as dbutil
 KPG_USER = "elaineang"
 KPG_HOST = "localhost"
 KPG_PORT = 5433
+KPG_DATA_DIR = os.environ.get("KPG_DATA_DIR", "")
 
 
 class KpgToolSuite(DBToolSuite):
@@ -121,3 +124,14 @@ class KpgToolSuite(DBToolSuite):
             self._fork_id_to_name[self._current_fork_id],
             self._current_fork_id,
         )
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage by measuring the KPG server data directory.
+
+        KPG forking affects the entire server data directory, so we measure
+        the whole directory rather than a per-database subdirectory.
+        """
+        if not KPG_DATA_DIR:
+            print("Warning: KPG_DATA_DIR not configured, cannot measure storage")
+            return 0
+        return dbutil.get_directory_size_bytes(KPG_DATA_DIR)

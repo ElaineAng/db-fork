@@ -46,24 +46,18 @@ class DBToolSuite(ABC):
     def get_current_connection(self) -> _pgconn:
         return self.conn
 
+    @abstractmethod
     def get_total_storage_bytes(self) -> int:
         """Get the total storage used by the current database/branch.
 
-        Override in subclasses to provide backend-specific storage measurement
-        (e.g., sum across all branches for backends where branches are separate DBs).
+        Each subclass must implement its own storage measurement strategy:
+        - Directory-based (Dolt, KPG): use ``dbutil.get_directory_size_bytes()``
+        - API-based (Neon, Xata): query the provider's project API
 
         Returns:
-            Total storage in bytes, or 0 if not supported.
+            Total storage in bytes, or 0 if unavailable.
         """
-        # Default implementation: use pg_database_size for current database
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT pg_database_size(current_database());")
-                result = cur.fetchone()
-                return int(result[0]) if result else 0
-        except Exception as e:
-            print(f"Warning: Could not get database size: {e}")
-            return 0
+        pass
 
     ######################################################################
     # Protected methods

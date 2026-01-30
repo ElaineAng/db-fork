@@ -233,3 +233,29 @@ class XataToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
+
+    # Xata API storage field name is not well-documented; try known candidates.
+    _STORAGE_FIELD_CANDIDATES = ("storage_bytes", "data_storage", "synthetic_storage_size")
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage used by the Xata project.
+
+        Queries the Xata project API for storage information.
+
+        Returns:
+            Total storage in bytes, or 0 if unavailable.
+        """
+        try:
+            endpoint = f"projects/{self.project_id}"
+            response = self.__class__._request("GET", endpoint)
+
+            for key in self._STORAGE_FIELD_CANDIDATES:
+                value = response.get(key)
+                if value is not None:
+                    return int(value)
+
+            print("Warning: No recognized storage field in Xata API response")
+            return 0
+        except Exception as e:
+            print(f"Warning: Could not get Xata project storage: {e}")
+            return 0
