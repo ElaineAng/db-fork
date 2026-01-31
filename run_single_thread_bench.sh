@@ -1,9 +1,9 @@
 #!/bin/bash
 # run_single_thread_bench.sh - Single-threaded benchmark script for nth-op measurements
 #
-# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>]
+# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]
 # Example: ./run_single_thread_bench.sh DOLT db_setup/tpcc_schema.sql
-#          ./run_single_thread_bench.sh NEON db_setup/tpcc_schema.sql --seed 12345 --max-branches 128
+#          ./run_single_thread_bench.sh NEON db_setup/tpcc_schema.sql --seed 12345 --max-branches 128 --shape bushy
 
 set -e
 
@@ -12,6 +12,7 @@ BACKEND=""
 SQL_DUMP_PATH=""
 SEED=""
 MAX_BRANCHES=1024
+SHAPE="spine"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -21,6 +22,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-branches)
             MAX_BRANCHES="$2"
+            shift 2
+            ;;
+        --shape)
+            SHAPE="$2"
             shift 2
             ;;
         *)
@@ -39,11 +44,12 @@ done
 
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>]"
+    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]"
     echo "  backend: dolt, neon, kpg, xata"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
+    echo "  --shape: (optional) Branch tree shape: spine, bushy, or fan_out (default: spine)"
     exit 1
 fi
 
@@ -53,6 +59,13 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 # Validate backend
 if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata"
+    exit 1
+fi
+
+# Convert shape to uppercase for proto config and validate
+SHAPE_UPPER=$(echo "$SHAPE" | tr '[:lower:]' '[:upper:]')
+if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
+    echo "Error: Invalid shape '$SHAPE'. Must be one of: spine, bushy, fan_out"
     exit 1
 fi
 
@@ -116,6 +129,7 @@ echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
 echo "Operations: ${OPERATIONS[*]}"
 echo "Num Branches: ${NUM_BRANCHES_LIST[*]} (max: $MAX_BRANCHES)"
+echo "Branch Shape: $SHAPE_UPPER"
 echo "Random Seed: $SEED"
 echo "==================================================="
 
@@ -129,7 +143,8 @@ for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
     
     for OPERATION in "${OPERATIONS[@]}"; do
         NUM_OPS=$(get_num_ops "$OPERATION")
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_spine"
+        SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
+        RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_${SHAPE_LOWER}"
         
         echo ""
         echo "---------------------------------------------------"
@@ -166,7 +181,7 @@ nth_op_benchmark {
   num_ops: ${NUM_OPS}
   setup {
     num_branches: ${NUM_BRANCHES}
-    branch_shape: SPINE
+    branch_shape: ${SHAPE_UPPER}
     inserts_per_branch: ${INSERTS_PER_BRANCH}
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
