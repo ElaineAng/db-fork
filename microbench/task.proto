@@ -18,6 +18,7 @@ enum OperationType {
     INSERT = 3;
     UPDATE = 4;
     RANGE_UPDATE = 5;
+    RANGE_READ = 6;
 }
 
 // Configuration for reusing an existing database
@@ -54,6 +55,7 @@ message RangeUpdateConfig {
 enum BranchShape {
     SPINE = 0;    // Linear chain: main -> b1 -> b2 -> ... -> bN
     FAN_OUT = 1;  // All branches from root: main -> b1, main -> b2, ...
+    BUSHY = 2;    // Random parent: each branch from a random existing branch
 }
 
 // Configuration for pre-benchmark setup (used with NthOperationBenchmark)
@@ -61,6 +63,8 @@ message BenchmarkSetup {
     int32 num_branches = 1;        // Number of branches to create during setup
     BranchShape branch_shape = 2;  // Topology shape for branch creation
     int32 inserts_per_branch = 3;  // Number of data inserts per branch during setup
+    int32 updates_per_branch = 4;  // Number of updates per branch during setup
+    int32 deletes_per_branch = 5;  // Number of deletes per branch during setup
 }
 
 // Configuration for measuring the Nth operation deterministically
