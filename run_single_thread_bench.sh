@@ -129,8 +129,7 @@ for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
     
     for OPERATION in "${OPERATIONS[@]}"; do
         NUM_OPS=$(get_num_ops "$OPERATION")
-        OPERATION_LOWER=$(echo "$OPERATION" | tr '[:upper:]' '[:lower:]')
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_${OPERATION_LOWER}_${NUM_BRANCHES}_spine"
+        RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_spine"
         
         echo ""
         echo "---------------------------------------------------"
