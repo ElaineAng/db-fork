@@ -52,7 +52,8 @@ class DBToolSuite(ABC):
 
         Each subclass must implement its own storage measurement strategy:
         - Directory-based (Dolt, KPG): use ``dbutil.get_directory_size_bytes()``
-        - API-based (Neon, Xata): query the provider's project API
+        - SQL-based (Neon): ``pg_database_size()`` per branch
+        - Metrics API (Xata): branch-level ``disk`` metric via REST API
 
         Returns:
             Total storage in bytes, or 0 if unavailable.
@@ -62,6 +63,14 @@ class DBToolSuite(ABC):
     ######################################################################
     # Protected methods
     ######################################################################
+
+    def _get_storage_after_branch(self, size_before: int) -> int:
+        """Get storage size after a branch operation.
+
+        Subclasses with async storage metrics may override to poll
+        until the metric reflects the branch creation.
+        """
+        return self.get_total_storage_bytes()
 
     @abstractmethod
     def _connect_branch_impl(self, branch_name: str) -> None:
@@ -184,6 +193,7 @@ class DBToolSuite(ABC):
             timed: Whether to time and record this operation (default True).
         """
         # TODO: Separate storage calculation from `timed` parameter
+        size_before = 0
         if timed:
             size_before = self.get_total_storage_bytes()
             self.result_collector.record_disk_size_before(size_before)
@@ -197,7 +207,7 @@ class DBToolSuite(ABC):
             raise Exception(f"Error creating branch: {e}")
 
         if timed:
-            size_after = self.get_total_storage_bytes()
+            size_after = self._get_storage_after_branch(size_before)
             self.result_collector.record_disk_size_after(size_after)
             self.result_collector.record_num_keys_touched(0)
             self.result_collector.flush_record()
