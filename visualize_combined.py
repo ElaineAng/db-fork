@@ -8,6 +8,9 @@ Usage:
     # Generate only multiop or nth_op figures
     python visualize_combined.py --backend dolt --type multiop
     python visualize_combined.py --backend neon --type nth_op
+
+    # Include storage plots
+    python visualize_combined.py --backend dolt --storage
 """
 
 import argparse
@@ -20,6 +23,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from viz_common import (
+    OP_COLORS,
+    OP_TYPE_NAMES,
+    auto_scale_storage,
+    process_range_updates,
+    save_or_show,
+)
 
 
 def extract_num_branches(filename: str) -> int:
@@ -82,70 +93,32 @@ def load_parquet_files(directory: str, label: str) -> pd.DataFrame:
     )
 
 
-def process_range_updates(df: pd.DataFrame) -> pd.DataFrame:
-    """Mark RANGE_UPDATE ops and compute per-key latency."""
-    if df.empty or "num_keys_touched" not in df.columns:
-        return df
-
-    # Distinguish UPDATE (op_type=5, num_keys_touched=1) from
-    # RANGE_UPDATE (op_type=5, num_keys_touched > 1)
-    range_update_mask = (df["op_type"] == 5) & (df["num_keys_touched"] > 1)
-    if range_update_mask.any():
-        df = df.copy()
-        df.loc[range_update_mask, "op_type"] = 6
-        df.loc[range_update_mask, "latency"] = (
-            df.loc[range_update_mask, "latency"]
-            / df.loc[range_update_mask, "num_keys_touched"]
-        )
-
-    return df
-
-
-# Operation type enum values to names
-OP_TYPE_NAMES = {
-    0: "UNSPECIFIED",
-    1: "BRANCH",
-    2: "CONNECT",
-    3: "READ",
-    4: "INSERT",
-    5: "UPDATE",
-    6: "RANGE_UPDATE (per-key)",
-}
-
-# Colors for each operation type
-OP_COLORS = {
-    0: "#888888",
-    1: "#1f77b4",
-    2: "#ff7f0e",
-    3: "#2ca02c",
-    4: "#d62728",
-    5: "#9467bd",
-    6: "#8c564b",
-}
-
-
 def aggregate_for_nth_op(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate by (data_source, num_branches, op_type) for mean latency."""
+    agg_dict = {"latency": ["mean", "std", "count"]}
+    if "disk_size_after" in df.columns:
+        agg_dict["disk_size_after"] = "max"
     return (
         df.groupby(["data_source", "num_branches", "op_type"])
-        .agg({"latency": ["mean", "std", "count"]})
+        .agg(agg_dict)
         .reset_index()
     )
 
 
 def aggregate_for_multiop(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate by (data_source, num_branches, op_type) for p50/p99."""
+    agg_dict = {
+        "latency": [
+            lambda x: np.percentile(x, 50),
+            lambda x: np.percentile(x, 99),
+            "count",
+        ]
+    }
+    if "disk_size_after" in df.columns:
+        agg_dict["disk_size_after"] = "max"
     return (
         df.groupby(["data_source", "num_branches", "op_type"])
-        .agg(
-            {
-                "latency": [
-                    lambda x: np.percentile(x, 50),
-                    lambda x: np.percentile(x, 99),
-                    "count",
-                ]
-            }
-        )
+        .agg(agg_dict)
         .reset_index()
     )
 
@@ -158,7 +131,7 @@ def plot_nth_op_combined(
     log_scale: bool = False,
 ):
     """Plot nth-op benchmark comparing prefilled vs empty."""
-    plt.figure(figsize=(14, 9))
+    fig = plt.figure(figsize=(14, 9))
 
     for df, linestyle, label_suffix in [
         (prefilled_df, "-", " (prefilled)"),
@@ -169,7 +142,7 @@ def plot_nth_op_combined(
 
         df = process_range_updates(df)
         agg = aggregate_for_nth_op(df)
-        agg.columns = [
+        cols = [
             "data_source",
             "num_branches",
             "op_type",
@@ -177,6 +150,9 @@ def plot_nth_op_combined(
             "latency_std",
             "count",
         ]
+        if "disk_size_after" in df.columns:
+            cols.append("storage_max")
+        agg.columns = cols
 
         op_types = sorted(agg["op_type"].unique())
         for op_type in op_types:
@@ -210,13 +186,7 @@ def plot_nth_op_combined(
         plt.yscale("log")
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
-
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
-        print(f"Saved figure to {output_path}")
-    else:
-        plt.show()
-    plt.close()
+    save_or_show(fig, output_path)
 
 
 def plot_multiop_combined(
@@ -227,7 +197,7 @@ def plot_multiop_combined(
     log_scale: bool = False,
 ):
     """Plot multiop benchmark comparing prefilled vs empty (p50 only for clarity)."""
-    plt.figure(figsize=(14, 9))
+    fig = plt.figure(figsize=(14, 9))
 
     for df, linestyle, label_suffix in [
         (prefilled_df, "-", " (prefilled)"),
@@ -238,7 +208,7 @@ def plot_multiop_combined(
 
         df = process_range_updates(df)
         agg = aggregate_for_multiop(df)
-        agg.columns = [
+        cols = [
             "data_source",
             "num_branches",
             "op_type",
@@ -246,6 +216,9 @@ def plot_multiop_combined(
             "latency_p99",
             "count",
         ]
+        if "disk_size_after" in df.columns:
+            cols.append("storage_max")
+        agg.columns = cols
 
         op_types = sorted(agg["op_type"].unique())
         for op_type in op_types:
@@ -278,13 +251,104 @@ def plot_multiop_combined(
         plt.yscale("log")
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
+    save_or_show(fig, output_path)
 
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
-        print(f"Saved figure to {output_path}")
-    else:
-        plt.show()
-    plt.close()
+
+def plot_storage_combined(
+    prefilled_df: pd.DataFrame,
+    empty_df: pd.DataFrame,
+    backend: str,
+    bench_type: str,
+    output_path: str = None,
+    log_scale: bool = False,
+):
+    """Plot storage vs branches for prefilled and empty data sources."""
+    has_data = False
+    fig = plt.figure(figsize=(12, 8))
+
+    all_values = []
+    plot_items = []
+
+    for df, linestyle, label_suffix in [
+        (prefilled_df, "-", "prefilled"),
+        (empty_df, "--", "empty"),
+    ]:
+        if df.empty:
+            continue
+        df = process_range_updates(df)
+        if "disk_size_after" not in df.columns:
+            continue
+
+        # Filter to BRANCH rows (op_type=1) and aggregate
+        branch_df = df[df["op_type"] == 1].copy()
+        if branch_df.empty:
+            continue
+
+        storage_agg = (
+            branch_df.groupby(["num_branches"])
+            .agg({"disk_size_after": "max"})
+            .reset_index()
+        )
+        storage_agg.columns = ["num_branches", "storage_max"]
+        storage_agg = storage_agg[storage_agg["storage_max"] > 0]
+        if storage_agg.empty:
+            continue
+
+        all_values.append(storage_agg["storage_max"])
+        plot_items.append((storage_agg, linestyle, label_suffix))
+
+    if not plot_items:
+        print("Warning: No storage data found. Skipping storage plot.")
+        plt.close(fig)
+        return
+
+    # Pick a single unit based on all values
+    combined_values = pd.concat(all_values)
+    _, unit = auto_scale_storage(combined_values)
+
+    for storage_agg, linestyle, label_suffix in plot_items:
+        storage_agg = storage_agg.sort_values("num_branches")
+        scaled, _ = auto_scale_storage(storage_agg["storage_max"])
+        # Re-scale with the global unit for consistency
+        if unit == "GB":
+            scaled = storage_agg["storage_max"] / (1 << 30)
+        elif unit == "MB":
+            scaled = storage_agg["storage_max"] / (1 << 20)
+        elif unit == "KB":
+            scaled = storage_agg["storage_max"] / (1 << 10)
+        else:
+            scaled = storage_agg["storage_max"]
+
+        plt.plot(
+            storage_agg["num_branches"],
+            scaled,
+            marker="o" if label_suffix == "prefilled" else "s",
+            linestyle=linestyle,
+            color=OP_COLORS[1],
+            label=f"Storage ({label_suffix})",
+            alpha=0.8 if label_suffix == "prefilled" else 0.6,
+        )
+        has_data = True
+
+    if not has_data:
+        print("Warning: No storage data found. Skipping storage plot.")
+        plt.close(fig)
+        return
+
+    plt.xlabel("Number of Branches", fontsize=12)
+    plt.ylabel(f"Storage ({unit})", fontsize=12)
+    plt.title(
+        f"{backend.upper()} {bench_type.replace('_', '-').title()} Benchmark: Storage",
+        fontsize=14,
+    )
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xscale("log", base=2)
+    if log_scale:
+        plt.yscale("log")
+    plt.grid(True, which="minor", alpha=0.1)
+    plt.tight_layout()
+    save_or_show(fig, output_path)
 
 
 def main():
@@ -322,6 +386,12 @@ def main():
         action="store_true",
         default=False,
         help="Use log scale for y-axis.",
+    )
+    parser.add_argument(
+        "--storage",
+        action="store_true",
+        default=False,
+        help="Also generate storage vs branches plots.",
     )
 
     args = parser.parse_args()
@@ -379,6 +449,20 @@ def main():
                 empty_df,
                 args.backend,
                 output_path,
+                args.log_scale,
+            )
+
+        if args.storage:
+            storage_output = os.path.join(
+                args.output_dir,
+                f"{args.backend}_{bench_type}_storage_combined.png",
+            )
+            plot_storage_combined(
+                prefilled_df,
+                empty_df,
+                args.backend,
+                bench_type,
+                storage_output,
                 args.log_scale,
             )
 

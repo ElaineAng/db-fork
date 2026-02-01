@@ -18,6 +18,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from viz_common import (
+    OP_COLORS,
+    OP_TYPE_NAMES,
+    auto_scale_storage,
+    process_range_updates,
+    save_or_show,
+)
+
 
 def extract_num_threads(filename: str) -> int:
     """Extract the number of threads from the filename."""
@@ -30,22 +38,6 @@ def extract_num_threads(filename: str) -> int:
     if match:
         return int(match.group(1))
     raise ValueError(f"Could not extract num_threads from filename: {filename}")
-
-
-def process_range_updates(df: pd.DataFrame) -> pd.DataFrame:
-    """Mark RANGE_UPDATE ops and compute per-key latency."""
-    if df.empty or "num_keys_touched" not in df.columns:
-        return df
-
-    range_update_mask = (df["op_type"] == 5) & (df["num_keys_touched"] > 1)
-    if range_update_mask.any():
-        df = df.copy()
-        df.loc[range_update_mask, "op_type"] = 6
-        df.loc[range_update_mask, "latency"] = (
-            df.loc[range_update_mask, "latency"]
-            / df.loc[range_update_mask, "num_keys_touched"]
-        )
-    return df
 
 
 def load_and_compute_percentiles(parquet_files: list) -> pd.DataFrame:
@@ -64,22 +56,26 @@ def load_and_compute_percentiles(parquet_files: list) -> pd.DataFrame:
 
     combined_df = pd.concat(all_data, ignore_index=True)
 
+    # Build aggregation dict
+    agg_dict = {
+        "latency": [
+            lambda x: np.percentile(x, 50),
+            lambda x: np.percentile(x, 99),
+            "std",
+            "count",
+        ]
+    }
+    if "disk_size_after" in combined_df.columns:
+        agg_dict["disk_size_after"] = "max"
+
     # Aggregate by (num_threads, op_type)
     aggregated = (
         combined_df.groupby(["num_threads", "op_type"])
-        .agg(
-            {
-                "latency": [
-                    lambda x: np.percentile(x, 50),
-                    lambda x: np.percentile(x, 99),
-                    "std",
-                    "count",
-                ]
-            }
-        )
+        .agg(agg_dict)
         .reset_index()
     )
-    aggregated.columns = [
+
+    cols = [
         "num_threads",
         "op_type",
         "latency_p50",
@@ -87,36 +83,18 @@ def load_and_compute_percentiles(parquet_files: list) -> pd.DataFrame:
         "latency_std",
         "count",
     ]
+    if "disk_size_after" in combined_df.columns:
+        cols.append("storage_max")
+    aggregated.columns = cols
 
     return aggregated
-
-
-OP_TYPE_NAMES = {
-    0: "UNSPECIFIED",
-    1: "BRANCH",
-    2: "CONNECT",
-    3: "READ",
-    4: "INSERT",
-    5: "UPDATE",
-    6: "RANGE_UPDATE (per-key)",
-}
-
-OP_COLORS = {
-    0: "#888888",
-    1: "#1f77b4",
-    2: "#ff7f0e",
-    3: "#2ca02c",
-    4: "#d62728",
-    5: "#9467bd",
-    6: "#8c564b",
-}
 
 
 def plot_latencies(
     df: pd.DataFrame, output_path: str = None, log_scale: bool = False
 ):
     """Create line plot with p50/p99 latency vs num_threads for each operation."""
-    plt.figure(figsize=(14, 9))
+    fig = plt.figure(figsize=(14, 9))
 
     for op_type in sorted(df["op_type"].unique()):
         op_data = df[df["op_type"] == op_type].sort_values("num_threads")
@@ -153,13 +131,44 @@ def plot_latencies(
     if log_scale:
         plt.yscale("log")
     plt.tight_layout()
+    save_or_show(fig, output_path)
 
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
-        print(f"Saved figure to {output_path}")
-    else:
-        plt.show()
-    plt.close()
+
+def plot_storage_by_threads(
+    df: pd.DataFrame, output_path: str = None, log_scale: bool = False
+):
+    """Plot total DB storage vs number of threads (BRANCH_CREATE rows only)."""
+    if "storage_max" not in df.columns:
+        print("Warning: No storage data found. Skipping storage plot.")
+        return
+
+    storage_df = df[(df["op_type"] == 1) & (df["storage_max"] > 0)]
+    if storage_df.empty:
+        print("Warning: No non-zero storage data found. Skipping storage plot.")
+        return
+
+    storage_df = storage_df.sort_values("num_threads")
+    scaled, unit = auto_scale_storage(storage_df["storage_max"])
+
+    fig = plt.figure(figsize=(12, 8))
+    plt.plot(
+        storage_df["num_threads"],
+        scaled,
+        marker="o",
+        color=OP_COLORS[1],
+        label="Total Storage",
+    )
+    plt.xlabel("Number of Threads", fontsize=12)
+    plt.ylabel(f"Storage ({unit})", fontsize=12)
+    plt.title("Multi-Thread Benchmark: Storage vs Number of Threads", fontsize=14)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xscale("log", base=2)
+    if log_scale:
+        plt.yscale("log")
+    plt.grid(True, which="minor", alpha=0.1)
+    plt.tight_layout()
+    save_or_show(fig, output_path)
 
 
 def main():
@@ -171,6 +180,13 @@ def main():
     )
     parser.add_argument(
         "-o", "--output", type=str, default=None, help="Output file path."
+    )
+    parser.add_argument(
+        "-s",
+        "--storage-output",
+        type=str,
+        default=None,
+        help="Output file path for the storage figure.",
     )
     parser.add_argument(
         "--log-scale", action="store_true", help="Use log scale for y-axis."
@@ -198,6 +214,10 @@ def main():
         df = load_and_compute_percentiles(parquet_files)
         print(f"Aggregated data:\n{df}")
         plot_latencies(df, args.output, args.log_scale)
+        if args.storage_output:
+            plot_storage_by_threads(
+                df, args.storage_output, log_scale=args.log_scale
+            )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
