@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
@@ -61,14 +62,27 @@ class XataToolSuite(DBToolSuite):
         }
         default_branch = cls._request("POST", endpoint, json=branch_payload)
 
+        # The connection string may be null right after creation.
+        # Poll the branch until it becomes available.
+        conn_string = default_branch.get("connectionString")
+        if not conn_string:
+            import time
+            branch_endpoint = f"projects/{project_details['id']}/branches/{default_branch['id']}"
+            for _ in range(30):
+                time.sleep(10)
+                details = cls._request("GET", branch_endpoint)
+                conn_string = details.get("connectionString")
+                if conn_string:
+                    break
+            if not conn_string:
+                raise RuntimeError("Branch connection string not available after waiting")
+
         # Use the "postgres" database as the default.
         return (
             project_details["id"],
             default_branch["id"],
             default_branch["name"],
-            cls.add_db_name_to_connection_string(
-                default_branch["connectionString"], "postgres"
-            ),
+            cls.add_db_name_to_connection_string(conn_string, "postgres"),
         )
 
     @classmethod
@@ -118,6 +132,8 @@ class XataToolSuite(DBToolSuite):
 
         r.raise_for_status()
 
+        if r.status_code == 204 or not r.content:
+            return {}
         return r.json()
 
     @classmethod
@@ -191,10 +207,10 @@ class XataToolSuite(DBToolSuite):
         branch_payload = {
             "mode": "inherit",
             "name": branch_name,
-            "parent_id": parent_id,
+            "parentID": parent_id,
         }
         res = self.__class__._request("POST", endpoint, json=branch_payload)
-        self._all_branches[branch_name] = (res["id"], res["connectionString"])
+        self._all_branches[branch_name] = (res["id"], res.get("connectionString"))
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -234,28 +250,61 @@ class XataToolSuite(DBToolSuite):
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
 
-    # Xata API storage field name is not well-documented; try known candidates.
-    _STORAGE_FIELD_CANDIDATES = ("storage_bytes", "data_storage", "synthetic_storage_size")
+    def _get_branch_instance_ids(self, branch_id: str) -> list[str]:
+        """Get instance IDs for a branch from its detail endpoint."""
+        endpoint = f"projects/{self.project_id}/branches/{branch_id}"
+        details = self.__class__._request("GET", endpoint)
+        instances = details.get("status", {}).get("instances", [])
+        return [inst["id"] for inst in instances]
+
+    def _get_branch_disk_bytes(self, branch_id: str) -> int:
+        """Get disk usage in bytes for a single branch via the metrics API."""
+        instance_ids = self._get_branch_instance_ids(branch_id)
+        if not instance_ids:
+            return 0
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(minutes=5)
+
+        endpoint = f"projects/{self.project_id}/branches/{branch_id}/metrics"
+        payload = {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "metric": "disk",
+            "instances": instance_ids,
+            "aggregations": ["max"],
+        }
+        response = self.__class__._request("POST", endpoint, json=payload)
+
+        max_bytes = 0
+        for series in response.get("series", []):
+            for point in series.get("values", []):
+                val = point.get("value", 0)
+                if val > max_bytes:
+                    max_bytes = val
+        return int(max_bytes)
 
     def get_total_storage_bytes(self) -> int:
-        """Get total storage used by the Xata project.
+        """Get total disk usage across all branches in the Xata project.
 
-        Queries the Xata project API for storage information.
+        Queries the Xata branch metrics API for the ``disk`` metric on each
+        branch and sums the results.
+
+        Note: The disk metric reports **logical** per-instance size, not
+        physical storage.  Xata uses CoW at the storage layer, so branches
+        share underlying blocks, but each PostgreSQL instance reports its
+        full logical footprint.  The sum therefore overcounts actual physical
+        storage — shared data is counted once per branch.
 
         Returns:
             Total storage in bytes, or 0 if unavailable.
         """
         try:
-            endpoint = f"projects/{self.project_id}"
-            response = self.__class__._request("GET", endpoint)
-
-            for key in self._STORAGE_FIELD_CANDIDATES:
-                value = response.get(key)
-                if value is not None:
-                    return int(value)
-
-            print("Warning: No recognized storage field in Xata API response")
-            return 0
+            branches = self._get_xata_branches()
+            total = 0
+            for _, (branch_id, _) in branches.items():
+                total += self._get_branch_disk_bytes(branch_id)
+            return total
         except Exception as e:
-            print(f"Warning: Could not get Xata project storage: {e}")
+            print(f"Warning: Could not get Xata storage metrics: {e}")
             return 0
