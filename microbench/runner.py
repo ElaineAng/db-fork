@@ -306,13 +306,13 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
 
     print(
         f"Nth-op setup: Creating {num_branches} branches "
-        f"({'SPINE' if shape == tp.BranchShape.SPINE else 'FAN_OUT'} shape) "
+        f"shape: {shape} "
         f"with {inserts_per_branch} inserts, {updates_per_branch} updates, "
         f"{deletes_per_branch} deletes per branch..."
     )
 
-    # Create a temporary BenchmarkSuite for setup operations (not timed).
-    # Use a dummy result collector since we don't want to record setup ops.
+    # Create a temporary BenchmarkSuite for setup operations.
+    # Branch creation is timed and saved to a separate _setup.parquet file.
     setup_result_collector = rc.ResultCollector(
         run_id=f"{config.run_id}_setup",
     )
@@ -340,6 +340,11 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
 
     # Get all branches created during setup to pass to worker threads.
     setup_branches = setup_branch_manager.get_all_branches()
+
+    # Save setup timing data to a separate parquet file.
+    setup_result_collector.write_to_parquet(
+        filename=f"{config.run_id}_setup.parquet"
+    )
 
     print(
         f"Nth-op setup complete. Created {num_branches} branches. "
@@ -467,6 +472,8 @@ class BenchmarkSuite:
         self._modified_keys = {}
 
         # List of existing primary keys in the database for the current branch.
+        # Not used currently. Technically we don't need to always re-read the
+        # existing primary keys.
         self._existing_pks = []
 
         # Cache for pk columns.
@@ -657,13 +664,16 @@ class BenchmarkSuite:
             benchmark_table,
             self._pk_columns,
         )
+        # Cache the fetched PKs for subsequent operations.
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
 
         selected_key = None
-        if not existing_pks or (
+        read_from_modified = (
             self._modified_keys.get(cur_branch_id) and rnd.random() < 0.5
-        ):
-            if self._modified_keys.get(cur_branch_id):
-                selected_key = rnd.choice(self._modified_keys[cur_branch_id])
+        )
+        if read_from_modified:
+            selected_key = rnd.choice(self._modified_keys[cur_branch_id])
         else:
             selected_key = rnd.choice(existing_pks)
 
@@ -686,7 +696,9 @@ class BenchmarkSuite:
         self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the read.
-        self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        res = self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        if not res:
+            raise ValueError("Read failed, do nothing")
 
     def maybe_load_pk_columns(self, benchmark_table):
         if not self._pk_columns:
@@ -814,18 +826,115 @@ class BenchmarkSuite:
         """
         _, cur_branch_id = self.db_tools.get_current_branch()
 
+        # Get range query components from helper.
+        range_info = self._prepare_range_query(
+            rnd, benchmark_table, "range update"
+        )
+
+        # Get all columns and filter out PK columns for the SET clause.
+        all_columns = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
+        )
+        non_pk_columns = [
+            col for col in all_columns if col not in self._pk_columns
+        ]
+
+        if not non_pk_columns:
+            raise ValueError("No non-PK columns to update")
+
+        # Generate new values for non-PK columns.
+        row_data = self._table_datagen.generate_row()
+
+        # Build the SET clause for non-PK columns.
+        set_clause = ", ".join([f"{col} = %({col})s" for col in non_pk_columns])
+
+        # Add range params to row_data.
+        row_data.update(range_info["params"])
+
+        update_sql = f"UPDATE {benchmark_table} SET {set_clause} WHERE {range_info['where_clause']};"
+
+        # Record the accurate number of keys touched.
+        self.db_tools.result_collector.record_num_keys_touched(
+            len(range_info["keys_in_range"])
+        )
+
+        # Run the range update.
+        self.db_tools.execute_sql(update_sql, row_data, timed=True)
+
+        # Track all actual keys in the range as modified.
+        modified_list = self._modified_keys.setdefault(cur_branch_id, [])
+        for key in range_info["keys_in_range"]:
+            if key not in modified_list:
+                modified_list.append(key)
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=True, message="range update")
+        return len(range_info["keys_in_range"])
+
+    def range_read_op(self, rnd, benchmark_table) -> int:
+        """Perform a range read on multiple rows.
+
+        Selects two random keys to bound the range. The number of rows between
+        the two keys is approximately config.range_update_config.range_size.
+
+        Uses the first PK column for the range condition. Note that for tables
+        with composite primary keys, the actual number of rows read may exceed
+        the specified range size since we only constrain the first PK column.
+
+        Args:
+            rnd: Random module or object with random() and choice() methods.
+            benchmark_table: Table to read from.
+
+        Returns:
+            The actual number of rows read, or 0 if the read failed.
+        """
+        # Get range query components from helper.
+        range_info = self._prepare_range_query(
+            rnd, benchmark_table, "range read"
+        )
+
+        select_sql = f"SELECT * FROM {benchmark_table} WHERE {range_info['where_clause']};"
+
+        # Record the accurate number of keys touched.
+        self.db_tools.result_collector.record_num_keys_touched(
+            len(range_info["keys_in_range"])
+        )
+
+        # Run the range read.
+        self.db_tools.execute_sql(select_sql, range_info["params"], timed=True)
+
+        return len(range_info["keys_in_range"])
+
+    def _prepare_range_query(
+        self, rnd, benchmark_table: str, operation_name: str
+    ) -> dict:
+        """Prepare common components for range queries (read or update).
+
+        Args:
+            rnd: Random module or object with random() and choice() methods.
+            benchmark_table: Table to query.
+            operation_name: Name of operation for error messages.
+
+        Returns:
+            Dictionary with:
+                - keys_in_range: List of PK tuples in the selected range.
+                - where_clause: SQL WHERE clause for the range.
+                - params: Dictionary of query parameters for the range bounds.
+        """
         self.maybe_load_pk_columns(benchmark_table)
 
         # Get all PK values sorted by all PK columns to determine range bounds.
-        existing_pks = dbh.get_pk_values(
+        existing_pks = self._existing_pks or dbh.get_pk_values(
             self.db_tools.get_current_connection(),
             benchmark_table,
             self._pk_columns,
         )
+        # Cache the fetched PKs for subsequent operations.
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
 
         if not existing_pks:
             raise ValueError(
-                "No existing keys found during range update, do nothing"
+                f"No existing keys found during {operation_name}, do nothing"
             )
 
         # Sort by all PK columns (tuple comparison).
@@ -858,137 +967,20 @@ class BenchmarkSuite:
         )
 
         # Build params dict for the range bounds.
-        range_params = {}
+        params = {}
         for i, val in enumerate(start_key):
-            range_params[f"_start_{i}"] = val
+            params[f"_start_{i}"] = val
         for i, val in enumerate(end_key):
-            range_params[f"_end_{i}"] = val
-
-        # Get all columns and filter out PK columns for the SET clause.
-        all_columns = dbh.get_all_columns(
-            self.db_tools.get_current_connection(), benchmark_table
-        )
-        non_pk_columns = [
-            col for col in all_columns if col not in self._pk_columns
-        ]
-
-        if not non_pk_columns:
-            raise ValueError("No non-PK columns to update")
-
-        # Generate new values for non-PK columns.
-        row_data = self._table_datagen.generate_row()
-
-        # Build the SET clause for non-PK columns.
-        set_clause = ", ".join([f"{col} = %({col})s" for col in non_pk_columns])
+            params[f"_end_{i}"] = val
 
         # Build WHERE clause using tuple comparison on all PK columns.
         where_clause = f"{pk_tuple_sql} >= ({placeholders_start}) AND {pk_tuple_sql} <= ({placeholders_end})"
 
-        # Add range params to row_data.
-        row_data.update(range_params)
-
-        update_sql = (
-            f"UPDATE {benchmark_table} SET {set_clause} WHERE {where_clause};"
-        )
-
-        # Record the accurate number of keys touched.
-        self.db_tools.result_collector.record_num_keys_touched(
-            len(keys_in_range)
-        )
-
-        # Run the range update.
-        self.db_tools.execute_sql(update_sql, row_data, timed=True)
-
-        # Track all actual keys in the range as modified.
-        modified_list = self._modified_keys.setdefault(cur_branch_id, [])
-        for key in keys_in_range:
-            if key not in modified_list:
-                modified_list.append(key)
-        if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True, message="range update")
-        return len(keys_in_range)
-
-    def range_read_op(self, rnd, benchmark_table) -> int:
-        """Perform a range read on multiple rows.
-
-        Selects two random keys to bound the range. The number of rows between
-        the two keys is approximately config.range_update_config.range_size.
-
-        Uses the first PK column for the range condition. Note that for tables
-        with composite primary keys, the actual number of rows read may exceed
-        the specified range size since we only constrain the first PK column.
-
-        Args:
-            rnd: Random module or object with random() and choice() methods.
-            benchmark_table: Table to read from.
-
-        Returns:
-            The actual number of rows read, or 0 if the read failed.
-        """
-        self.maybe_load_pk_columns(benchmark_table)
-
-        # Get all PK values sorted by all PK columns to determine range bounds.
-        existing_pks = dbh.get_pk_values(
-            self.db_tools.get_current_connection(),
-            benchmark_table,
-            self._pk_columns,
-        )
-
-        if not existing_pks:
-            raise ValueError(
-                "No existing keys found during range read, do nothing"
-            )
-
-        # Sort by all PK columns (tuple comparison).
-        sorted_pks = sorted(existing_pks)
-        total_keys = len(sorted_pks)
-
-        # Get range size from config (reuse range_update_config).
-        range_size = self._config.range_update_config.range_size or 10
-        range_size = min(range_size, total_keys)  # Can't exceed total keys
-
-        # Pick a random start index, ensuring we have room for range_size keys.
-        max_start_idx = max(0, total_keys - range_size)
-        start_idx = rnd.randint(0, max_start_idx)
-        end_idx = min(start_idx + range_size - 1, total_keys - 1)
-
-        start_key = sorted_pks[start_idx]
-        end_key = sorted_pks[end_idx]
-
-        # Keys in range are exactly the slice from sorted_pks.
-        keys_in_range = sorted_pks[start_idx : end_idx + 1]
-
-        # Build tuple comparison for composite PK range queries.
-        # Uses SQL row value comparison: (col1, col2, ...) >= (val1, val2, ...)
-        pk_tuple_sql = f"({', '.join(self._pk_columns)})"
-        placeholders_start = ", ".join(
-            [f"%(_start_{i})s" for i in range(len(self._pk_columns))]
-        )
-        placeholders_end = ", ".join(
-            [f"%(_end_{i})s" for i in range(len(self._pk_columns))]
-        )
-
-        # Build params dict for the range bounds.
-        range_params = {}
-        for i, val in enumerate(start_key):
-            range_params[f"_start_{i}"] = val
-        for i, val in enumerate(end_key):
-            range_params[f"_end_{i}"] = val
-
-        # Build WHERE clause using tuple comparison on all PK columns.
-        where_clause = f"{pk_tuple_sql} >= ({placeholders_start}) AND {pk_tuple_sql} <= ({placeholders_end})"
-
-        select_sql = f"SELECT * FROM {benchmark_table} WHERE {where_clause};"
-
-        # Record the accurate number of keys touched.
-        self.db_tools.result_collector.record_num_keys_touched(
-            len(keys_in_range)
-        )
-
-        # Run the range read.
-        self.db_tools.execute_sql(select_sql, range_params, timed=True)
-
-        return len(keys_in_range)
+        return {
+            "keys_in_range": keys_in_range,
+            "where_clause": where_clause,
+            "params": params,
+        }
 
     def setup_nth_op_branches(
         self,
@@ -1063,7 +1055,7 @@ class BenchmarkSuite:
             if shape == tp.BranchShape.SPINE:
                 # Linear: branch from current
                 self.db_tools.create_branch(
-                    branch_name, current_parent_id, timed=False
+                    branch_name, current_parent_id, timed=True
                 )
                 self.db_tools.connect_branch(branch_name, timed=False)
                 _, current_parent_id = self.db_tools.get_current_branch()
@@ -1071,7 +1063,7 @@ class BenchmarkSuite:
             elif shape == tp.BranchShape.FAN_OUT:
                 # Fan-out: always branch from root
                 self.db_tools.create_branch(
-                    branch_name, root_branch_id, timed=False
+                    branch_name, root_branch_id, timed=True
                 )
                 self.db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = self.db_tools.get_current_branch()
@@ -1079,7 +1071,7 @@ class BenchmarkSuite:
             else:  # BUSHY
                 # Bushy: branch from a random existing branch
                 parent_name, parent_id = rnd.choice(branch_ids)
-                self.db_tools.create_branch(branch_name, parent_id, timed=False)
+                self.db_tools.create_branch(branch_name, parent_id, timed=True)
                 self.db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = self.db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
