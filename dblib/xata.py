@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from dotenv import load_dotenv
@@ -62,20 +63,12 @@ class XataToolSuite(DBToolSuite):
         }
         default_branch = cls._request("POST", endpoint, json=branch_payload)
 
-        # The connection string may be null right after creation.
-        # Poll the branch until it becomes available.
-        conn_string = default_branch.get("connectionString")
-        if not conn_string:
-            import time
-            branch_endpoint = f"projects/{project_details['id']}/branches/{default_branch['id']}"
-            for _ in range(30):
-                time.sleep(10)
-                details = cls._request("GET", branch_endpoint)
-                conn_string = details.get("connectionString")
-                if conn_string:
-                    break
-            if not conn_string:
-                raise RuntimeError("Branch connection string not available after waiting")
+        conn_string = cls._poll_branch_active(
+            project_details["id"],
+            default_branch["id"],
+            initial_conn_string=default_branch.get("connectionString"),
+            initial_status_type=(default_branch.get("status") or {}).get("statusType", ""),
+        )
 
         # Use the "postgres" database as the default.
         return (
@@ -135,6 +128,45 @@ class XataToolSuite(DBToolSuite):
         if r.status_code == 204 or not r.content:
             return {}
         return r.json()
+
+    @classmethod
+    def _poll_branch_active(
+        cls, project_id: str, branch_id: str,
+        initial_conn_string: str = None, initial_status_type: str = "",
+        max_attempts: int = 30, interval: float = 10.0,
+    ) -> str:
+        """Poll until a branch has a connectionString and STATUS_TYPE_ACTIVE.
+
+        A connection string can appear while the compute is still
+        STATUS_TYPE_TRANSIENT, which causes "unable to authenticate"
+        errors.  This method blocks until both conditions are met.
+
+        Returns:
+            The connection string for the active branch.
+
+        Raises:
+            RuntimeError: If the branch is not ready after polling.
+        """
+        conn_string = initial_conn_string
+        status_type = initial_status_type
+        endpoint = f"projects/{project_id}/branches/{branch_id}"
+        for _ in range(max_attempts):
+            if conn_string and status_type == "STATUS_TYPE_ACTIVE":
+                return conn_string
+            time.sleep(interval)
+            details = cls._request("GET", endpoint)
+            conn_string = details.get("connectionString")
+            status_type = (details.get("status") or {}).get("statusType", "")
+
+        if not conn_string:
+            raise RuntimeError(
+                f"Branch {branch_id} connection string not available after "
+                f"{max_attempts} attempts"
+            )
+        raise RuntimeError(
+            f"Branch {branch_id} not active after {max_attempts} attempts "
+            f"(status: {status_type})"
+        )
 
     @classmethod
     def _get_xata_connection_uri(
@@ -210,7 +242,16 @@ class XataToolSuite(DBToolSuite):
             "parentID": parent_id,
         }
         res = self.__class__._request("POST", endpoint, json=branch_payload)
-        self._all_branches[branch_name] = (res["id"], res.get("connectionString"))
+        branch_id = res["id"]
+
+        conn_string = self.__class__._poll_branch_active(
+            self.project_id,
+            branch_id,
+            initial_conn_string=res.get("connectionString"),
+            initial_status_type=(res.get("status") or {}).get("statusType", ""),
+        )
+
+        self._all_branches[branch_name] = (branch_id, conn_string)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
