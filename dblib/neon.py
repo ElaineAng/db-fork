@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import time
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
@@ -83,17 +84,35 @@ class NeonToolSuite(DBToolSuite):
 
     @classmethod
     def _get_neon_connection_uri(
-        cls, project_id: str, branch_id: str, db_name: str
+        cls, project_id: str, branch_id: str, db_name: str,
+        max_retries: int = 5, retry_delay: float = 2.0,
     ) -> str:
         """
         Retrieves the connection URI for a specific Neon database branch.
+
+        Retries on HTTP 404 because newly created branches may not be
+        immediately visible via the API.
         """
         endpoint = (
             f"projects/{project_id}/connection_uri?branch_id={branch_id}"
             f"&database_name={db_name}&role_name=neondb_owner"
         )
-        response = cls._request("GET", endpoint)
-        return response["uri"]
+        for attempt in range(max_retries):
+            try:
+                response = cls._request("GET", endpoint)
+                return response["uri"]
+            except requests.exceptions.HTTPError as e:
+                is_404 = e.response is not None and e.response.status_code == 404
+                if is_404 and attempt < max_retries - 1:
+                    print(
+                        f"Branch {branch_id} not yet visible (attempt "
+                        f"{attempt + 1}/{max_retries}), retrying in "
+                        f"{retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                raise
+        return None
 
     @classmethod
     def get_project_branches(cls, project_id: str) -> dict:
@@ -215,6 +234,9 @@ class NeonToolSuite(DBToolSuite):
             cur.execute("SELECT pg_database_size(current_database())")
             return cur.fetchone()[0]
 
+    _BRANCH_CONNECT_MAX_RETRIES = 3
+    _BRANCH_CONNECT_RETRY_DELAY = 3.0
+
     def get_total_storage_bytes(self) -> int:
         """Get total storage across all branches via pg_database_size().
 
@@ -223,29 +245,54 @@ class NeonToolSuite(DBToolSuite):
         instant, real-time metric — unlike synthetic_storage_size or the
         branch-level logical_size from the API, which lag ~15 minutes.
 
+        Per-branch failures (e.g. cold-compute timeouts) are retried and,
+        if still unsuccessful, skipped so that measurements from other
+        branches are not discarded.
+
         Returns:
             Total storage in bytes across all branches, or 0 if unavailable.
         """
         try:
             db_name = self.conn.get_dsn_parameters()["dbname"]
             branches = self._get_neon_branches()
-            total = 0
-
-            for name, (branch_id, _) in branches.items():
-                if branch_id == self.current_branch_id:
-                    total += self._pg_database_size(self.conn)
-                    continue
-
-                uri = self.__class__._get_neon_connection_uri(
-                    self.project_id, branch_id, db_name,
-                )
-                tmp_conn = psycopg2.connect(uri)
-                try:
-                    total += self._pg_database_size(tmp_conn)
-                finally:
-                    tmp_conn.close()
-
-            return total
         except Exception as e:
-            print(f"Warning: Could not get Neon storage: {e}")
+            print(f"Warning: Could not list Neon branches: {e}")
             return 0
+
+        total = 0
+        for name, (branch_id, _) in branches.items():
+            if branch_id == self.current_branch_id:
+                try:
+                    total += self._pg_database_size(self.conn)
+                except Exception as e:
+                    print(f"Warning: Could not get storage for current "
+                          f"branch '{name}': {e}")
+                continue
+
+            for attempt in range(self._BRANCH_CONNECT_MAX_RETRIES):
+                try:
+                    uri = self.__class__._get_neon_connection_uri(
+                        self.project_id, branch_id, db_name,
+                    )
+                    tmp_conn = psycopg2.connect(uri)
+                    try:
+                        total += self._pg_database_size(tmp_conn)
+                    finally:
+                        tmp_conn.close()
+                    break  # success — move to next branch
+                except Exception as e:
+                    if attempt < self._BRANCH_CONNECT_MAX_RETRIES - 1:
+                        print(
+                            f"Warning: branch '{name}' attempt "
+                            f"{attempt + 1}/{self._BRANCH_CONNECT_MAX_RETRIES}"
+                            f" failed ({e}), retrying in "
+                            f"{self._BRANCH_CONNECT_RETRY_DELAY}s..."
+                        )
+                        time.sleep(self._BRANCH_CONNECT_RETRY_DELAY)
+                    else:
+                        print(f"Warning: Could not get storage for branch "
+                              f"'{name}' after "
+                              f"{self._BRANCH_CONNECT_MAX_RETRIES} attempts: "
+                              f"{e}")
+
+        return total
