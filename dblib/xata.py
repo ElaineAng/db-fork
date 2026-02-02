@@ -82,8 +82,17 @@ class XataToolSuite(DBToolSuite):
     def delete_project(cls, project_id: str) -> None:
         """
         Deletes a Xata project by its ID.
+        Deletes all branches first, as required by the Xata API.
         """
-        return cls._request("DELETE", f"projects/{project_id}")
+        endpoint = f"projects/{project_id}/branches"
+        response = cls._request("GET", endpoint)
+        for branch in response.get("branches", []):
+            cls._request(
+                "DELETE",
+                f"projects/{project_id}/branches/{branch['id']}",
+            )
+        time.sleep(2)
+        cls._request("DELETE", f"projects/{project_id}")
 
     @classmethod
     def init_for_bench(
@@ -129,13 +138,15 @@ class XataToolSuite(DBToolSuite):
             return {}
         return r.json()
 
+    _READY_STATUSES = {"STATUS_TYPE_ACTIVE", "STATUS_TYPE_HEALTHY"}
+
     @classmethod
     def _poll_branch_active(
         cls, project_id: str, branch_id: str,
         initial_conn_string: str = None, initial_status_type: str = "",
         max_attempts: int = 30, interval: float = 10.0,
     ) -> str:
-        """Poll until a branch has a connectionString and STATUS_TYPE_ACTIVE.
+        """Poll until a branch has a connectionString and a ready status.
 
         A connection string can appear while the compute is still
         STATUS_TYPE_TRANSIENT, which causes "unable to authenticate"
@@ -151,7 +162,7 @@ class XataToolSuite(DBToolSuite):
         status_type = initial_status_type
         endpoint = f"projects/{project_id}/branches/{branch_id}"
         for _ in range(max_attempts):
-            if conn_string and status_type == "STATUS_TYPE_ACTIVE":
+            if conn_string and status_type in cls._READY_STATUSES:
                 return conn_string
             time.sleep(interval)
             details = cls._request("GET", endpoint)
@@ -251,7 +262,9 @@ class XataToolSuite(DBToolSuite):
             initial_status_type=(res.get("status") or {}).get("statusType", ""),
         )
 
-        self._all_branches[branch_name] = (branch_id, conn_string)
+        db_name = self.conn.get_dsn_parameters()["dbname"]
+        uri = self.__class__.add_db_name_to_connection_string(conn_string, db_name)
+        self._all_branches[branch_name] = (branch_id, uri)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
