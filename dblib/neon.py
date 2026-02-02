@@ -120,7 +120,7 @@ class NeonToolSuite(DBToolSuite):
         self.autocommit = autocommit
         self._all_branches = {branch_name: (branch_id, None)}
 
-    def _get_neon_branches(self) -> list[dict]:
+    def _get_neon_branches(self) -> dict:
         """
         Lists all branches in the current Neon project.
         """
@@ -208,27 +208,44 @@ class NeonToolSuite(DBToolSuite):
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
 
+    @staticmethod
+    def _pg_database_size(conn) -> int:
+        """Return pg_database_size(current_database()) in bytes via SQL."""
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_database_size(current_database())")
+            return cur.fetchone()[0]
+
     def get_total_storage_bytes(self) -> int:
-        """Get total storage used by the Neon project (all branches).
+        """Get total storage across all branches via pg_database_size().
+
+        Opens a temporary connection to each branch (except the current one,
+        which reuses self.conn) and sums pg_database_size().  This is an
+        instant, real-time metric — unlike synthetic_storage_size or the
+        branch-level logical_size from the API, which lag ~15 minutes.
 
         Returns:
             Total storage in bytes across all branches, or 0 if unavailable.
         """
         try:
-            endpoint = f"projects/{self.project_id}"
-            response = self.__class__._request("GET", endpoint)
-            project = response.get("project", {})
+            db_name = self.conn.get_dsn_parameters()["dbname"]
+            branches = self._get_neon_branches()
+            total = 0
 
-            # synthetic_storage_size is a CoW-aware billing metric (logical_size + WAL),
-            # not physical disk. We treat it as our storage cost metric to avoid
-            # double-counting shared data across branches.
-            # Reference: https://github.com/neondatabase/neon/blob/main/docs/synthetic-size.md
-            storage = project.get("synthetic_storage_size")
-            if storage is None:
-                print("Warning: synthetic_storage_size not available in Neon API")
-                return 0
+            for name, (branch_id, _) in branches.items():
+                if branch_id == self.current_branch_id:
+                    total += self._pg_database_size(self.conn)
+                    continue
 
-            return int(storage)
+                uri = self.__class__._get_neon_connection_uri(
+                    self.project_id, branch_id, db_name,
+                )
+                tmp_conn = psycopg2.connect(uri)
+                try:
+                    total += self._pg_database_size(tmp_conn)
+                finally:
+                    tmp_conn.close()
+
+            return total
         except Exception as e:
-            print(f"Warning: Could not get Neon project storage: {e}")
+            print(f"Warning: Could not get Neon storage: {e}")
             return 0
