@@ -155,7 +155,7 @@ def plot_latency_percentiles(
     plt.xlabel("Number of Branches", fontsize=12)
     plt.ylabel("Latency (ms)", fontsize=12)
     plt.title(
-        "Multi-Op Benchmark: p50 and p99 Latency vs Number of Branches",
+        "p50 and p99 Latency vs Number of Branches",
         fontsize=14,
     )
     plt.legend(

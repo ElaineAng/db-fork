@@ -1484,15 +1484,10 @@ if __name__ == "__main__":
             disable=args.no_progress,
         )
 
-        # Partition setup branches among threads for FAN_OUT shape
+        # Partition setup branches among threads
         # Each thread gets exclusive branches to work with
-        is_fan_out = (
-            benchmark_mode == "nth_op_benchmark"
-            and config.nth_op_benchmark.setup.branch_shape
-            == tp.BranchShape.FAN_OUT
-        )
         thread_branch_assignments = {}
-        if is_fan_out and setup_branches and num_threads > 1:
+        if setup_branches and num_threads > 1:
             # Distribute branches evenly among threads
             branches_per_thread = len(setup_branches) // num_threads
             for tid in range(num_threads):
@@ -1504,9 +1499,7 @@ if __name__ == "__main__":
                 thread_branch_assignments[tid] = setup_branches[
                     start_idx:end_idx
                 ]
-            print(
-                f"FAN_OUT mode: {branches_per_thread}+ branches assigned per thread"
-            )
+            print(f"{branches_per_thread}+ branches assigned per thread")
 
         def worker_benchmark(
             thread_id: int, backend_info: BackendInfo, assigned_branches: list
