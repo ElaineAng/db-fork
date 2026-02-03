@@ -301,11 +301,12 @@ def cleanup_backend(
 
 
 def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
-    """Create branches and insert data for Nth operation benchmark setup.
+    """Create branches and perform setup operations for Nth operation benchmark.
 
     This function is called during the setup phase (before measurement) to
     create the required state for measuring the Nth operation. It creates
-    branches according to the specified shape and inserts data on each branch.
+    branches according to the specified shape and performs inserts, updates,
+    and deletes on each branch in a randomized order.
 
     Args:
         config: Task configuration containing nth_op_benchmark settings.
@@ -315,15 +316,18 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
     num_branches = setup.num_branches
     shape = setup.branch_shape
     inserts_per_branch = setup.inserts_per_branch
+    updates_per_branch = setup.updates_per_branch
+    deletes_per_branch = setup.deletes_per_branch
 
     print(
         f"Nth-op setup: Creating {num_branches} branches "
-        f"({'SPINE' if shape == tp.BranchShape.SPINE else 'FAN_OUT'} shape) "
-        f"with {inserts_per_branch} inserts per branch..."
+        f"shape: {shape} "
+        f"with {inserts_per_branch} inserts, {updates_per_branch} updates, "
+        f"{deletes_per_branch} deletes per branch..."
     )
 
-    # Create a temporary BenchmarkSuite for setup operations (not timed).
-    # Use a dummy result collector since we don't want to record setup ops.
+    # Create a temporary BenchmarkSuite for setup operations.
+    # Branch creation is timed and saved to a separate _setup.parquet file.
     setup_result_collector = rc.ResultCollector(
         run_id=f"{config.run_id}_setup",
     )
@@ -338,7 +342,11 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
         branch_manager=setup_branch_manager,
     ) as setup_bench:
         last_branch_name, last_branch_id = setup_bench.setup_nth_op_branches(
-            num_branches, shape, inserts_per_branch
+            num_branches,
+            shape,
+            inserts_per_branch,
+            updates_per_branch,
+            deletes_per_branch,
         )
 
     # Store the last branch info in BackendInfo for measurement phase.
@@ -347,6 +355,11 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
 
     # Get all branches created during setup to pass to worker threads.
     setup_branches = setup_branch_manager.get_all_branches()
+
+    # Save setup timing data to a separate parquet file.
+    setup_result_collector.write_to_parquet(
+        filename=f"{config.run_id}_setup.parquet"
+    )
 
     print(
         f"Nth-op setup complete. Created {num_branches} branches. "
@@ -411,8 +424,12 @@ class SharedBranchManager:
 class SharedProgress:
     """Thread-safe shared progress bar across multiple threads."""
 
-    def __init__(self, total: int, desc: str = "Progress"):
-        self._pbar = tqdm(total=total, desc=desc, position=0, leave=True)
+    def __init__(
+        self, total: int, desc: str = "Progress", disable: bool = False
+    ):
+        self._pbar = tqdm(
+            total=total, desc=desc, position=0, leave=True, disable=disable
+        )
         self._lock = threading.Lock()
         self._count = 0
 
@@ -470,6 +487,8 @@ class BenchmarkSuite:
         self._modified_keys = {}
 
         # List of existing primary keys in the database for the current branch.
+        # Not used currently. Technically we don't need to always re-read the
+        # existing primary keys.
         self._existing_pks = []
 
         # Cache for pk columns.
@@ -668,13 +687,16 @@ class BenchmarkSuite:
             benchmark_table,
             self._pk_columns,
         )
+        # Cache the fetched PKs for subsequent operations.
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
 
         selected_key = None
-        if not existing_pks or (
+        read_from_modified = (
             self._modified_keys.get(cur_branch_id) and rnd.random() < 0.5
-        ):
-            if self._modified_keys.get(cur_branch_id):
-                selected_key = rnd.choice(self._modified_keys[cur_branch_id])
+        )
+        if read_from_modified:
+            selected_key = rnd.choice(self._modified_keys[cur_branch_id])
         else:
             selected_key = rnd.choice(existing_pks)
 
@@ -697,7 +719,9 @@ class BenchmarkSuite:
         self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the read.
-        self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        res = self.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        if not res:
+            raise ValueError("Read failed, do nothing")
 
     def maybe_load_pk_columns(self, benchmark_table):
         if not self._pk_columns:
@@ -742,13 +766,24 @@ class BenchmarkSuite:
             except Exception:
                 continue
 
-    def update_op(self, rnd, benchmark_table) -> None:
+    def update_op(self, rnd, benchmark_table, timed: bool = True) -> None:
+        """Update a random row in the table.
+
+        Args:
+            rnd: Random instance for selecting keys.
+            benchmark_table: Table to update.
+            timed: If True, record timing metrics; if False, skip timing (setup phase).
+        """
         cur_branch_id, key_to_update = self._select_random_key(
             rnd, benchmark_table
         )
 
         if not key_to_update:
-            raise ValueError("No existing keys found during update, do nothing")
+            if timed:
+                raise ValueError(
+                    "No existing keys found during update, do nothing"
+                )
+            return  # Silently skip during setup
 
         # Get all columns and filter out PK columns to get updatable columns.
         all_columns = dbh.get_all_columns(
@@ -759,7 +794,9 @@ class BenchmarkSuite:
         ]
 
         if not non_pk_columns:
-            raise ValueError("No non-PK columns to update")
+            if timed:
+                raise ValueError("No non-PK columns to update")
+            return  # Silently skip during setup
 
         # Generate new values for non-PK columns.
         row_data = self._table_datagen.generate_row()
@@ -781,16 +818,17 @@ class BenchmarkSuite:
             row_data[pk_col] = key_to_update[i]
 
         # Update only touches a single key.
-        self.db_tools.result_collector.record_num_keys_touched(1)
+        if timed:
+            self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the update.
-        self.db_tools.execute_sql(update_sql, row_data, timed=True)
+        self.db_tools.execute_sql(update_sql, row_data, timed=timed)
         # Track the modified key.
         if key_to_update not in self._modified_keys.get(cur_branch_id, []):
             self._modified_keys.setdefault(cur_branch_id, []).append(
                 key_to_update
             )
-        if not self.db_tools.autocommit:
+        if timed and not self.db_tools.autocommit:
             self.db_tools.commit_changes(timed=True, message="update")
 
     def range_update_op(self, rnd, benchmark_table) -> None:
@@ -811,18 +849,115 @@ class BenchmarkSuite:
         """
         _, cur_branch_id = self.db_tools.get_current_branch()
 
+        # Get range query components from helper.
+        range_info = self._prepare_range_query(
+            rnd, benchmark_table, "range update"
+        )
+
+        # Get all columns and filter out PK columns for the SET clause.
+        all_columns = dbh.get_all_columns(
+            self.db_tools.get_current_connection(), benchmark_table
+        )
+        non_pk_columns = [
+            col for col in all_columns if col not in self._pk_columns
+        ]
+
+        if not non_pk_columns:
+            raise ValueError("No non-PK columns to update")
+
+        # Generate new values for non-PK columns.
+        row_data = self._table_datagen.generate_row()
+
+        # Build the SET clause for non-PK columns.
+        set_clause = ", ".join([f"{col} = %({col})s" for col in non_pk_columns])
+
+        # Add range params to row_data.
+        row_data.update(range_info["params"])
+
+        update_sql = f"UPDATE {benchmark_table} SET {set_clause} WHERE {range_info['where_clause']};"
+
+        # Record the accurate number of keys touched.
+        self.db_tools.result_collector.record_num_keys_touched(
+            len(range_info["keys_in_range"])
+        )
+
+        # Run the range update.
+        self.db_tools.execute_sql(update_sql, row_data, timed=True)
+
+        # Track all actual keys in the range as modified.
+        modified_list = self._modified_keys.setdefault(cur_branch_id, [])
+        for key in range_info["keys_in_range"]:
+            if key not in modified_list:
+                modified_list.append(key)
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=True, message="range update")
+        return len(range_info["keys_in_range"])
+
+    def range_read_op(self, rnd, benchmark_table) -> int:
+        """Perform a range read on multiple rows.
+
+        Selects two random keys to bound the range. The number of rows between
+        the two keys is approximately config.range_update_config.range_size.
+
+        Uses the first PK column for the range condition. Note that for tables
+        with composite primary keys, the actual number of rows read may exceed
+        the specified range size since we only constrain the first PK column.
+
+        Args:
+            rnd: Random module or object with random() and choice() methods.
+            benchmark_table: Table to read from.
+
+        Returns:
+            The actual number of rows read, or 0 if the read failed.
+        """
+        # Get range query components from helper.
+        range_info = self._prepare_range_query(
+            rnd, benchmark_table, "range read"
+        )
+
+        select_sql = f"SELECT * FROM {benchmark_table} WHERE {range_info['where_clause']};"
+
+        # Record the accurate number of keys touched.
+        self.db_tools.result_collector.record_num_keys_touched(
+            len(range_info["keys_in_range"])
+        )
+
+        # Run the range read.
+        self.db_tools.execute_sql(select_sql, range_info["params"], timed=True)
+
+        return len(range_info["keys_in_range"])
+
+    def _prepare_range_query(
+        self, rnd, benchmark_table: str, operation_name: str
+    ) -> dict:
+        """Prepare common components for range queries (read or update).
+
+        Args:
+            rnd: Random module or object with random() and choice() methods.
+            benchmark_table: Table to query.
+            operation_name: Name of operation for error messages.
+
+        Returns:
+            Dictionary with:
+                - keys_in_range: List of PK tuples in the selected range.
+                - where_clause: SQL WHERE clause for the range.
+                - params: Dictionary of query parameters for the range bounds.
+        """
         self.maybe_load_pk_columns(benchmark_table)
 
         # Get all PK values sorted by all PK columns to determine range bounds.
-        existing_pks = dbh.get_pk_values(
+        existing_pks = self._existing_pks or dbh.get_pk_values(
             self.db_tools.get_current_connection(),
             benchmark_table,
             self._pk_columns,
         )
+        # Cache the fetched PKs for subsequent operations.
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
 
         if not existing_pks:
             raise ValueError(
-                "No existing keys found during range update, do nothing"
+                f"No existing keys found during {operation_name}, do nothing"
             )
 
         # Sort by all PK columns (tuple comparison).
@@ -855,76 +990,52 @@ class BenchmarkSuite:
         )
 
         # Build params dict for the range bounds.
-        range_params = {}
+        params = {}
         for i, val in enumerate(start_key):
-            range_params[f"_start_{i}"] = val
+            params[f"_start_{i}"] = val
         for i, val in enumerate(end_key):
-            range_params[f"_end_{i}"] = val
-
-        # Get all columns and filter out PK columns for the SET clause.
-        all_columns = dbh.get_all_columns(
-            self.db_tools.get_current_connection(), benchmark_table
-        )
-        non_pk_columns = [
-            col for col in all_columns if col not in self._pk_columns
-        ]
-
-        if not non_pk_columns:
-            raise ValueError("No non-PK columns to update")
-
-        # Generate new values for non-PK columns.
-        row_data = self._table_datagen.generate_row()
-
-        # Build the SET clause for non-PK columns.
-        set_clause = ", ".join([f"{col} = %({col})s" for col in non_pk_columns])
+            params[f"_end_{i}"] = val
 
         # Build WHERE clause using tuple comparison on all PK columns.
         where_clause = f"{pk_tuple_sql} >= ({placeholders_start}) AND {pk_tuple_sql} <= ({placeholders_end})"
 
-        # Add range params to row_data.
-        row_data.update(range_params)
-
-        update_sql = (
-            f"UPDATE {benchmark_table} SET {set_clause} WHERE {where_clause};"
-        )
-
-        # Record the accurate number of keys touched.
-        self.db_tools.result_collector.record_num_keys_touched(
-            len(keys_in_range)
-        )
-
-        # Run the range update.
-        self.db_tools.execute_sql(update_sql, row_data, timed=True)
-
-        # Track all actual keys in the range as modified.
-        modified_list = self._modified_keys.setdefault(cur_branch_id, [])
-        for key in keys_in_range:
-            if key not in modified_list:
-                modified_list.append(key)
-        if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True, message="range update")
-        return len(keys_in_range)
+        return {
+            "keys_in_range": keys_in_range,
+            "where_clause": where_clause,
+            "params": params,
+        }
 
     def setup_nth_op_branches(
-        self, num_branches: int, shape: tp.BranchShape, inserts_per_branch: int
+        self,
+        num_branches: int,
+        shape: tp.BranchShape,
+        inserts_per_branch: int,
+        updates_per_branch: int = 0,
+        deletes_per_branch: int = 0,
     ):
         """Setup branches and data for Nth operation measurement.
 
         Creates the specified number of branches according to the shape pattern
-        and inserts data on each branch. This is run during setup (not timed).
+        and performs inserts, updates, and deletes on each branch. Operations
+        are executed in a randomized order based on the seed.
 
         Args:
             num_branches: Number of branches to create.
             shape: SPINE (linear chain) or FAN_OUT (all from root).
             inserts_per_branch: Number of inserts per branch.
+            updates_per_branch: Number of updates per branch.
+            deletes_per_branch: Number of deletes per branch.
         """
+        # Initialize RNG with seed for reproducible operation ordering.
+        rnd = random.Random(self._seed)
+
         # Initialize datagen for inserts.
         benchmark_table = self._config.table_name
         if not benchmark_table:
             all_tables = dbh.get_all_tables(
                 self.db_tools.get_current_connection()
             )
-            benchmark_table = random.choice(all_tables)
+            benchmark_table = rnd.choice(all_tables)
 
         table_schema = self.db_tools.get_table_schema(benchmark_table)
         if not table_schema:
@@ -943,14 +1054,23 @@ class BenchmarkSuite:
         _, current_parent_id = self.db_tools.get_current_branch()
         root_branch_id = current_parent_id
 
-        print(f"Inserting {inserts_per_branch} rows on root branch...")
-        # Insert data on root branch (untimed).
-        for _ in tqdm(range(inserts_per_branch)):
-            self._insert_without_timing(benchmark_table, col_names)
+        # Track branch IDs for BUSHY shape (random parent selection).
+        branch_ids = [(self._root_branch_name, root_branch_id)]
 
-        # Commit all inserts together
-        if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=False, message="insert")
+        # Perform setup operations on root branch.
+        print(
+            f"Performing setup ops on root branch: "
+            f"{inserts_per_branch} inserts, {updates_per_branch} updates, "
+            f"{deletes_per_branch} deletes..."
+        )
+        self._perform_branch_setup_ops(
+            rnd,
+            benchmark_table,
+            col_names,
+            inserts_per_branch,
+            updates_per_branch,
+            deletes_per_branch,
+        )
 
         for i in tqdm(range(num_branches)):
             branch_name = f"setup_branch_{i + 1}"
@@ -958,24 +1078,36 @@ class BenchmarkSuite:
             if shape == tp.BranchShape.SPINE:
                 # Linear: branch from current
                 self.db_tools.create_branch(
-                    branch_name, current_parent_id, timed=False
+                    branch_name, current_parent_id, timed=True
                 )
                 self.db_tools.connect_branch(branch_name, timed=False)
                 _, current_parent_id = self.db_tools.get_current_branch()
-            else:  # FAN_OUT
+                branch_ids.append((branch_name, current_parent_id))
+            elif shape == tp.BranchShape.FAN_OUT:
                 # Fan-out: always branch from root
                 self.db_tools.create_branch(
-                    branch_name, root_branch_id, timed=False
+                    branch_name, root_branch_id, timed=True
                 )
                 self.db_tools.connect_branch(branch_name, timed=False)
+                _, new_branch_id = self.db_tools.get_current_branch()
+                branch_ids.append((branch_name, new_branch_id))
+            else:  # BUSHY
+                # Bushy: branch from a random existing branch
+                parent_name, parent_id = rnd.choice(branch_ids)
+                self.db_tools.create_branch(branch_name, parent_id, timed=True)
+                self.db_tools.connect_branch(branch_name, timed=False)
+                _, new_branch_id = self.db_tools.get_current_branch()
+                branch_ids.append((branch_name, new_branch_id))
 
-            # Insert data on this branch (untimed).
-            for _ in range(inserts_per_branch):
-                self._insert_without_timing(benchmark_table, col_names)
-
-            # Commit all inserts together
-            if not self.db_tools.autocommit:
-                self.db_tools.commit_changes(timed=False, message="insert")
+            # Perform setup operations on this branch.
+            self._perform_branch_setup_ops(
+                rnd,
+                benchmark_table,
+                col_names,
+                inserts_per_branch,
+                updates_per_branch,
+                deletes_per_branch,
+            )
 
             self._add_branch(branch_name)
 
@@ -984,10 +1116,58 @@ class BenchmarkSuite:
 
         print(
             f"Setup complete: {num_branches} branches created, "
-            f"{inserts_per_branch} inserts per branch."
+            f"{inserts_per_branch} inserts, {updates_per_branch} updates, "
+            f"{deletes_per_branch} deletes per branch."
         )
 
         return last_branch_name, last_branch_id
+
+    def _perform_branch_setup_ops(
+        self,
+        rnd: random.Random,
+        benchmark_table: str,
+        col_names: list,
+        inserts: int,
+        updates: int,
+        deletes: int,
+    ):
+        """Perform inserts, updates, and deletes on the current branch during setup.
+
+        Inserts are performed first to ensure there is data to update/delete.
+        Then updates and deletes are shuffled and performed in random order.
+
+        Args:
+            rnd: Random instance for shuffling operations.
+            benchmark_table: Table to operate on.
+            col_names: Column names for the table.
+            inserts: Number of inserts to perform.
+            updates: Number of updates to perform.
+            deletes: Number of deletes to perform.
+        """
+        # First, perform all inserts to ensure we have data.
+        for _ in range(inserts):
+            self._insert_without_timing(benchmark_table, col_names)
+
+        # Commit inserts if not autocommit.
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=False, message="setup_inserts")
+
+        # Build a shuffled list of updates and deletes.
+        ops = ["update"] * updates + ["delete"] * deletes
+        rnd.shuffle(ops)
+
+        # Perform updates and deletes in random order.
+        for op in ops:
+            if op == "update":
+                self.update_op(rnd, benchmark_table, timed=False)
+            else:  # delete
+                self._delete_without_timing(rnd, benchmark_table)
+
+        # Commit updates/deletes if not autocommit.
+        if not self.db_tools.autocommit and (updates > 0 or deletes > 0):
+            self.db_tools.commit_changes(
+                timed=False, message="setup_updates_deletes"
+            )
 
     def _insert_without_timing(self, benchmark_table: str, col_names: list):
         """Insert a row without timing (used during setup phase)."""
@@ -1013,6 +1193,33 @@ class BenchmarkSuite:
                 error_msg = str(e)
                 continue
         assert inserted, f"Failed to insert row: {error_msg}"
+
+    def _delete_without_timing(
+        self, rnd: random.Random, benchmark_table: str
+    ) -> None:
+        """Delete a random row without timing (used during setup phase)."""
+        cur_branch_id, key_to_delete = self._select_random_key(
+            rnd, benchmark_table
+        )
+
+        if not key_to_delete:
+            # No keys to delete, skip this operation
+            return
+
+        # Build the WHERE clause using PK columns.
+        where_clause = " AND ".join(
+            [f"{pk_name} = %s" for pk_name in self._pk_columns]
+        )
+
+        delete_sql = f"DELETE FROM {benchmark_table} WHERE {where_clause};"
+
+        # Run the delete without timing.
+        self.db_tools.execute_sql(delete_sql, key_to_delete, timed=False)
+
+        # Remove the key from modified_keys if present.
+        if cur_branch_id in self._modified_keys:
+            if key_to_delete in self._modified_keys[cur_branch_id]:
+                self._modified_keys[cur_branch_id].remove(key_to_delete)
 
     def run_nth_op_benchmark(self):
         """Measure the cost of a single Nth operation.
@@ -1077,6 +1284,8 @@ class BenchmarkSuite:
                 self.update_op(rnd, benchmark_table)
             elif op == tp.OperationType.RANGE_UPDATE:
                 self.range_update_op(rnd, benchmark_table)
+            elif op == tp.OperationType.RANGE_READ:
+                self.range_read_op(rnd, benchmark_table)
             elif op == tp.OperationType.CONNECT:
                 self.connect_to_branch(rnd)
 
@@ -1165,6 +1374,8 @@ class BenchmarkSuite:
                     self.update_op(rnd, benchmark_table)
                 elif cur_ops == tp.OperationType.RANGE_UPDATE:
                     self.range_update_op(rnd, benchmark_table)
+                elif cur_ops == tp.OperationType.RANGE_READ:
+                    self.range_read_op(rnd, benchmark_table)
             except Exception as e:
                 msg = f"[Thread {self._thread_id}] Error performing operation: {e}"
                 if use_shared_progress:
@@ -1207,6 +1418,11 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Random seed for reproducible benchmark operations. If not specified, uses current timestamp.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bar (useful for running in background/tmux).",
     )
 
     args = parser.parse_args()
@@ -1286,18 +1502,15 @@ if __name__ == "__main__":
 
         # Create shared progress bar for all threads
         shared_progress = SharedProgress(
-            total=total_ops, desc=f"Benchmark ({num_threads} threads)"
+            total=total_ops,
+            desc=f"Benchmark ({num_threads} threads)",
+            disable=args.no_progress,
         )
 
-        # Partition setup branches among threads for FAN_OUT shape
+        # Partition setup branches among threads
         # Each thread gets exclusive branches to work with
-        is_fan_out = (
-            benchmark_mode == "nth_op_benchmark"
-            and config.nth_op_benchmark.setup.branch_shape
-            == tp.BranchShape.FAN_OUT
-        )
         thread_branch_assignments = {}
-        if is_fan_out and setup_branches and num_threads > 1:
+        if setup_branches and num_threads > 1:
             # Distribute branches evenly among threads
             branches_per_thread = len(setup_branches) // num_threads
             for tid in range(num_threads):
@@ -1309,9 +1522,7 @@ if __name__ == "__main__":
                 thread_branch_assignments[tid] = setup_branches[
                     start_idx:end_idx
                 ]
-            print(
-                f"FAN_OUT mode: {branches_per_thread}+ branches assigned per thread"
-            )
+            print(f"{branches_per_thread}+ branches assigned per thread")
 
         def worker_benchmark(
             thread_id: int, backend_info: BackendInfo, assigned_branches: list
