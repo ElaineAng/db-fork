@@ -99,12 +99,12 @@ class FileCopyToolSuite(DBToolSuite):
         cur = None
         main_branch = info.branches[0] if len(info.branches) > 0 else None
         try:
-            FileCopyInfo.change_file_copy_method(info.old_file_copy_method)
+            FileCopyToolSuite.FileCopyInfo.change_file_copy_method(info.old_file_copy_method)
             uri = FileCopyToolSuite.get_default_connection_uri()
             conn = psycopg2.connect(uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
-            for branch in shared_branches:
+            for branch in info.branches:
                 cur.execute(f"DROP DATABASE IF EXISTS {branch};")
             if main_branch:
                 print(f"Database '{main_branch}' deleted successfully.")
@@ -167,7 +167,7 @@ class FileCopyToolSuite(DBToolSuite):
     class FileCopyInfo:
         def __init__(self):
             self.branches = deque()
-            self.old_file_copy_method = FileCopyInfo.change_file_copy_method("clone")
+            self.old_file_copy_method = FileCopyToolSuite.FileCopyInfo.change_file_copy_method("clone")
 
         @classmethod
         def change_file_copy_method(cls, method: str) -> str:
@@ -177,14 +177,17 @@ class FileCopyToolSuite(DBToolSuite):
             uri = FileCopyToolSuite.get_default_connection_uri()
             try:
                 conn = psycopg2.connect(uri)
+                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
                 cur = conn.cursor()
-                res = cur.execute("SHOW file_copy_method;")
-                prev_mode = res[0][0]
+                cur.execute("SHOW file_copy_method;")
+                res = cur.fetchone()
+                prev_mode = res[0]
                 cur.execute(f"ALTER SYSTEM SET file_copy_method = '{method}';")
                 cur.execute("SELECT pg_reload_conf();")
+                print(f"Changed file copy method to {method}")
                 return prev_mode
             except Exception as e:
-                print("Error changing file copy method: {e}")
+                print(f"Error changing file copy method: {e}")
             finally:
                 if cur:
                     cur.close()
