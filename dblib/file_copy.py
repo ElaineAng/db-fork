@@ -72,10 +72,6 @@ class FileCopyToolSuite(DBToolSuite):
         self.autocommit = autocommit
         self.shared_branches = shared_branches
 
-        # TODO do we need to change back to old method?
-        #self.old_file_copy_method = self.change_file_copy_method("clone")
-        self.change_file_copy_method("clone")
-
         cmd = "SELECT CURRENT_DATABASE();"
         res = super().execute_sql(cmd)
 
@@ -91,26 +87,19 @@ class FileCopyToolSuite(DBToolSuite):
             self._create_branch_impl(default_branch_name, self.current_branch_name)
             self._connect_branch_impl(default_branch_name)
 
-    def change_file_copy_method(self, method: str) -> str:
-        """Changes file_copy_method and returns old method"""
-        res = super().execute_sql("SHOW file_copy_method;")
-        prev_mode = res[0][0]
-        super().execute_sql(f"ALTER SYSTEM SET file_copy_method = '{method}';")
-        super().execute_sql("SELECT pg_reload_conf();")
-        return prev_mode
-
 
     def get_uri_for_db_setup(self) -> str:
         """Returns the connection URI for database setup operations (e.g., PGSQL)."""
         return self._connection_uri
 
     @classmethod
-    def cleanup(cls, shared_branches: deque):
+    def cleanup(cls, info):
         # TODO change file_copy_method back to copy?
         conn = None
         cur = None
-        main_branch = shared_branches[0] if len(shared_branches) > 0 else None
+        main_branch = info.branches[0] if len(info.branches) > 0 else None
         try:
+            FileCopyInfo.change_file_copy_method(info.old_file_copy_method)
             uri = FileCopyToolSuite.get_default_connection_uri()
             conn = psycopg2.connect(uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -175,3 +164,29 @@ class FileCopyToolSuite(DBToolSuite):
         # work correctly with the way the API is called in runner.py
         return (self.current_branch_name, self.current_branch_name)
 
+    class FileCopyInfo:
+        def __init__(self):
+            self.branches = deque()
+            self.old_file_copy_method = FileCopyInfo.change_file_copy_method("clone")
+
+        @classmethod
+        def change_file_copy_method(cls, method: str) -> str:
+            """Changes file_copy_method and returns old method"""
+            conn = None
+            cur = None
+            uri = FileCopyToolSuite.get_default_connection_uri()
+            try:
+                conn = psycopg2.connect(uri)
+                cur = conn.cursor()
+                res = cur.execute("SHOW file_copy_method;")
+                prev_mode = res[0][0]
+                cur.execute(f"ALTER SYSTEM SET file_copy_method = '{method}';")
+                cur.execute("SELECT pg_reload_conf();")
+                return prev_mode
+            except Exception as e:
+                print("Error changing file copy method: {e}")
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
