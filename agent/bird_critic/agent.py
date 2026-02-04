@@ -1,7 +1,6 @@
 """BIRD-Critic SQL debugging agent using LangGraph ReAct pattern."""
 
-import os
-from typing import Annotated, Any
+from typing import Annotated
 
 from dotenv import load_dotenv
 from langchain.tools import tool
@@ -12,17 +11,29 @@ from langgraph.prebuilt import create_react_agent
 from .data_loader import BirdCriticProblem
 from .db_utils import DatabaseManager
 
+# Import DBToolSuite for branching operations
+from dblib.db_api import DBToolSuite
+
 load_dotenv()
 
 
-# Global database manager (set by the agent)
+# Global database manager (set by the agent) - for simple SQL operations
 _db_manager: DatabaseManager | None = None
+
+# Global DBToolSuite (set by the agent) - for branching operations
+_db_tools: DBToolSuite | None = None
 
 
 def set_db_manager(manager: DatabaseManager) -> None:
     """Set the global database manager for tools."""
     global _db_manager
     _db_manager = manager
+
+
+def set_db_tools(db_tools: DBToolSuite) -> None:
+    """Set the global DBToolSuite for branching tools."""
+    global _db_tools
+    _db_tools = db_tools
 
 
 @tool
@@ -125,7 +136,142 @@ def get_sample_rows(
     return output
 
 
-SYSTEM_PROMPT = """You are an expert SQL debugging assistant. Your task is to fix buggy SQL queries.
+# =============================================================================
+# DBToolSuite Tools (for branching operations)
+# =============================================================================
+
+
+@tool
+def create_branch(
+    branch_name: Annotated[str, "Name of the new branch to create"],
+    parent_id: Annotated[str, "ID of the parent branch (optional)"] = None,
+) -> str:
+    """Create a new database branch.
+
+    Use this to create a new branch from the current branch or a specified parent.
+    Branches allow you to make isolated changes that can be committed or discarded.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        _db_tools.create_branch(branch_name, parent_id, timed=False)
+        return f"Successfully created branch '{branch_name}'"
+    except Exception as e:
+        return f"Error creating branch: {e}"
+
+
+@tool
+def connect_branch(
+    branch_name: Annotated[str, "Name of the branch to connect to"],
+) -> str:
+    """Connect to an existing database branch.
+
+    Use this to switch to a different branch. All subsequent SQL operations
+    will be executed on the connected branch.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        _db_tools.connect_branch(branch_name, timed=False)
+        return f"Successfully connected to branch '{branch_name}'"
+    except Exception as e:
+        return f"Error connecting to branch: {e}"
+
+
+@tool
+def get_current_branch() -> str:
+    """Get information about the current branch.
+
+    Returns the current branch name and ID.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        branch_name, branch_id = _db_tools.get_current_branch()
+        return f"Current branch: {branch_name} (ID: {branch_id})"
+    except Exception as e:
+        return f"Error getting current branch: {e}"
+
+
+@tool
+def commit_changes(
+    message: Annotated[str, "Commit message describing the changes"] = "",
+) -> str:
+    """Commit pending changes to the current branch.
+
+    Use this after making INSERT/UPDATE/DELETE operations to persist the changes.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        _db_tools.commit_changes(timed=False, message=message)
+        return (
+            f"Successfully committed changes{': ' + message if message else ''}"
+        )
+    except Exception as e:
+        return f"Error committing changes: {e}"
+
+
+@tool
+def execute_sql_branched(
+    sql: Annotated[str, "The SQL query to execute"],
+) -> str:
+    """Execute a SQL query using DBToolSuite (on the current branch).
+
+    Similar to execute_sql, but uses the branching-enabled DBToolSuite.
+    Use this when working with branches.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        result = _db_tools.execute_sql(sql, timed=False)
+
+        if result is None:
+            return "Query executed successfully. No rows returned."
+
+        if not result:
+            return "Query executed successfully. Empty result set."
+
+        # Limit output
+        max_rows = 20
+        output = (
+            f"Rows ({min(len(result), max_rows)} of {len(result)} shown):\n"
+        )
+        for row in result[:max_rows]:
+            output += f"  {row}\n"
+
+        return output
+    except Exception as e:
+        return f"SQL Error: {e}"
+
+
+@tool
+def get_table_schema_branched(
+    table_name: Annotated[str, "Name of the table to get schema for"],
+) -> str:
+    """Get the CREATE TABLE statement using DBToolSuite (on the current branch).
+
+    Use this when working with branches to get table schema.
+    """
+    if not _db_tools:
+        return "Error: No DBToolSuite available (branching not supported)"
+
+    try:
+        schema = _db_tools.get_table_schema(table_name)
+        return schema if schema else f"Table '{table_name}' not found"
+    except Exception as e:
+        return f"Error getting table schema: {e}"
+
+
+# System prompt templates - built dynamically based on available tools
+
+# Basic SQL prompt - straightforward debugging
+SYSTEM_PROMPT_BASIC = """You are an expert SQL debugging assistant. Your task is to fix buggy SQL queries.
 
 You will be given:
 1. A natural language description of what the user wants to achieve
@@ -156,6 +302,96 @@ CORRECTED_SQL:
 <your corrected SQL here>
 ```
 """
+
+# Branching prompt - encourages exploration with multiple strategies
+SYSTEM_PROMPT_BRANCHING = """You are an expert SQL debugging assistant with access to database branching capabilities.
+Your task is to fix buggy SQL queries by exploring multiple strategies.
+
+You will be given:
+1. A natural language description of what the user wants to achieve
+2. A buggy SQL query that needs to be fixed
+
+## Key Capability: Branch-Based Exploration
+You can create isolated database branches to try different fix strategies WITHOUT affecting the main database.
+This allows you to:
+- Test multiple approaches in parallel
+- Make destructive changes safely (they're isolated to the branch)
+- Compare results from different strategies
+- Pick the best solution after exploration
+
+## Available Tools:
+- execute_sql_branched: Run SQL queries on the current branch
+- get_table_schema_branched: Get the CREATE TABLE statement for a table
+- create_branch: Create a new database branch for isolated changes
+- connect_branch: Switch to a different branch
+- get_current_branch: Get information about the current branch
+- commit_changes: Commit pending changes so child branches can see them
+
+## Recommended Exploration Strategy:
+1. **Understand the problem**: List tables, examine schemas, understand the buggy query
+2. **Identify potential approaches**: Think about 2-3 different ways to fix the query
+3. **Create exploration branches**: For each approach, create a separate branch
+   - Example: `create_branch("approach_1_join_fix")`, `create_branch("approach_2_subquery")`
+4. **Test each approach**: Switch to each branch and test your fix
+5. **Compare results**: Evaluate which approach works best
+6. **Return the best solution**: Pick the query that correctly achieves the user's goal
+
+## Example Workflow:
+```
+1. get_table_schema_branched("users")  # Understand schema
+2. create_branch("fix_v1_inner_join")  # Try approach 1
+3. execute_sql_branched("SELECT ... INNER JOIN ...")  # Test it
+4. connect_branch("main")  # Go back to main
+5. create_branch("fix_v2_subquery")  # Try approach 2
+6. execute_sql_branched("SELECT ... WHERE id IN (SELECT ...)")  # Test it
+7. Compare results and pick the best one
+```
+
+When you have the final corrected SQL, respond with:
+CORRECTED_SQL:
+```sql
+<your corrected SQL here>
+```
+"""
+
+BASIC_SQL_TOOLS_DESCRIPTION = """
+- execute_sql: Run SQL queries to test them
+- get_table_schema: Get the CREATE TABLE statement for a table
+- list_tables: List all available tables
+- get_sample_rows: See example data from a table
+"""
+
+BRANCHING_TOOLS_DESCRIPTION = """
+- execute_sql_branched: Run SQL queries on the current branch
+- get_table_schema_branched: Get the CREATE TABLE statement for a table
+- create_branch: Create a new database branch for isolated changes
+- connect_branch: Switch to a different branch
+- get_current_branch: Get information about the current branch
+- commit_changes: Commit pending changes to the current branch so that it can be accessed by child branches
+"""
+
+
+def build_system_prompt(use_db_manager: bool, use_db_tools: bool) -> str:
+    """Build the system prompt based on which tools are configured.
+
+    Args:
+        use_db_manager: Whether DatabaseManager (basic SQL) tools are available.
+        use_db_tools: Whether DBToolSuite (branching) tools are available.
+
+    Returns:
+        The complete system prompt with appropriate tool descriptions.
+    """
+    if use_db_manager and not use_db_tools:
+        # Basic mode - straightforward debugging
+        return SYSTEM_PROMPT_BASIC
+    elif use_db_tools and not use_db_manager:
+        # Branching mode - exploration with multiple strategies
+        return SYSTEM_PROMPT_BRANCHING
+    elif use_db_manager and use_db_tools:
+        # Both available - use branching prompt (more powerful)
+        return SYSTEM_PROMPT_BRANCHING
+    else:
+        return "No tools available."
 
 
 def create_llm(model_name: str) -> BaseChatModel:
@@ -206,31 +442,69 @@ class BirdCriticAgent:
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
+        db_manager: DatabaseManager = None,
+        db_tools: DBToolSuite = None,
         model_name: str = "gemini-2.0-flash",
         max_iterations: int = 10,
     ):
         """Initialize the agent.
 
         Args:
-            db_manager: Database manager for executing queries.
+            db_manager: Database manager for simple SQL operations (optional).
+            db_tools: DBToolSuite for branching operations (optional).
+                      At least one of db_manager or db_tools must be provided.
             model_name: Name of the LLM model to use.
             max_iterations: Maximum number of agent iterations.
         """
+        if not db_manager and not db_tools:
+            raise ValueError(
+                "At least one of db_manager or db_tools must be provided"
+            )
+
         self.db_manager = db_manager
+        self.db_tools = db_tools
         self.model_name = model_name
         self.max_iterations = max_iterations
 
         # Set global db manager for tools
-        set_db_manager(db_manager)
+        if db_manager:
+            set_db_manager(db_manager)
 
-        # Create tools list
-        self.tools = [
-            execute_sql,
-            get_table_schema,
-            list_tables,
-            get_sample_rows,
-        ]
+        # Set global db tools for branching tools
+        if db_tools:
+            set_db_tools(db_tools)
+
+        # Create tools list based on what's available
+        self.tools = []
+
+        if db_manager:
+            # Add DatabaseManager-based tools
+            self.tools.extend(
+                [
+                    execute_sql,
+                    get_table_schema,
+                    list_tables,
+                    get_sample_rows,
+                ]
+            )
+
+        if db_tools:
+            # Add DBToolSuite-based tools (branching + SQL)
+            self.tools.extend(
+                [
+                    execute_sql_branched,
+                    get_table_schema_branched,
+                    create_branch,
+                    connect_branch,
+                    get_current_branch,
+                    commit_changes,
+                ]
+            )
+
+        # Build system prompt based on which tools are available
+        self.system_prompt = build_system_prompt(
+            use_db_manager=bool(db_manager), use_db_tools=bool(db_tools)
+        )
 
         # Create the LLM (supports OpenAI, Gemini, Claude)
         self.llm = create_llm(model_name)
@@ -253,7 +527,7 @@ class BirdCriticAgent:
         """
         # Run preprocessing SQL if needed
         if problem.preprocess_sql:
-            self.db_manager.run_preprocess_sql(problem.preprocess_sql)
+            self._run_setup_sql(problem.preprocess_sql, "preprocess")
 
         # Build the user message
         user_message = f"""Please fix the following buggy SQL query.
@@ -271,7 +545,7 @@ Analyze the query, explore the database schema if needed, and provide a correcte
 
         # Run the agent
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=self.system_prompt),
             HumanMessage(content=user_message),
         ]
 
@@ -281,26 +555,32 @@ Analyze the query, explore the database schema if needed, and provide a correcte
                 {"recursion_limit": self.max_iterations},
             )
 
-            # Print trajectory summary (always)
-            tool_calls = []
-            iterations = 0
+            # Print detailed trajectory
+            print("    Agent trajectory:")
+            step_num = 0
             for msg in result["messages"]:
-                iterations += 1
-                # Check for tool calls in the message
+                msg_type = type(msg).__name__
+
+                # AI messages with tool calls
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
+                        step_num += 1
                         tool_name = tc.get("name", "unknown")
-                        tool_calls.append(tool_name)
-                # Check for AIMessage with tool_calls
-                elif hasattr(msg, "additional_kwargs"):
-                    tcs = msg.additional_kwargs.get("tool_calls", [])
-                    for tc in tcs:
-                        func = tc.get("function", {})
-                        tool_calls.append(func.get("name", "unknown"))
+                        tool_args = tc.get("args", {})
+                        # Truncate long args
+                        args_str = str(tool_args)
+                        if len(args_str) > 100:
+                            args_str = args_str[:100] + "..."
+                        print(f"      [{step_num}] {tool_name}({args_str})")
 
-            print(
-                f"    Agent: {iterations} steps, {len(tool_calls)} tool calls: {tool_calls}"
-            )
+                # Tool response messages
+                elif msg_type == "ToolMessage":
+                    content = str(msg.content) if msg.content else ""
+                    # # Truncate long results
+                    # if len(content) > 150:
+                    #     content = content[:150] + "..."
+                    content = content.replace("\n", " ")
+                    print(f"          → {content}")
 
             if verbose:
                 for msg in result["messages"]:
@@ -323,7 +603,38 @@ Analyze the query, explore the database schema if needed, and provide a correcte
         finally:
             # Run cleanup SQL if needed
             if problem.clean_up_sql:
-                self.db_manager.run_cleanup_sql(problem.clean_up_sql)
+                self._run_setup_sql(problem.clean_up_sql, "cleanup")
+
+    def _run_setup_sql(self, sql: str, phase: str) -> bool:
+        """Run preprocess or cleanup SQL using available database interface.
+
+        Args:
+            sql: SQL statements to execute (may be semicolon-separated).
+            phase: Either "preprocess" or "cleanup" for error messages.
+
+        Returns:
+            True if all statements succeeded.
+        """
+        if not sql:
+            return True
+
+        # Split by semicolons and execute each statement
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+
+        for stmt in statements:
+            try:
+                if self.db_manager:
+                    success, _, error = self.db_manager.execute_sql(stmt)
+                    if not success:
+                        print(f"    {phase.capitalize()} SQL failed: {error}")
+                        return False
+                elif self.db_tools:
+                    self.db_tools.execute_sql(stmt, timed=False)
+            except Exception as e:
+                print(f"    {phase.capitalize()} SQL failed: {e}")
+                return False
+
+        return True
 
     def _extract_sql(self, text: str) -> str:
         """Extract SQL from the agent's response.

@@ -90,7 +90,7 @@ class DoltToolSuite(DBToolSuite):
 
     def _prepare_commit(self, message: str = "") -> None:
         try:
-            cmd = "SELECT dolt_add('.');"
+            cmd = "SELECT dolt_add('-A');"
             super().execute_sql(cmd)
             cmd = f"SELECT dolt_commit('-m', '{message}');"
             super().execute_sql(cmd)
@@ -102,7 +102,9 @@ class DoltToolSuite(DBToolSuite):
         """
         Creates a new branch in the Dolt database.
         """
-        self._connect_branch_impl(parent_id)
+        # Only checkout to parent if specified, otherwise create from current branch
+        if parent_id:
+            self._connect_branch_impl(parent_id)
         cmd = f"SELECT dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
 

@@ -1,16 +1,17 @@
 #!/bin/bash
 # load_bird_critic_databases.sh - Load all BIRD-Critic database dumps into PostgreSQL
 #
-# Usage: ./load_bird_critic_databases.sh [--host HOST] [--port PORT] [--user USER] [--password PASSWORD]
-# Example: ./load_bird_critic_databases.sh --port 5433 --user elaineang
+# Usage: ./load_bird_critic_databases.sh [--host HOST] [--port PORT] [--user USER] [--password PASSWORD] [--psql PSQL]
+# Example: ./load_bird_critic_databases.sh --port 5433 --user elaineang --psql psql17
 
-set -e
+# Note: Not using 'set -e' to allow proper error handling and reporting
 
 # Default connection parameters
 HOST="localhost"
 PORT="5433"
 USER="elaineang"
 PASSWORD=""
+PSQL_CMD="psql17"
 DUMP_DIR="db_setup/postgre_table_dumps"
 
 # Parse arguments
@@ -36,6 +37,10 @@ while [[ $# -gt 0 ]]; do
             DUMP_DIR="$2"
             shift 2
             ;;
+        --psql)
+            PSQL_CMD="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -47,6 +52,7 @@ echo "============================================="
 echo "BIRD-Critic Database Loader"
 echo "Host: $HOST:$PORT"
 echo "User: $USER"
+echo "PSQL Command: $PSQL_CMD"
 echo "Dump Directory: $DUMP_DIR"
 echo "============================================="
 
@@ -82,11 +88,13 @@ for DB_DIR in "$DUMP_DIR"/*/; do
     
     # Create the database (drop if exists)
     echo "  Creating database..."
-    psql17 -h "$HOST" -p "$PORT" -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \"$DB_NAME\";" 2>/dev/null || true
-    psql17 -h "$HOST" -p "$PORT" -U "$USER" -d postgres -c "CREATE DATABASE \"$DB_NAME\";" 2>/dev/null
+    DROP_OUTPUT=$($PSQL_CMD -h "$HOST" -p "$PORT" -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \"$DB_NAME\";" 2>&1) || true
+    CREATE_OUTPUT=$($PSQL_CMD -h "$HOST" -p "$PORT" -U "$USER" -d postgres -c "CREATE DATABASE \"$DB_NAME\";" 2>&1)
+    CREATE_EXIT=$?
     
-    if [ $? -ne 0 ]; then
+    if [ $CREATE_EXIT -ne 0 ]; then
         echo "  ERROR: Failed to create database $DB_NAME"
+        echo "  Error message: $CREATE_OUTPUT"
         FAILED=$((FAILED + 1))
         continue
     fi
@@ -101,7 +109,7 @@ for DB_DIR in "$DUMP_DIR"/*/; do
         echo "  Loading table: $TABLE_NAME"
         
         # Run psql and show any errors (but don't fail on "already exists" or "role doesn't exist")
-        OUTPUT=$(psql17 -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" -f "$SQL_FILE" 2>&1)
+        OUTPUT=$($PSQL_CMD -h "$HOST" -p "$PORT" -U "$USER" -d "$DB_NAME" -f "$SQL_FILE" 2>&1)
         EXIT_CODE=$?
         
         # Check for COPY success (indicates data was loaded)

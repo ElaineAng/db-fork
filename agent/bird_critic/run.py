@@ -3,7 +3,6 @@
 
 import argparse
 import sys
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -16,8 +15,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run on first 10 problems
+  # Run on first 10 problems with simple postgres (default)
   python -m agent.bird_critic.run --limit 10
+
+  # Run with Dolt backend (branching enabled)
+  python -m agent.bird_critic.run --backend dolt --limit 5
+
+  # Run with Neon backend
+  python -m agent.bird_critic.run --backend neon --limit 5
 
   # Run on specific problem indices
   python -m agent.bird_critic.run --indices 0 5 10
@@ -35,6 +40,13 @@ Examples:
         type=str,
         default="gpt-4o",
         help="LLM model to use (default: gpt-4o)",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=["postgres", "dolt", "neon", "kpg"],
+        default="postgres",
+        help="Database backend: postgres (simple SQL), dolt, neon, or kpg (default: postgres)",
     )
     parser.add_argument(
         "--split",
@@ -102,6 +114,12 @@ Examples:
         default=15,
         help="Maximum agent iterations per problem (default: 15)",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=1,
+        help="Maximum retry attempts when predicted SQL fails (default: 1, no retries)",
+    )
 
     args = parser.parse_args()
 
@@ -128,27 +146,104 @@ Examples:
         problems = problems[: args.limit]
         print(f"Limited to first {len(problems)} problems")
 
-    # Create database manager
-    db_manager = DatabaseManager(
-        host=args.db_host,
-        port=args.db_port,
-        user=args.db_user,
-        password=args.db_password,
-    )
+    # Initialize database interface based on backend
+    db_manager = None
+    db_tools = None
+
+    if args.backend == "postgres":
+        # Simple postgres mode - use DatabaseManager
+        print("Using simple PostgreSQL backend (no branching)")
+        db_manager = DatabaseManager(
+            host=args.db_host,
+            port=args.db_port,
+            user=args.db_user,
+            password=args.db_password,
+        )
+    else:
+        # Branching mode - use DBToolSuite
+        print(f"Using {args.backend.upper()} backend (branching enabled)")
+
+        # Import result collector for DBToolSuite
+        from dblib.result_collector import ResultCollector
+
+        # Create a result collector (required by DBToolSuite)
+        result_collector = ResultCollector(
+            run_id=f"bird_critic_{args.backend}",
+            output_dir=args.output_dir,
+        )
+
+        # Store connection params for later database switching
+        conn_params = {
+            "host": args.db_host,
+            "port": args.db_port,
+            "user": args.db_user,
+            "password": args.db_password,
+        }
+
+        # Default database to connect to initially
+        initial_db = "postgres"
+
+        if args.backend == "dolt":
+            from dblib.dolt import DoltToolSuite
+
+            db_tools = DoltToolSuite.init_for_bench(
+                collector=result_collector,
+                db_name=initial_db,
+                autocommit=True,
+                default_branch_name="main",
+            )
+            db_tools.commit_changes(timed=False, message="Init dolt tables")
+            # Store connection params for database switching
+            db_tools._conn_params = conn_params
+
+        elif args.backend == "neon":
+            from dblib.neon import NeonToolSuite
+
+            db_tools = NeonToolSuite.init_for_bench(
+                collector=result_collector,
+                db_name=initial_db,
+                autocommit=True,
+                default_branch_name="main",
+            )
+            db_tools._conn_params = conn_params
+
+        elif args.backend == "kpg":
+            from dblib.kpg import KpgToolSuite
+
+            db_tools = KpgToolSuite.init_for_bench(
+                collector=result_collector,
+                db_name=initial_db,
+                autocommit=True,
+                default_branch_name="main",
+            )
+            db_tools._conn_params = conn_params
 
     # Create agent
     print(f"Creating agent with model: {args.model}")
     agent = BirdCriticAgent(
         db_manager=db_manager,
+        db_tools=db_tools,
         model_name=args.model,
         max_iterations=args.max_iterations,
     )
 
-    # Create evaluator
+    # Create evaluator - use whichever database interface is available
+    # If neither is set, create a db_manager as fallback
+    if db_manager is None and db_tools is None:
+        db_manager = DatabaseManager(
+            host=args.db_host,
+            port=args.db_port,
+            user=args.db_user,
+            password=args.db_password,
+        )
+
     evaluator = Evaluator(
         agent=agent,
         db_manager=db_manager,
+        db_tools=db_tools,
         output_dir=args.output_dir,
+        max_retries=args.max_retries,
+        result_collector=result_collector if db_tools else None,
     )
 
     # Run evaluation

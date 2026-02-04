@@ -22,11 +22,11 @@ class BirdCriticProblem:
     def from_dict(cls, data: dict, idx: int) -> "BirdCriticProblem":
         """Create a BirdCriticProblem from a dataset row."""
         return cls(
-            id=str(idx),
+            id=data.get("instance_id", str(idx)),
             db_id=data.get("db_id", ""),
             query=data.get("query", ""),
-            error_sql=data.get("error_sql", ""),
-            sol_sql=data.get("sol_sql"),
+            error_sql=data.get("issue_sql", ""),  # Dataset uses 'issue_sql'
+            sol_sql=data.get("sol_sql"),  # Not available in public dataset
             preprocess_sql=data.get("preprocess_sql"),
             clean_up_sql=data.get("clean_up_sql"),
             test_cases=data.get("test_cases"),
