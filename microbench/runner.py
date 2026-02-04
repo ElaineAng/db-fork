@@ -8,7 +8,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Self, Tuple, Optional
-from collections import deque # thread safe
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
@@ -109,7 +108,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         print(f"Default KPG connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.FILE_COPY:
-        info.file_copy_info = FileCopyToolSuite.FileCopyInfo()
+        info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
         info.default_uri = FileCopyToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default FILE_COPY connection URI: {info.default_uri}")
