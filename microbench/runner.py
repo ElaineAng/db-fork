@@ -23,7 +23,6 @@ from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
-from dblib.postgres import PostgresToolSuite
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -155,11 +154,6 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         else:
             raise NotImplementedError("Xata requires database setup")
 
-    elif backend == tp.Backend.POSTGRES:
-        info.default_uri = PostgresToolSuite.get_default_connection_uri()
-        info.default_branch_name = "main"
-        print(f"Default Postgres connection URI: {info.default_uri}")
-
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -220,9 +214,6 @@ def get_initial_connection_uri(
             db_name,
         )
 
-    elif backend == tp.Backend.POSTGRES:
-        return PostgresToolSuite.get_initial_connection_uri(db_name)
-
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -277,14 +268,6 @@ def cleanup_backend(
             conn = psycopg2.connect(backend_info.default_uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
-            # For POSTGRES backend, also drop branch databases (named {db_name}_{branch}).
-            if config.backend == tp.Backend.POSTGRES:
-                cur.execute(
-                    "SELECT datname FROM pg_database WHERE datname LIKE %s;",
-                    (f"{db_name}_%",),
-                )
-                for (branch_db,) in cur.fetchall():
-                    cur.execute(f"DROP DATABASE IF EXISTS {branch_db};")
             cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
             print(f"Database '{db_name}' deleted successfully.")
         except Exception as e:
@@ -530,12 +513,6 @@ class BenchmarkSuite:
                     self._backend_info.xata_project_id,
                     default_branch_id,
                     self._root_branch_name,
-                    self._db_name,
-                    self._config.autocommit,
-                )
-            elif self._config.backend == tp.Backend.POSTGRES:
-                db_tools = PostgresToolSuite.init_for_bench(
-                    result_collector,
                     self._db_name,
                     self._config.autocommit,
                 )

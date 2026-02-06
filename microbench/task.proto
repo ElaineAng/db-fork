@@ -8,7 +8,6 @@ enum Backend {
     DOLT = 1;
     KPG = 2;
     XATA = 3;
-    POSTGRES = 4;
 }
 
 // Type of benchmark operation to perform
