@@ -45,7 +45,7 @@ done
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]"
-    echo "  backend: dolt, neon, kpg, xata"
+    echo "  backend: dolt, neon, kpg, xata, file_copy"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
@@ -57,8 +57,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy"
     exit 1
 fi
 
@@ -81,8 +81,8 @@ if [ -z "$SEED" ]; then
 fi
 
 # Configuration parameters
-# NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
-NUM_BRANCHES_LIST=(16)
+NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
+#NUM_BRANCHES_LIST=(16)
 OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
 # OPERATIONS=(BRANCH)
 

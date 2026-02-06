@@ -22,6 +22,7 @@ from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
+from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
 
 
@@ -74,6 +75,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -104,6 +106,13 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_uri = KpgToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.FILE_COPY:
+        info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
+        info.default_uri = FileCopyToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default FILE_COPY connection URI: {info.default_uri}")
+
 
     elif backend == tp.Backend.NEON:
         if require_db_setup:
@@ -200,6 +209,9 @@ def get_initial_connection_uri(
     elif backend == tp.Backend.KPG:
         return KpgToolSuite.get_initial_connection_uri(db_name)
 
+    elif backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.get_initial_connection_uri(db_name)
+
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
             backend_info.neon_project_id,
@@ -261,7 +273,9 @@ def cleanup_backend(
     db_name = db_name or config.database_setup.db_name
 
     # Delete the database using a direct connection through default_uri.
-    if backend_info.default_uri and db_name:
+    if backend_info.file_copy_info:
+        FileCopyToolSuite.cleanup(backend_info.file_copy_info)
+    elif backend_info.default_uri and db_name:
         conn = None
         cur = None
         try:
@@ -512,6 +526,14 @@ class BenchmarkSuite:
             elif self._config.backend == tp.Backend.KPG:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
+                )
+            elif self._config.backend == tp.Backend.FILE_COPY:
+                db_tools = FileCopyToolSuite.init_for_bench(
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                    self._backend_info.file_copy_info.branches,
                 )
             elif self._config.backend == tp.Backend.NEON:
                 print(
