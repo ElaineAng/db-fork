@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Visualize multi-op benchmark results with p50 and p99 latencies.
+"""Visualize single-thread benchmark results with p50 and p99 latencies.
 
 Usage:
-    python visualize_multiop.py benchmark_8.parquet benchmark_16.parquet ...
+    python visualize_single_thread.py benchmark_8.parquet benchmark_16.parquet ...
 
 The script expects parquet filenames to contain the number of branches.
 For each operation type, it draws two lines: p50 and p99 latency.
@@ -17,13 +17,47 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-from viz_common import (
-    OP_COLORS,
-    OP_TYPE_NAMES,
-    auto_scale_storage,
-    process_range_updates,
-    save_or_show,
-)
+
+# Operation type enum values to names (from task.proto)
+OP_TYPE_NAMES = {
+    0: "UNSPECIFIED",
+    1: "BRANCH",
+    2: "CONNECT",
+    3: "READ",
+    4: "INSERT",
+    5: "UPDATE",
+    6: "RANGE_UPDATE (per-key)",
+    7: "RANGE_READ (per-key)",
+}
+
+# Colors for each operation type
+OP_COLORS = {
+    0: "#888888",
+    1: "#1f77b4",
+    2: "#ff7f0e",
+    3: "#2ca02c",
+    4: "#d62728",
+    5: "#9467bd",
+    6: "#8c564b",
+    7: "#17becf",
+}
+
+
+def auto_scale_storage(values_bytes: pd.Series) -> tuple[pd.Series, str]:
+    """Pick a human-readable unit for a series of byte values.
+
+    Returns (scaled_series, unit_label) where unit_label is one of
+    'B', 'KB', 'MB', 'GB'.
+    """
+    max_val = values_bytes.max()
+    if max_val >= 1 << 30:
+        return values_bytes / (1 << 30), "GB"
+    elif max_val >= 1 << 20:
+        return values_bytes / (1 << 20), "MB"
+    elif max_val >= 1 << 10:
+        return values_bytes / (1 << 10), "KB"
+    else:
+        return values_bytes, "B"
 
 
 def extract_num_branches(filename: str) -> int:
@@ -44,7 +78,32 @@ def load_and_compute_percentiles(parquet_files: list[str]) -> pd.DataFrame:
         num_branches = extract_num_branches(filepath)
         df = pd.read_parquet(filepath)
         df["num_branches"] = num_branches
-        df = process_range_updates(df)
+
+        # Distinguish UPDATE (op_type=5, num_keys_touched=1) from
+        # RANGE_UPDATE (op_type=5, num_keys_touched > 1)
+        if "num_keys_touched" in df.columns:
+            range_update_mask = (df["op_type"] == 5) & (
+                df["num_keys_touched"] > 1
+            )
+            if range_update_mask.any():
+                df.loc[range_update_mask, "op_type"] = 6
+                df.loc[range_update_mask, "latency"] = (
+                    df.loc[range_update_mask, "latency"]
+                    / df.loc[range_update_mask, "num_keys_touched"]
+                )
+
+            # Distinguish READ (op_type=3, num_keys_touched=1) from
+            # RANGE_READ (op_type=3, num_keys_touched > 1)
+            range_read_mask = (df["op_type"] == 3) & (
+                df["num_keys_touched"] > 1
+            )
+            if range_read_mask.any():
+                df.loc[range_read_mask, "op_type"] = 7
+                df.loc[range_read_mask, "latency"] = (
+                    df.loc[range_read_mask, "latency"]
+                    / df.loc[range_read_mask, "num_keys_touched"]
+                )
+
         all_data.append(df)
 
     combined = pd.concat(all_data, ignore_index=True)
@@ -113,7 +172,7 @@ def plot_latency_percentiles(
     plt.xlabel("Number of Branches", fontsize=12)
     plt.ylabel("Latency (ms)", fontsize=12)
     plt.title(
-        "Multi-Op Benchmark: p50 and p99 Latency vs Number of Branches",
+        "p50 and p99 Latency vs Number of Branches",
         fontsize=14,
     )
     plt.legend(
@@ -125,7 +184,13 @@ def plot_latency_percentiles(
         plt.yscale("log")  # Log scale for latency
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
-    save_or_show(fig, output_path)
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved figure to {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
 
 
 def plot_storage_by_branches(
@@ -162,12 +227,18 @@ def plot_storage_by_branches(
         plt.yscale("log")
     plt.grid(True, which="minor", alpha=0.1)
     plt.tight_layout()
-    save_or_show(fig, output_path)
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved figure to {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize multi-op benchmark results with p50 and p99 latencies."
+        description="Visualize single-thread benchmark results with p50 and p99 latencies."
     )
     parser.add_argument(
         "pattern",
