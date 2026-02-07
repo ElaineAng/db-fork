@@ -23,6 +23,7 @@ from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
+from dblib.save_point import SavePointToolSuite
 from dblib.xata import XataToolSuite
 
 
@@ -106,6 +107,11 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_uri = KpgToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.SAVE_POINT:
+        info.default_uri = SavePointToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default PostgreSQL connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.FILE_COPY:
         info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
@@ -211,6 +217,9 @@ def get_initial_connection_uri(
 
     elif backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.get_initial_connection_uri(db_name)
+
+    elif backend == tp.Backend.SAVE_POINT:
+        return SavePointToolSuite.get_initial_connection_uri(db_name)
 
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
@@ -524,6 +533,10 @@ class BenchmarkSuite:
                     self._backend_info.default_branch_name,
                 )
             elif self._config.backend == tp.Backend.KPG:
+                db_tools = KpgToolSuite.init_for_bench(
+                    result_collector, self._db_name, self._config.autocommit
+                )
+            elif self._config.backend == tp.Backend.SAVE_POINT:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )

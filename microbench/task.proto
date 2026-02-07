@@ -9,6 +9,7 @@ enum Backend {
     KPG = 2;
     XATA = 3;
     FILE_COPY = 4;
+    SAVE_POINT = 5;
 }
 
 // Type of benchmark operation to perform
