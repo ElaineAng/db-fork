@@ -77,6 +77,7 @@ class BackendInfo:
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
+    svp_conn:        Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -288,8 +289,11 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
-            conn = psycopg2.connect(backend_info.default_uri)
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            if backend_info.svp_conn:
+                conn = backend_info.svp_conn
+            else:
+                conn = psycopg2.connect(backend_info.default_uri)
+                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
             cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
             print(f"Database '{db_name}' deleted successfully.")
@@ -537,8 +541,10 @@ class BenchmarkSuite:
                     result_collector, self._db_name, self._config.autocommit
                 )
             elif self._config.backend == tp.Backend.SAVE_POINT:
-                db_tools = KpgToolSuite.init_for_bench(
-                    result_collector, self._db_name, self._config.autocommit
+                db_tools = SavePointToolSuite.init_for_bench(
+                    result_collector, self._db_name, self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                    SavePointToolSuite.get_connection(self._db_name)
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
@@ -606,7 +612,8 @@ class BenchmarkSuite:
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
-        self.db_tools.close_connection()
+        if not self._backend_info.svp_conn:
+            self.db_tools.close_connection()
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
