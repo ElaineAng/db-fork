@@ -3,11 +3,11 @@
 This report analyzes how storage grows as the number of database branches increases across four backends: **Dolt**, **PostgreSQL (CoW/APFS clone)**, **Neon**, and **Xata**. All experiments use a TPC-C `orders` table schema with the nth-op benchmark.
 
 > All numerical results in this report were computed by
-> [`reports/scripts/storage_analysis.py`](scripts/storage_analysis.py).
+> [`scripts/storage_analysis.py`](scripts/storage_analysis.py).
 
 ## 1. Storage Measurement Methodology
 
-Each backend implements `get_total_storage_bytes()` from the abstract base class [`DBToolSuite`](../dblib/db_api.py). The measurement strategy differs per backend because each system exposes storage information differently:
+Each backend implements `get_total_storage_bytes()` from the abstract base class [`DBToolSuite`](../../../dblib/db_api.py). The measurement strategy differs per backend because each system exposes storage information differently:
 
 | Backend | Method | Mechanism | Scope |
 |---|---|---|---|
@@ -16,7 +16,7 @@ Each backend implements `get_total_storage_bytes()` from the abstract base class
 | Neon | SQL function | `SELECT pg_database_size(current_database())` per branch, summed | Per-branch, real-time |
 | Xata | REST API | `POST .../branches/{id}/metrics` with `disk` metric, `max` aggregation over 5-min window | Per-branch logical size |
 
-**Directory walk** ([`dblib/util.py:get_directory_size_bytes()`](../dblib/util.py)) recursively sums file sizes via `os.path.getsize()`. This captures actual physical disk usage, including copy-on-write sharing effects on APFS (PostgreSQL) and content-addressed deduplication (Dolt).
+**Directory walk** ([`dblib/util.py:get_directory_size_bytes()`](../../../dblib/util.py)) recursively sums file sizes via `os.path.getsize()`. This captures actual physical disk usage, including copy-on-write sharing effects on APFS (PostgreSQL) and content-addressed deduplication (Dolt).
 
 **Neon** uses `pg_database_size()` rather than the Neon console API's `logical_size` or `synthetic_storage_size`, which lag ~15 minutes. The SQL function returns the real-time logical size of the database on each branch. A temporary connection is opened to each non-current branch; failed connections are retried and skipped if still unsuccessful.
 
@@ -37,7 +37,7 @@ Neon was limited to 8 branches by a plan-level `BRANCHES_LIMIT_EXCEEDED` cap. Xa
 
 ## 3. Absolute Storage Growth
 
-![Storage by Backend](../figures/storage_by_backend.png)
+![Storage by Backend](figures/storage_by_backend.png)
 
 | Branches | Dolt | PostgreSQL (CoW) | Neon | Xata |
 |---|---|---|---|---|
@@ -58,7 +58,7 @@ At 1024 branches, PostgreSQL consumes **29.5x** more storage than Dolt (10.06 GB
 
 We fit `storage(MB) = a * branches^b` via log-log linear regression to characterize the scaling behavior of each backend.
 
-![Power-Law Fit](../figures/storage_power_law_fit.png)
+![Power-Law Fit](figures/storage_power_law_fit.png)
 
 | Backend | a (MB) | b (exponent) | R^2 | Interpretation |
 |---|---|---|---|---|
@@ -82,7 +82,7 @@ We fit `storage(MB) = a * branches^b` via log-log linear regression to character
 The power-law exponents in Section 4 characterize the overall scaling *shape*, but don't explain *why* each backend scales that way. We examine three lines of evidence: (1) per-operation storage deltas, (2) competing model fits, and (3) the architectural mechanism behind each backend's branching.
 
 > All evidence metrics in this section were computed by
-> [`reports/scripts/scaling_evidence.py`](scripts/scaling_evidence.py).
+> [`scripts/scaling_evidence.py`](scripts/scaling_evidence.py).
 
 ### 5.1 The Linear-with-Offset Model Fits Better
 
@@ -151,7 +151,7 @@ Dolt's marginal cost grows slowly (0.21 → 0.36 MB/branch) because larger Proll
 
 ## 6. Per-Branch Storage Cost
 
-![Per-Branch Cost](../figures/storage_per_branch_cost.png)
+![Per-Branch Cost](figures/storage_per_branch_cost.png)
 
 This plot shows `total_storage / num_branches`, revealing how the average cost per branch changes at scale.
 
@@ -211,7 +211,7 @@ Dolt is **4-5x faster** than PostgreSQL and **25x faster** than Neon for branch 
 
 ## 10. Storage Doubling Ratio
 
-![Doubling Ratio](../figures/storage_doubling_ratio.png)
+![Doubling Ratio](figures/storage_doubling_ratio.png)
 
 The ratio `storage(2n) / storage(n)` at each doubling step. A ratio of 2.0 means linear scaling.
 
