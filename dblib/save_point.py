@@ -28,7 +28,10 @@ class SavePointToolSuite(DBToolSuite):
         )
 
     @classmethod
-    def get_connection(cls, db_name: str) -> _pgconn:
+    def get_connection(cls, cur_conn: _pgconn, db_name: str) -> _pgconn:
+        """ Returns a psycopg2 connection object with an open transaction """
+        if cur_conn and not cur_conn.closed:
+            return cur_conn
         uri = cls.get_initial_connection_uri(db_name)
         try:
             conn = psycopg2.connect(uri)
@@ -51,7 +54,6 @@ class SavePointToolSuite(DBToolSuite):
         default_branch_name: str,
         conn: _pgconn = None
     ):
-        uri = cls.get_initial_connection_uri(db_name)
         return cls(
             connection=conn,
             collector=collector,

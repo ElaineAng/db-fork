@@ -289,7 +289,7 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
-            if backend_info.svp_conn:
+            if backend_info.svp_conn: #TODO we don't even need to do any cleanup since transaction
                 conn = backend_info.svp_conn
             else:
                 conn = psycopg2.connect(backend_info.default_uri)
@@ -541,10 +541,13 @@ class BenchmarkSuite:
                     result_collector, self._db_name, self._config.autocommit
                 )
             elif self._config.backend == tp.Backend.SAVE_POINT:
+                self._backend_info.svp_conn = SavePointToolSuite.get_connection(
+                        self._backend_info.svp_conn, self._db_name
+                        )
                 db_tools = SavePointToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit,
                     self._backend_info.default_branch_name,
-                    SavePointToolSuite.get_connection(self._db_name)
+                    self._backend_info.svp_conn
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
@@ -1057,6 +1060,7 @@ class BenchmarkSuite:
             benchmark_table = rnd.choice(all_tables)
 
         table_schema = self.db_tools.get_table_schema(benchmark_table)
+        #print(table_schema)
         if not table_schema:
             raise ValueError(
                 f"Could not fetch DDL for table {benchmark_table}."
