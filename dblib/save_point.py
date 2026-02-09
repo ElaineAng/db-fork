@@ -28,18 +28,30 @@ class SavePointToolSuite(DBToolSuite):
         )
 
     @classmethod
+    def get_connection(cls, db_name: str) -> _pgconn:
+        uri = cls.get_initial_connection_uri(db_name)
+        try:
+            conn = psycopg2.connect(uri)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            try:
+                cur = conn.cursor()
+                cur.execute("BEGIN;")
+            except Exception as e:
+                raise Exception(f"Failed to begin transaction: {e}") 
+        except Exception as e:
+            raise Exception(f"Failed to open initial connection: {e}")
+        return conn
+
+    @classmethod
     def init_for_bench(
         cls,
         collector: rc.ResultCollector,
         db_name: str,
         autocommit: bool,
         default_branch_name: str,
+        conn: _pgconn = None
     ):
         uri = cls.get_initial_connection_uri(db_name)
-
-        conn = psycopg2.connect(uri)
-        if autocommit:
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         return cls(
             connection=conn,
             collector=collector,
@@ -54,13 +66,13 @@ class SavePointToolSuite(DBToolSuite):
         autocommit: bool,
         default_branch_name: str,
     ):
+        print("IN CTOR")
         super().__init__(connection, result_collector=collector)
-        self._connect_branch_impl(default_branch_name)
         self.autocommit = autocommit
 
-        super.execute_sql("BEGIN;") # start a transaction
         self._save_points: list[str] = list() # TODO ordered list of savepoints ?
         self._create_branch_impl(default_branch_name)
+        self._connect_branch_impl(default_branch_name)
 
     def list_branches(self) -> list[str]:
         return self._save_points
@@ -71,8 +83,11 @@ class SavePointToolSuite(DBToolSuite):
         """
         if parent_id and parent_id != self._save_points[-1]:
             raise Exception("Tried to branch from earlier save point, spine shape only allowed")
+        if not self._in_transaction():
+            raise Exception("Tried to create save point without being in transaction")
         cmd = f"SAVEPOINT {branch_name};"
-        super().execute_sql(cmd)
+        print(cmd)
+        res = super().execute_sql(cmd)
         self._save_points.append(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
@@ -80,8 +95,15 @@ class SavePointToolSuite(DBToolSuite):
         Connects to an existing branch in the PGSQL database to allow reads and
         writes on that branch.
         """
-        cmd = f"SAVEPOINT {branch_name};"
+        if not self._in_transaction():
+            raise Exception("Tried to ROLLBACK without being in transaction")
+        cmd = f"ROLLBACK TO SAVEPOINT {branch_name};"
         super().execute_sql(cmd)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         return (self._save_points[-1], self._save_points[-1])
+
+    def _in_transaction(self):
+        # source : https://dba.stackexchange.com/questions/208363/how-to-check-if-the-current-connection-is-in-a-transaction
+        res = super().execute_sql("SELECT now() = statement_timestamp();")
+        return not res[0][0]
