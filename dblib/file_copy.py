@@ -1,3 +1,5 @@
+import os
+
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
@@ -5,10 +7,10 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
-PGSQL_USER = "postgres"
-PGSQL_PASSWORD = "password"
-PGSQL_HOST = "localhost"
-PGSQL_PORT = 5432
+PGSQL_USER = os.environ.get("PGSQL_USER", "postgres")
+PGSQL_PASSWORD = os.environ.get("PGSQL_PASSWORD", "password")
+PGSQL_HOST = os.environ.get("PGSQL_HOST", "localhost")
+PGSQL_PORT = int(os.environ.get("PGSQL_PORT", "5432"))
 
 
 class FileCopyToolSuite(DBToolSuite):

@@ -200,7 +200,7 @@ EOF
         python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED
         
         # Clean up dropped databases to prevent disk space explosion
-        rm -rf ~/doltgres/databases/.dolt_dropped_databases/*
+        rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/*
         
         echo "Completed: $RUN_ID"
     done

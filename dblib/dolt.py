@@ -7,10 +7,10 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
-DOLT_USER = "postgres"
-DOLT_PASSWORD = "password"
-DOLT_HOST = "localhost"
-DOLT_PORT = 5432
+DOLT_USER = os.environ.get("DOLT_USER", "postgres")
+DOLT_PASSWORD = os.environ.get("DOLT_PASSWORD", "password")
+DOLT_HOST = os.environ.get("DOLT_HOST", "localhost")
+DOLT_PORT = int(os.environ.get("DOLT_PORT", "5432"))
 DOLT_DATA_DIR = os.environ.get("DOLT_DATA_DIR", "/tmp/doltgres_data/databases")
 
 
