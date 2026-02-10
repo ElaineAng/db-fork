@@ -179,8 +179,8 @@ All parquet files written to: `/tmp/run_stats/`
 
 | File pattern | Contents |
 |-------------|----------|
-| `<backend>_tpcc_<N>_<shape>_setup.parquet` | Branch creation timing + storage (reusable for Exp 1 analysis) |
-| `<backend>_tpcc_<N>_<shape>.parquet` | Per-operation UPDATE/RANGE_UPDATE timing + storage |
+| `<backend>_tpcc_<N>_<shape>_<op>[_r<range>]_setup.parquet` | Branch creation timing + storage (reusable for Exp 1 analysis) |
+| `<backend>_tpcc_<N>_<shape>_<op>[_r<range>].parquet` | Per-operation UPDATE/RANGE_UPDATE timing + storage |
 
 ### 5.4 Steps
 
@@ -208,9 +208,10 @@ The script sources `bench_lib.sh` and runs two sub-experiments:
 
 ### 5.5 Expected Output
 
-**Exp 2a**: 132 parquet files (2 backends x 3 shapes x 11 branch counts x 2 file types)
-- Setup: `dolt_tpcc_1_spine_setup.parquet` ... `file_copy_tpcc_1024_fan_out_setup.parquet`
-- Measurement: `dolt_tpcc_1_spine.parquet` ... `file_copy_tpcc_1024_fan_out.parquet`
+**Exp 2a**: 264 parquet files (2 backends x 3 shapes x 11 branch counts x 2 operations x 2 file types)
+- Setup: `dolt_tpcc_1_spine_update_setup.parquet` ... `file_copy_tpcc_1024_fan_out_range_update_r20_setup.parquet`
+- Measurement: `dolt_tpcc_1_spine_update.parquet` ... `file_copy_tpcc_1024_fan_out_range_update_r20.parquet`
 
-**Exp 2b**: 88 parquet files (2 backends x 4 range sizes x 11 branch counts x 2 file types)
-- Same naming pattern, spine topology only, varying range_size in config
+**Exp 2b**: 176 parquet files (2 backends x 4 range sizes x 11 branch counts x 2 file types)
+- Setup: `dolt_tpcc_1_spine_range_update_r1_setup.parquet` ... `file_copy_tpcc_1024_spine_range_update_r100_setup.parquet`
+- Measurement: `dolt_tpcc_1_spine_range_update_r1.parquet` ... `file_copy_tpcc_1024_spine_range_update_r100.parquet`

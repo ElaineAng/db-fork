@@ -144,8 +144,8 @@ All parquet files written to: `/tmp/run_stats/`
 
 | File pattern | Contents |
 |-------------|----------|
-| `<backend>_tpcc_<N>_<shape>_setup.parquet` | Branch creation timing + storage (N rows per file) |
-| `<backend>_tpcc_<N>_<shape>.parquet` | Phase 3 operation measurement (not used for this experiment) |
+| `<backend>_tpcc_<N>_<shape>_branch_setup.parquet` | Branch creation timing + storage (N rows per file) |
+| `<backend>_tpcc_<N>_<shape>_branch.parquet` | Phase 3 operation measurement (not used for this experiment) |
 
 ### 5.4 Steps
 
@@ -163,8 +163,8 @@ The script sources `bench_lib.sh` and runs:
 
 ### 5.5 Expected Output
 
-66 parquet files in `/tmp/run_stats/` (2 backends x 3 shapes x 11 branch counts):
-- `dolt_tpcc_1_spine_setup.parquet` through `dolt_tpcc_1024_fan_out_setup.parquet`
-- `file_copy_tpcc_1_spine_setup.parquet` through `file_copy_tpcc_1024_fan_out_setup.parquet`
+132 parquet files in `/tmp/run_stats/` (2 backends x 3 shapes x 11 branch counts x 2 file types):
+- `dolt_tpcc_1_spine_branch_setup.parquet` through `dolt_tpcc_1024_fan_out_branch_setup.parquet`
+- `file_copy_tpcc_1_spine_branch_setup.parquet` through `file_copy_tpcc_1024_fan_out_branch_setup.parquet`
 
 Plus 66 corresponding measurement parquets (not used for analysis).
