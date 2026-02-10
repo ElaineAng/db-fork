@@ -30,12 +30,11 @@ branch creation. Specifically:
 
 | Variable | Values |
 |----------|--------|
-| Backend | Dolt, PostgreSQL CoW, Neon, Xata |
+| Backend | Dolt, PostgreSQL CoW (file_copy), ~~Neon~~, ~~Xata~~ |
 | Branch topology | SPINE, BUSHY, FAN_OUT |
 | Number of branches | 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 |
 
 Each combination is an independent run with a fresh database instance.
-**Spine data already exists** from experiment 0 and does not need to be re-collected.
 
 ### 3.2 Fixed Parameters
 
@@ -124,3 +123,48 @@ Same as experiment 0.
 2. Do any backends exhibit constant marginal cost regardless of topology?
 3. Does fan-out (shallow, wide) produce lower or higher overhead than spine
    (deep, narrow)?
+
+## 5. Execution Plan
+
+### 5.1 Prerequisites
+
+- Dolt server running on port 5433 (`DOLT_PORT=5433` in `.env`)
+- PostgreSQL available (started by `setup_pg_volume.sh`)
+
+### 5.2 Data Directories
+
+| Backend | Data directory | Storage measurement method |
+|---------|---------------|---------------------------|
+| **Dolt** | `${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/<db_name>/` | `st_blocks * 512` on data dir (content-addressed, CoW-aware) |
+| **file_copy** | macOS: `/Volumes/PGBench/pgdata/` (isolated APFS volume) | `shutil.disk_usage()` on volume (CoW-aware via isolation) |
+
+### 5.3 Output Directory
+
+All parquet files written to: `/tmp/run_stats/`
+
+| File pattern | Contents |
+|-------------|----------|
+| `<backend>_tpcc_<N>_<shape>_setup.parquet` | Branch creation timing + storage (N rows per file) |
+| `<backend>_tpcc_<N>_<shape>.parquet` | Phase 3 operation measurement (not used for this experiment) |
+
+### 5.4 Steps
+
+```bash
+./experiments/experiment-1-2026-02-08/run.sh
+```
+
+The script sources `bench_lib.sh` and runs:
+
+- 3 shapes (spine, bushy, fan_out) x 2 backends (dolt, file_copy) = 6 branch sweeps
+- Each sweep runs 11 branch counts (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024) x 1 operation (BRANCH)
+- Total: 6 x 11 = 66 benchmark runs
+- num_ops per run: 1 (single branch creation, timed with storage measurement)
+- Neon and Xata are commented out for now
+
+### 5.5 Expected Output
+
+66 parquet files in `/tmp/run_stats/` (2 backends x 3 shapes x 11 branch counts):
+- `dolt_tpcc_1_spine_setup.parquet` through `dolt_tpcc_1024_fan_out_setup.parquet`
+- `file_copy_tpcc_1_spine_setup.parquet` through `file_copy_tpcc_1024_fan_out_setup.parquet`
+
+Plus 66 corresponding measurement parquets (not used for analysis).

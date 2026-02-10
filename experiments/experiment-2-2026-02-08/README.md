@@ -32,11 +32,11 @@ topologies. Specifically:
 
 | Variable | Values |
 |----------|--------|
-| Backend | Dolt, PostgreSQL CoW, Neon, Xata |
+| Backend | Dolt, PostgreSQL CoW (file_copy), ~~Neon~~, ~~Xata~~ |
 | Branch topology | SPINE, BUSHY, FAN_OUT |
 | Number of branches | 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 |
 | Operation | UPDATE, RANGE_UPDATE |
-| Range size (RANGE_UPDATE only) | 1, 10, 20, 50, 100 |
+| Range size (RANGE_UPDATE only) | 1, 10, 20 (default in 2a), 50, 100 |
 
 Each combination is an independent run with a fresh database instance.
 Runs use `--measure-storage` (single-threaded only).
@@ -158,3 +158,59 @@ predicts the cost of range updates, simplifying the storage cost model.
 2. Is the growth rate backend-dependent or topology-dependent?
 3. Is per-key storage overhead constant across range sizes, or do range
    updates exhibit amortization or amplification effects?
+
+## 5. Execution Plan
+
+### 5.1 Prerequisites
+
+- Dolt server running on port 5433 (`DOLT_PORT=5433` in `.env`)
+- PostgreSQL available (started by `setup_pg_volume.sh`)
+
+### 5.2 Data Directories
+
+| Backend | Data directory | Storage measurement method |
+|---------|---------------|---------------------------|
+| **Dolt** | `${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/<db_name>/` | `st_blocks * 512` on data dir (content-addressed, CoW-aware) |
+| **file_copy** | macOS: `/Volumes/PGBench/pgdata/` (isolated APFS volume) | `shutil.disk_usage()` on volume (CoW-aware via isolation) |
+
+### 5.3 Output Directory
+
+All parquet files written to: `/tmp/run_stats/`
+
+| File pattern | Contents |
+|-------------|----------|
+| `<backend>_tpcc_<N>_<shape>_setup.parquet` | Branch creation timing + storage (reusable for Exp 1 analysis) |
+| `<backend>_tpcc_<N>_<shape>.parquet` | Per-operation UPDATE/RANGE_UPDATE timing + storage |
+
+### 5.4 Steps
+
+```bash
+./experiments/experiment-2-2026-02-08/run.sh
+```
+
+The script sources `bench_lib.sh` and runs two sub-experiments:
+
+**Exp 2a**: UPDATE + RANGE_UPDATE with fixed range_size=20, all topologies
+
+- 3 shapes (spine, bushy, fan_out) x 2 backends (dolt, file_copy) = 6 branch sweeps
+- Each sweep runs 11 branch counts (1, 2, 4, ..., 1024) x 2 operations (UPDATE, RANGE_UPDATE)
+- Total: 6 x 11 x 2 = 132 benchmark runs
+- num_ops per run: 50 (UPDATE), 20 (RANGE_UPDATE)
+- Neon and Xata are commented out for now
+
+**Exp 2b**: RANGE_UPDATE with varying range_size, spine only
+
+- 4 range sizes (1, 10, 50, 100) x 2 backends (dolt, file_copy) = 8 branch sweeps
+- Each sweep runs 11 branch counts x 1 operation (RANGE_UPDATE)
+- Total: 8 x 11 = 88 benchmark runs
+- num_ops per run: 20
+- range_size=20 is already covered by Exp 2a and not repeated here
+
+### 5.5 Expected Output
+
+**Exp 2a**: 132 parquet files (2 backends x 3 shapes x 11 branch counts x 2 file types)
+- Setup: `dolt_tpcc_1_spine_setup.parquet` ... `file_copy_tpcc_1024_fan_out_setup.parquet`
+- Measurement: `dolt_tpcc_1_spine.parquet` ... `file_copy_tpcc_1024_fan_out.parquet`
+
+**Exp 2b**: 88 parquet files (2 backends x 4 range sizes x 11 branch counts x 2 file types)
+- Same naming pattern, spine topology only, varying range_size in config

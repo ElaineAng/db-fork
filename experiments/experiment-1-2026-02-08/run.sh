@@ -20,23 +20,28 @@ echo "============================================="
 echo "Experiment 1: Branch Creation Storage (Shapes)"
 echo "============================================="
 
-# --- Dolt (up to 512 branches, 3 shapes) ---
+# --- Dolt (3 shapes) ---
 
 for SHAPE in spine bushy fan_out; do
-    run_branch_sweep dolt "$SQL_DUMP" "$SHAPE" "$SEED" 512 true BRANCH
+    run_branch_sweep dolt "$SQL_DUMP" "$SHAPE" "$SEED" 1024 true BRANCH
 done
 
-# --- PostgreSQL CoW / file_copy (up to 512 branches, 3 shapes) ---
+# --- PostgreSQL CoW / file_copy (3 shapes) ---
 
 for SHAPE in spine bushy fan_out; do
-    run_branch_sweep file_copy "$SQL_DUMP" "$SHAPE" "$SEED" 512 true BRANCH
+    run_branch_sweep file_copy "$SQL_DUMP" "$SHAPE" "$SEED" 1024 true BRANCH
 done
 
 # --- Neon (capped at 8 branches) ---
-# We've already done this.
 
-#for SHAPE in bushy fan_out; do
+#for SHAPE in spine bushy fan_out; do
 #    run_branch_sweep neon "$SQL_DUMP" "$SHAPE" "$SEED" 8 true BRANCH
+#done
+
+# --- Xata (403 permission issue) ---
+
+#for SHAPE in spine bushy fan_out; do
+#    run_branch_sweep xata "$SQL_DUMP" "$SHAPE" "$SEED" 1024 true BRANCH
 #done
 
 echo ""
