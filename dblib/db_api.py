@@ -64,14 +64,6 @@ class DBToolSuite(ABC):
     # Protected methods
     ######################################################################
 
-    def _get_storage_after_branch(self, size_before: int) -> int:
-        """Get storage size after a branch operation.
-
-        Subclasses with async storage metrics may override to poll
-        until the metric reflects the branch creation.
-        """
-        return self.get_total_storage_bytes()
-
     @abstractmethod
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -192,12 +184,6 @@ class DBToolSuite(ABC):
             parent_id: ID of the parent branch to branch from.
             timed: Whether to time and record this operation (default True).
         """
-        # TODO: Separate storage calculation from `timed` parameter
-        size_before = 0
-        if timed:
-            size_before = self.get_total_storage_bytes()
-            self.result_collector.record_disk_size_before(size_before)
-
         try:
             with self.result_collector.maybe_time_ops(
                 op_type=rslt.OpType.BRANCH_CREATE, timed=timed
@@ -205,12 +191,6 @@ class DBToolSuite(ABC):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
-
-        if timed:
-            size_after = self._get_storage_after_branch(size_before)
-            self.result_collector.record_disk_size_after(size_after)
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
 
     @_require_connection
     def connect_branch(self, branch_name: str, timed: bool = False) -> None:
