@@ -186,7 +186,13 @@ run_branch_sweep() {
             else
                 num_ops=$(get_num_ops_default "$operation")
             fi
-            local run_id="${backend}_${sql_prefix}_${num_branches}_${shape_lower}"
+            local op_lower
+            op_lower=$(echo "$operation" | tr '[:upper:]' '[:lower:]')
+            local run_id="${backend}_${sql_prefix}_${num_branches}_${shape_lower}_${op_lower}"
+            # Append range_size suffix for RANGE_UPDATE to disambiguate different range sizes
+            if [ "$operation" = "RANGE_UPDATE" ]; then
+                run_id="${run_id}_r${RANGE_SIZE}"
+            fi
 
             echo ""
             echo "---------------------------------------------------"
