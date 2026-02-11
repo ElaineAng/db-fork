@@ -35,7 +35,7 @@ class SavePointToolSuite(DBToolSuite):
         uri = cls.get_initial_connection_uri(db_name)
         try:
             conn = psycopg2.connect(uri)
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            #conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             try:
                 cur = conn.cursor()
                 cur.execute("BEGIN;")
@@ -68,9 +68,8 @@ class SavePointToolSuite(DBToolSuite):
         autocommit: bool,
         default_branch_name: str,
     ):
-        print("IN CTOR")
         super().__init__(connection, result_collector=collector)
-        self.autocommit = autocommit
+        self.autocommit = False # TODO ??
 
         self._save_points: list[str] = list() # TODO ordered list of savepoints ?
         self._create_branch_impl(default_branch_name)
@@ -88,22 +87,28 @@ class SavePointToolSuite(DBToolSuite):
         if not self._in_transaction():
             raise Exception("Tried to create save point without being in transaction")
         cmd = f"SAVEPOINT {branch_name};"
-        print(cmd)
         res = super().execute_sql(cmd)
         self._save_points.append(branch_name)
+        print(cmd)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
         Connects to an existing branch in the PGSQL database to allow reads and
-        writes on that branch.
+        writes on that branch. With this backend, that means rolling back to 
+        a previous SAVEPOINT.
         """
         if not self._in_transaction():
             raise Exception("Tried to ROLLBACK without being in transaction")
         cmd = f"ROLLBACK TO SAVEPOINT {branch_name};"
         super().execute_sql(cmd)
+        print(cmd)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         return (self._save_points[-1], self._save_points[-1])
+
+    def delete_db(self, db_name: str) -> None:
+        super().execute_sql("COMMIT;")
+        super().delete_db(db_name)
 
     def _in_transaction(self):
         # source : https://dba.stackexchange.com/questions/208363/how-to-check-if-the-current-connection-is-in-a-transaction

@@ -289,11 +289,10 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
-            if backend_info.svp_conn: #TODO we don't even need to do any cleanup since transaction
-                conn = backend_info.svp_conn
-            else:
-                conn = psycopg2.connect(backend_info.default_uri)
-                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            if backend_info.svp_conn:
+                backend_info.svp_conn.close()
+            conn = psycopg2.connect(backend_info.default_uri)
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
             cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
             print(f"Database '{db_name}' deleted successfully.")
@@ -617,6 +616,16 @@ class BenchmarkSuite:
         # thread after all worker threads have finished.
         if not self._backend_info.svp_conn:
             self.db_tools.close_connection()
+        '''
+        else:
+            try:
+                cur = self._backend_info.svp_conn.cursor()
+                cur.execute("COMMIT;")
+                cur.close()
+            except Exception as e:
+                print(f"Failed to commit transaction: {e}")
+        '''
+
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
