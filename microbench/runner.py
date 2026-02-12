@@ -23,7 +23,7 @@ from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
-from dblib.save_point import SavePointToolSuite
+from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
 
 
@@ -77,7 +77,7 @@ class BackendInfo:
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
-    svp_conn:        Optional[psycopg2.extensions.connection] = None
+    txn_conn:        Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -109,8 +109,8 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
 
-    elif backend == tp.Backend.SAVE_POINT:
-        info.default_uri = SavePointToolSuite.get_default_connection_uri()
+    elif backend == tp.Backend.TXN:
+        info.default_uri = TxnToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default PostgreSQL connection URI: {info.default_uri}")
 
@@ -219,8 +219,8 @@ def get_initial_connection_uri(
     elif backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.get_initial_connection_uri(db_name)
 
-    elif backend == tp.Backend.SAVE_POINT:
-        return SavePointToolSuite.get_initial_connection_uri(db_name)
+    elif backend == tp.Backend.TXN:
+        return TxnToolSuite.get_initial_connection_uri(db_name)
 
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
@@ -289,8 +289,8 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
-            if backend_info.svp_conn:
-                backend_info.svp_conn.close()
+            if backend_info.txn_conn:
+                backend_info.txn_conn.close()
             conn = psycopg2.connect(backend_info.default_uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
@@ -539,14 +539,16 @@ class BenchmarkSuite:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )
-            elif self._config.backend == tp.Backend.SAVE_POINT:
-                self._backend_info.svp_conn = SavePointToolSuite.get_connection(
-                        self._backend_info.svp_conn, self._db_name
+            elif self._config.backend == tp.Backend.TXN:
+                # No-op if there's already a connection active
+                # Otherwise, create the persistent connection
+                self._backend_info.txn_conn = TxnToolSuite.get_connection(
+                        self._backend_info.txn_conn, self._db_name
                         )
-                db_tools = SavePointToolSuite.init_for_bench(
+                db_tools = TxnToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit,
                     self._backend_info.default_branch_name,
-                    self._backend_info.svp_conn
+                    self._backend_info.txn_conn
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
@@ -614,18 +616,8 @@ class BenchmarkSuite:
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
-        if not self._backend_info.svp_conn:
+        if not self._backend_info.txn_conn:
             self.db_tools.close_connection()
-        '''
-        else:
-            try:
-                cur = self._backend_info.svp_conn.cursor()
-                cur.execute("COMMIT;")
-                cur.close()
-            except Exception as e:
-                print(f"Failed to commit transaction: {e}")
-        '''
-
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()

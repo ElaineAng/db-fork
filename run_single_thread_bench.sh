@@ -45,7 +45,7 @@ done
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]"
-    echo "  backend: dolt, neon, kpg, xata, file_copy, PostgreSQL SAVEPOINT"
+    echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn)"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
@@ -57,8 +57,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|SAVE_POINT)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, save_point"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TXN)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, txn"
     exit 1
 fi
 
@@ -69,7 +69,7 @@ if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
     exit 1
 fi
 
-if [[ "$BACKEND" == "SAVE_POINT" &&  "$SHAPE_UPPER" != "SPINE" ]]; then
+if [[ "$BACKEND" == "TXN" &&  "$SHAPE_UPPER" != "SPINE" ]]; then
     echo "Error: PostgreSQL Save Point only works with spine shape"
     exit 1
 fi
@@ -86,7 +86,8 @@ if [ -z "$SEED" ]; then
 fi
 
 # Configuration parameters
-NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
+#NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
+NUM_BRANCHES_LIST=(2 4 8 16 32 64 128 256 512 1024)
 #NUM_BRANCHES_LIST=(16)
 OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
 # OPERATIONS=(BRANCH)
