@@ -1,0 +1,37 @@
+# Simulation workflow — Neon backend
+# Reduced from S=50 to fit 20-branch limit.
+# Aggressive pruning at short intervals.
+
+run_id: "macro_simulation_neon"
+backend: NEON
+workflow: SIMULATION
+
+database_setup {
+    db_name: "macrobench_sim"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/tpcc_schema.sql"
+    }
+}
+
+setup {
+    workers: 5       # T (reduced from 20)
+    total_steps: 15  # S (reduced from 50)
+    db_size: 100     # W
+    max_fanout: 15   # F (reduced from 50)
+    max_depth: 1     # D (forces flat star)
+}
+
+step {
+    mutations: 50    # M
+    ddl_count: 0     # M_DDL
+    queries: 5       # Q
+    merge_prob: 0    # mu
+}
+
+background {
+    interval: 5      # B (reduced from 50)
+    prune_fraction: 0.6 # gamma (increased from 1.0 at end)
+}
+
+autocommit: true

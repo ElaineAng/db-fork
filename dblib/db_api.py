@@ -88,6 +88,36 @@ class DBToolSuite(ABC):
         """
         pass
 
+    def _merge_branch_impl(
+        self, source_branch: str, message: str = ""
+    ) -> dict:
+        """
+        Merges the source branch into the current branch.
+        Must already be connected to the target (destination) branch.
+        This method is timed by its caller. Don't implement additional timing.
+
+        Args:
+            source_branch: Name of the branch to merge from.
+            message: Optional merge commit message.
+
+        Returns:
+            A dict with backend-specific merge result info, e.g.
+            {"fast_forward": bool, "conflicts": int}.
+            Backends that don't support merge return an empty dict.
+        """
+        return {}
+
+    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
+        """
+        Deletes a branch. Must NOT be connected to the branch being deleted.
+        This method is timed by its caller. Don't implement additional timing.
+
+        Args:
+            branch_name: Name of the branch to delete.
+            branch_id: Backend-specific ID of the branch to delete.
+        """
+        pass
+
     #########################################################################
     # Public methods
     #########################################################################
@@ -217,6 +247,67 @@ class DBToolSuite(ABC):
             self._prepare_commit(message)
             self.conn.commit()
         if timed:
+            self.result_collector.flush_record()
+
+    @_require_connection
+    def merge_branch(
+        self,
+        source_branch: str,
+        timed: bool = True,
+        message: str = "",
+    ) -> dict:
+        """
+        Merges the source branch into the currently connected branch.
+
+        The caller must already be connected to the target branch before
+        calling this method.
+
+        Args:
+            source_branch: Name of the branch to merge from.
+            timed: Whether to time and record this operation.
+            message: Optional merge commit message.
+
+        Returns:
+            Backend-specific merge result dict.
+        """
+        result = {}
+        try:
+            with self.result_collector.maybe_time_ops(
+                op_type=rslt.OpType.MERGE, timed=timed
+            ):
+                result = self._merge_branch_impl(source_branch, message)
+        except Exception as e:
+            raise Exception(f"Error merging branch '{source_branch}': {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
+        return result
+
+    @_require_connection
+    def delete_branch(
+        self,
+        branch_name: str,
+        branch_id: str = "",
+        timed: bool = True,
+    ) -> None:
+        """
+        Deletes a branch. The caller must NOT be connected to the branch
+        being deleted.
+
+        Args:
+            branch_name: Name of the branch to delete.
+            branch_id: Backend-specific branch ID (needed for API-based backends).
+            timed: Whether to time and record this operation.
+        """
+        try:
+            with self.result_collector.maybe_time_ops(
+                op_type=rslt.OpType.BRANCH_DELETE, timed=timed
+            ):
+                self._delete_branch_impl(branch_name, branch_id)
+        except Exception as e:
+            raise Exception(f"Error deleting branch '{branch_name}': {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
             self.result_collector.flush_record()
 
     @_require_connection

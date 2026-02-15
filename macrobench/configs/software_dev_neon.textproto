@@ -1,0 +1,36 @@
+# Software Development workflow — Neon backend
+# Neon limit: 20 branches. S=18 + main = 19 branches max.
+
+run_id: "macro_software_dev_neon"
+backend: NEON
+workflow: SOFTWARE_DEV
+
+database_setup {
+    db_name: "macrobench_softdev"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/tpcc_schema.sql"
+    }
+}
+
+setup {
+    workers: 2       # T
+    total_steps: 18  # S (reduced from 20 to fit 20-branch limit)
+    db_size: 10      # W
+    max_fanout: 3    # F
+    max_depth: 10    # D
+}
+
+step {
+    mutations: 5     # M
+    ddl_count: 3     # M_DDL
+    queries: 5       # Q
+    merge_prob: 0.1  # mu
+}
+
+background {
+    interval: 18     # B
+    prune_fraction: 0 # gamma
+}
+
+autocommit: true

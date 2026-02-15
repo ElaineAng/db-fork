@@ -1,0 +1,37 @@
+# What-If Analysis workflow — Neon backend
+# Drastically reduced from S=500 to fit 20-branch limit.
+# Aggressive pruning at short intervals.
+
+run_id: "macro_what_if_neon"
+backend: NEON
+workflow: WHAT_IF
+
+database_setup {
+    db_name: "macrobench_whatif"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/tpcc_schema.sql"
+    }
+}
+
+setup {
+    workers: 3       # T (reduced from 10)
+    total_steps: 15  # S (reduced from 500)
+    db_size: 100     # W
+    max_fanout: 3    # F (reduced from 5)
+    max_depth: 5     # D (reduced from 25)
+}
+
+step {
+    mutations: 1     # M
+    ddl_count: 0     # M_DDL
+    queries: 1       # Q
+    merge_prob: 0    # mu
+}
+
+background {
+    interval: 5      # B (reduced from 50)
+    prune_fraction: 0.5 # gamma (increased from 0.1)
+}
+
+autocommit: true

@@ -207,3 +207,47 @@ class NeonToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
+
+    def _merge_branch_impl(
+        self, source_branch: str, message: str = ""
+    ) -> dict:
+        """Merge source_branch into the currently connected branch.
+
+        Neon does not support true branch merging.  The only notion of
+        "merge" is designating a branch as the primary branch — there is
+        no data-level merge operation.  We record the timing of this
+        no-op so the benchmark still captures the decision overhead.
+        """
+        return {}
+
+    def _delete_branch_impl(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Delete a branch via the Neon REST API.
+
+        Uses DELETE /projects/{project_id}/branches/{branch_id}.
+
+        Restrictions enforced by Neon:
+          - Cannot delete the root/default branch.
+          - Cannot delete a branch that has child branches.
+        """
+        bid = branch_id
+        if not bid:
+            info = self._all_branches.get(branch_name)
+            if info:
+                bid = info[0]
+        if not bid:
+            # Fall back to API lookup
+            all_branches = self._get_neon_branches()
+            if branch_name in all_branches:
+                bid = all_branches[branch_name][0]
+        if not bid:
+            raise ValueError(
+                f"Cannot delete branch '{branch_name}': unknown branch ID"
+            )
+
+        endpoint = f"projects/{self.project_id}/branches/{bid}"
+        self.__class__._request("DELETE", endpoint)
+
+        # Remove from local cache.
+        self._all_branches.pop(branch_name, None)

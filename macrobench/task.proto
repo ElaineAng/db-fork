@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package macrobench;
+
+// All supported database backends (mirrors microbench)
+enum Backend {
+    NEON = 0;
+    DOLT = 1;
+    KPG = 2;
+    XATA = 3;
+}
+
+// The five representative workflow categories from Section 3.1
+enum WorkflowType {
+    SOFTWARE_DEV = 0;
+    FAILURE_REPRO = 1;
+    DATA_CURATION = 2;
+    WHAT_IF = 3;
+    SIMULATION = 4;
+}
+
+// Configuration for reusing an existing database
+message ExistingDatabase {
+    string branch_id = 1;
+    string neon_project_id = 2;
+}
+
+// Configuration for creating database from SQL dump
+message SqlDump {
+    string sql_dump_path = 1;
+}
+
+// Database setup configuration
+message DatabaseSetup {
+    string db_name = 1;
+    bool cleanup = 2;
+
+    oneof source {
+        ExistingDatabase existing_db = 3;
+        SqlDump sql_dump = 4;
+    }
+}
+
+// Setup parameters (Section 3.3, Table 1 "Setup" group)
+message SetupParams {
+    int32 workers = 1;          // T: number of worker threads
+    int32 total_steps = 2;      // S: total steps across all workers
+    int32 db_size = 3;          // W: warehouse scale factor
+    int32 max_fanout = 4;       // F: max children per node
+    int32 max_depth = 5;        // D: max nesting level
+}
+
+// Per-step parameters (Section 3.3, Table 1 "Per-step" group)
+message StepParams {
+    int32 mutations = 1;        // M: total DDL + DML statements per step
+    int32 ddl_count = 2;        // M_DDL: schema-change statements per step
+    int32 queries = 3;          // Q: evaluation queries per step
+    float merge_prob = 4;       // mu: probability of merging after evaluation
+}
+
+// Background process parameters (Section 3.3, Table 1 "Bg." group)
+message BackgroundParams {
+    int32 interval = 1;         // B: steps between background passes
+    float prune_fraction = 2;   // gamma: fraction of live branches pruned per pass
+}
+
+// Top-level macrobenchmark configuration
+message MacroBenchConfig {
+    string run_id = 1;
+    Backend backend = 2;
+    WorkflowType workflow = 3;
+    DatabaseSetup database_setup = 4;
+    SetupParams setup = 5;
+    StepParams step = 6;
+    BackgroundParams background = 7;
+    bool autocommit = 8;
+}
+
+// Isolation overhead benchmark configuration
+message IsolationBenchConfig {
+    string run_id = 1;
+    Backend backend = 2;
+    DatabaseSetup database_setup = 3;
+    bool autocommit = 4;
+
+    // Phase A: branch-count scaling
+    repeated int32 branch_counts = 5;       // e.g. [0, 10, 25, 50, 100, 200]
+    int32 queries_per_step = 6;             // repetitions of each query per branch count (default 3)
+    int32 mutations_per_branch = 7;         // DML ops on each new branch for divergence
+
+    // Phase B: OLTP/OLAP interference
+    repeated int32 olap_thread_counts = 8;  // e.g. [1, 2, 4]
+    int32 interference_duration_sec = 9;    // seconds per config (default 60)
+    int32 warmup_sec = 10;                  // warmup period before measurement (default 5)
+}

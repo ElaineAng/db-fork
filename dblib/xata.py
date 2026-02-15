@@ -233,3 +233,19 @@ class XataToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
+
+    def _delete_branch_impl(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Delete a branch via the Xata API."""
+        bid = branch_id
+        if not bid:
+            info = self._all_branches.get(branch_name)
+            if info:
+                bid = info[0]
+        if not bid:
+            raise ValueError(
+                f"Cannot delete branch '{branch_name}': unknown branch ID"
+            )
+        self._delete_branch(bid)
+        self._all_branches.pop(branch_name, None)

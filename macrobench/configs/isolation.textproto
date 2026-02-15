@@ -1,0 +1,21 @@
+run_id: "isolation_test"
+backend: DOLT
+autocommit: true
+
+database_setup {
+    db_name: "isolation_bench"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/tpcc_schema.sql"
+    }
+}
+
+# Phase A: branch-count scaling
+branch_counts: [0, 10, 25, 50, 100, 200]
+queries_per_step: 3
+mutations_per_branch: 5
+
+# Phase B: OLTP/OLAP interference
+olap_thread_counts: [1, 2, 4]
+interference_duration_sec: 60
+warmup_sec: 5

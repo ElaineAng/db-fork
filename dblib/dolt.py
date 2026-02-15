@@ -122,3 +122,78 @@ class DoltToolSuite(DBToolSuite):
         result = super().execute_sql(cmd)
         # Dolt's branch name is unique and can be used as an ID.
         return (result[0][0], result[0][0])
+
+    def _merge_branch_impl(
+        self, source_branch: str, message: str = ""
+    ) -> dict:
+        """Merge source_branch into the currently checked-out branch.
+
+        Uses Dolt's native dolt_merge() SQL function.  The caller must
+        already be on the target branch (e.g. via connect_branch).
+
+        Pre-conditions enforced by Dolt:
+          - Working set must be clean (dolt_add + dolt_commit beforehand).
+          - Must not be on the source branch.
+
+        Returns:
+            {"fast_forward": bool, "conflicts": int, "hash": str}
+        """
+        # Ensure any pending changes are committed before merge.
+        try:
+            super().execute_sql("SELECT dolt_add('-A');")
+            super().execute_sql(
+                "SELECT dolt_commit('-m', 'pre-merge commit', "
+                "'--allow-empty');"
+            )
+        except Exception:
+            pass  # No pending changes is fine.
+
+        # Perform the merge.
+        if message:
+            cmd = (
+                f"SELECT dolt_merge('{source_branch}', "
+                f"'-m', '{message}');"
+            )
+        else:
+            cmd = f"SELECT dolt_merge('{source_branch}');"
+        result = super().execute_sql(cmd)
+
+        # dolt_merge returns (hash, fast_forward, conflicts, message)
+        info = {}
+        if result and result[0]:
+            row = result[0]
+            info["hash"] = row[0] if len(row) > 0 else ""
+            info["fast_forward"] = bool(row[1]) if len(row) > 1 else False
+            info["conflicts"] = int(row[2]) if len(row) > 2 else 0
+
+        # Auto-resolve conflicts with --ours strategy if any.
+        if info.get("conflicts", 0) > 0:
+            try:
+                # Get list of tables with conflicts.
+                tables = super().execute_sql(
+                    "SELECT table_name FROM dolt_conflicts;"
+                )
+                for (table_name,) in (tables or []):
+                    super().execute_sql(
+                        f"SELECT dolt_conflicts_resolve("
+                        f"'--ours', '{table_name}');"
+                    )
+                super().execute_sql("SELECT dolt_add('-A');")
+                super().execute_sql(
+                    "SELECT dolt_commit('-m', 'resolved merge conflicts');"
+                )
+            except Exception as e:
+                print(f"Warning: conflict resolution failed: {e}")
+
+        return info
+
+    def _delete_branch_impl(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Delete a branch using Dolt's dolt_branch('-D', ...) function.
+
+        Must NOT be on the branch being deleted.  Uses -D (force delete)
+        to handle cases where other sessions may reference the branch.
+        """
+        cmd = f"SELECT dolt_branch('-D', '{branch_name}');"
+        super().execute_sql(cmd)
