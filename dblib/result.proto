@@ -53,5 +53,7 @@ enum OpType {
   INSERT = 4;
   UPDATE = 5;
   COMMIT = 6;
+  CONNECT_FIRST = 7;
+  CONNECT_MID = 8;
+  CONNECT_LAST = 9;
 }
-

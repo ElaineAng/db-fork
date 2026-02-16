@@ -69,7 +69,7 @@ if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
     exit 1
 fi
 
-if [[ "$BACKEND" == "TXN" &&  "$SHAPE_UPPER" != "SPINE" ]]; then
+if [[ "$BACKEND" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
     echo "Error: PostgreSQL Save Point only works with spine shape"
     exit 1
 fi
@@ -86,11 +86,11 @@ if [ -z "$SEED" ]; then
 fi
 
 # Configuration parameters
-#NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
-NUM_BRANCHES_LIST=(2 4 8 16 32 64 128 256 512 1024)
-#NUM_BRANCHES_LIST=(16)
+NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
 OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
-# OPERATIONS=(BRANCH)
+if [[ "$BACKEND" == "TXT" ]]; then 
+    OPERATIONS=(BRANCH READ UPDATE RANGE_RADE RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
+fi
 
 # Other fixed config values
 TABLE_NAME="orders"

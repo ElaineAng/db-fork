@@ -95,14 +95,16 @@ def load_and_compute_percentiles(parquet_files: list[str]) -> pd.DataFrame:
 
 # Operation type enum values to names (from task.proto)
 OP_TYPE_NAMES = {
-    0: "UNSPECIFIED",
-    1: "BRANCH",
-    2: "CONNECT",
-    3: "READ",
-    4: "INSERT",
-    5: "UPDATE",
-    6: "RANGE_UPDATE (per-key)",
-    7: "RANGE_READ (per-key)",
+    0: "BRANCH",
+    1: "CONNECT",
+    2: "READ",
+    3: "INSERT",
+    4: "UPDATE",
+    5: "RANGE_UPDATE (per-key)",
+    6: "RANGE_READ (per-key)",
+    7: "CONNECT_FIRST",
+    8: "CONNECT_MID",
+    9: "CONNECT_LAST",
 }
 
 # Colors for each operation type

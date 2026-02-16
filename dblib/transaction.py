@@ -3,7 +3,9 @@ import psycopg2
 from psycopg2.extensions import connection as _pgconn
 from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
+from dblib import result_pb2 as rslt
 import dblib.util as dbutil
+from microbench import task_pb2 as tp
 
 PGSQL_USER = "postgres"
 PGSQL_PASSWORD = "password"
@@ -50,12 +52,14 @@ class TxnToolSuite(DBToolSuite):
         db_name: str,
         autocommit: bool,
         default_branch_name: str,
+        setup_branches: list,
         conn: _pgconn = None
     ):
         return cls(
             connection=conn,
             collector=collector,
             autocommit=autocommit,
+            setup_branches=setup_branches,
             default_branch_name=default_branch_name,
         )
 
@@ -64,17 +68,18 @@ class TxnToolSuite(DBToolSuite):
         connection: _pgconn,
         collector: rc.ResultCollector,
         autocommit: bool,
+        setup_branches: list,
         default_branch_name: str,
     ):
         super().__init__(connection, result_collector=collector)
         self.autocommit = False # Cannot commit during benchmark
 
-        self._save_points: list[str] = list()
+        self._save_points = SavePoints(setup_branches)
         self._create_branch_impl(default_branch_name)
         self._connect_branch_impl(default_branch_name)
 
     def list_branches(self) -> list[str]:
-        return self._save_points
+        return self._save_points.l
 
     def _create_branch_impl(self, branch_name: str, parent_id: str = None) -> None:
         """
@@ -83,8 +88,40 @@ class TxnToolSuite(DBToolSuite):
         if parent_id and parent_id != self._save_points[-1]:
             raise Exception("Tried to branch from earlier save point, spine shape only allowed")
         cmd = f"SAVEPOINT {branch_name};"
-        res = super().execute_sql(cmd)
+        super().execute_sql(cmd)
         self._save_points.append(branch_name)
+
+    def connect_specific_branch(self, op: int) -> None: #TODO type hint
+        """
+        Connects to an existing branch to allow reading and writing data to that
+        branch. Return a bool indicating whether the operation was successful.
+        """
+        timed = True
+        branch = ""
+        op_type = 0
+        if op == tp.OperationType.CONNECT_FIRST:
+            branch = self._save_points[0]
+            op_type = rslt.OpType.CONNECT_FIRST
+            print(f"C_F: {op_type}")
+        elif op == tp.OperationType.CONNECT_MID:
+            branch = self._save_points[int(len(self._save_points) / 2)]
+            op_type = rslt.OpType.CONNECT_MID
+            print(f"C_M: {op_type}")
+        elif op == tp.OperationType.CONNECT_LAST:
+            branch = self._save_points[len(self._save_points) - 1] 
+            op_type = rslt.OpType.CONNECT_LAST
+            print(f"C_L: {op_type}")
+        try:
+            with self.result_collector.maybe_time_ops(
+                op_type=op_type, timed=timed
+            ):
+                self._connect_branch_impl(branch)
+        except Exception as e:
+            raise Exception(f"Error connecting to branch: {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
+
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -92,11 +129,10 @@ class TxnToolSuite(DBToolSuite):
         writes on that branch. With this backend, that means rolling back to 
         a previous SAVEPOINT.
         """
+        if branch_name not in self._save_points:
+            return # No-op when trying to roll forward
         cmd = f"ROLLBACK TO SAVEPOINT {branch_name};"
-        try:
-            self._save_points = self._save_points[:self._save_points.index(branch_name) + 1]
-        except ValueError as v:
-            raise ValueError(f"Branch '{branch_name}' does not exist.")
+        self._save_points.truncate(branch_name)
         super().execute_sql(cmd)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
@@ -109,3 +145,41 @@ class TxnToolSuite(DBToolSuite):
     def commit_changes(self, timed: bool = False, message: str = "") -> None:
         """ Override to a no-op, we have only one persistent transaction """
         pass
+
+class SavePoints(object):
+    """ A simple container for cheap membership testing of an ordered list """
+    def __init__(self, items: list):
+        self.s = set()
+        if items:
+            self.l = items[:]
+            self.s.update(self.l)
+        else:
+            self.l = list()
+
+    def __contains__(self, item):
+        return item in self.s
+
+    def append(self, item):
+        if item in self.s:
+            return
+        self.l.append(item)
+        self.s.add(item)
+
+    def __getitem__(self, key):
+        return self.l[key]
+
+    def truncate(self, key):
+        if key not in self.s:
+            return
+        self.l = self.l[:self.l.index(key)+1]
+        self.s = set()
+        self.s.update(self.l)
+
+    def __len__(self):
+        return len(self.l)
+
+
+def txn_id(conn):
+    cur = conn.cursor()
+    cur.execute("select txid_current()")
+    return cur.fetchone()

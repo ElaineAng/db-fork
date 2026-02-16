@@ -548,6 +548,7 @@ class BenchmarkSuite:
                 db_tools = TxnToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit,
                     self._backend_info.default_branch_name,
+                    self._backend_info.setup_branches,
                     self._backend_info.txn_conn
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
@@ -1296,26 +1297,36 @@ class BenchmarkSuite:
         # Use shared progress if available (multi-threaded), else use local tqdm
         use_shared_progress = self._shared_progress is not None
 
-        for i in range(num_ops):
-            if op == tp.OperationType.BRANCH:
-                next_bid = self._shared_branch_manager.get_next_branch_id()
-                self.branch_and_connect(next_bid)
-            elif op == tp.OperationType.READ:
-                self.read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.INSERT:
-                self.insert_op(benchmark_table)
-            elif op == tp.OperationType.UPDATE:
-                self.update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_UPDATE:
-                self.range_update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_READ:
-                self.range_read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.CONNECT:
-                self.connect_to_branch(rnd)
-
-            # Update progress
+        if (op == tp.OperationType.CONNECT_FIRST
+        or op == tp.OperationType.CONNECT_MID
+        or op == tp.OperationType.CONNECT_LAST):
+            self.db_tools.connect_specific_branch(op)
+            self._existing_pks = []
             if use_shared_progress:
                 self._shared_progress.update(1)
+
+        else:
+            for i in range(num_ops):
+                if op == tp.OperationType.BRANCH:
+                    next_bid = self._shared_branch_manager.get_next_branch_id()
+                    self.branch_and_connect(next_bid)
+                elif op == tp.OperationType.READ:
+                    self.read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.INSERT:
+                    self.insert_op(benchmark_table)
+                elif op == tp.OperationType.UPDATE:
+                    self.update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_UPDATE:
+                    self.range_update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_READ:
+                    self.range_read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.CONNECT:
+                    self.connect_to_branch(rnd)
+
+
+                # Update progress
+                if use_shared_progress:
+                    self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
