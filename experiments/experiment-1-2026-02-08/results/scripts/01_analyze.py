@@ -36,7 +36,7 @@ def parse_filename(filepath: str) -> dict:
     """Extract backend, N, topology from filename like
     `dolt_tpcc_64_spine_branch_setup.parquet`."""
     stem = Path(filepath).stem  # e.g. dolt_tpcc_64_spine_branch_setup
-    m = re.match(r"^(dolt|file_copy)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
+    m = re.match(r"^(dolt|file_copy|neon)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
     if not m:
         return None
     return {
@@ -66,7 +66,8 @@ def load_all(data_dir: str) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)"}
+BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)", "neon": "Neon"}
+BACKENDS = ["dolt", "file_copy", "neon"]
 TOPO_ORDER = ["spine", "bushy", "fan_out"]
 
 
@@ -86,7 +87,7 @@ def section_overview(df: pd.DataFrame):
 
     print(f"{'Backend':<30} {'Topology':<10} {'N values':>30} {'Rows':>8} {'Reps':>5}")
     print("-" * 85)
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         for topo in TOPO_ORDER:
             sub = df[(df["backend"] == backend) & (df["topology"] == topo)]
             if sub.empty:
@@ -108,7 +109,7 @@ def section_mean_marginal_delta(df: pd.DataFrame):
 
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
 
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
         sub = df[df["backend"] == backend]
         # Group by (topology, N), compute mean delta
@@ -145,7 +146,7 @@ def section_cumulative_storage(df: pd.DataFrame):
     print("Total disk_size_after at the last branch creation, averaged across reps.")
     print()
 
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
         sub = df[df["backend"] == backend]
 
@@ -181,7 +182,7 @@ def section_topology_ratios(df: pd.DataFrame):
 
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
 
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
         sub = df[df["backend"] == backend]
         agg = sub.groupby(["topology", "N"])["storage_delta"].mean().reset_index()
@@ -215,7 +216,7 @@ def section_latency(df: pd.DataFrame):
     print("=" * 70)
     print()
 
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
         sub = df[df["backend"] == backend]
         agg = sub.groupby(["topology", "N"])["latency"].agg(["mean", "std"]).reset_index()
@@ -255,7 +256,7 @@ def section_research_questions(df: pd.DataFrame):
     print("RQ1: Does the marginal storage cost of the nth branch differ across")
     print("     topologies for the same backend?")
     print()
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
         max_n = sub["N"].max()
         at_max = sub[sub["N"] == max_n]
@@ -269,7 +270,7 @@ def section_research_questions(df: pd.DataFrame):
     # RQ2: Do any backends exhibit constant marginal cost regardless of topology?
     print("RQ2: Do any backends exhibit constant marginal cost regardless of topology?")
     print()
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
         # Check coefficient of variation across topologies at each N
         cv = sub.groupby("N")["storage_delta"].agg(lambda x: x.std() / x.mean() if x.mean() != 0 else 0)
@@ -281,7 +282,7 @@ def section_research_questions(df: pd.DataFrame):
     print("RQ3: Does fan-out (shallow, wide) produce lower or higher overhead")
     print("     than spine (deep, narrow)?")
     print()
-    for backend in ["dolt", "file_copy"]:
+    for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
         max_n = sub["N"].max()
         spine_at_max = sub[(sub["topology"] == "spine") & (sub["N"] == max_n)]["storage_delta"].iloc[0]

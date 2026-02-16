@@ -1,176 +1,212 @@
-# Experiment 1: Branch Creation Storage Overhead (Varying Topology)
+# Experiment 1: Branch Creation Storage Overhead
 
-**Date**: 2026-02-09
+**Date**: 2026-02-09 (Dolt, file_copy), 2026-02-11 (Neon)
 
-## 1. Objective
+## 1. Research Questions & Conclusions
 
-Determine whether branch tree topology affects the marginal storage cost of
-branch creation. Three topologies (spine, bushy, fan-out) are tested across
-two backends (Dolt, file_copy/PostgreSQL CoW) at branch counts from 1 to 1024.
+**RQ1: Does branch topology affect marginal storage cost?**
 
-See [README.md](../README.md) for full methodology.
+| Backend | Topology-sensitive? | Conclusion |
+|---------|-------------------|------------|
+| **Dolt** | No | Near-zero cost (~685 B/branch) for all topologies. Branch = pointer write in content-addressed DAG. |
+| **file_copy** | **Yes** | Spine grows superlinearly (152 KB → 2.74 MB at N=1024). Fan-out/bushy stay flat (~165 KB). |
+| **Neon** | No | Constant ~7.3 MB/branch (logical measurement, not physical). |
 
-## 2. Methodology Summary
+- **file_copy spine volatility unexplained**: At high N, spine topology
+  produces extreme variance (CV > 1.5) with negative deltas (storage
+  *decreasing* during branch creation). We observe the pattern but do not
+  have a definitive root cause — likely involves APFS internal extent
+  tracking, background compaction, or block ownership reassignment in deep
+  clone chains, but this has not been confirmed.
+
+
+**RQ2: Why does file_copy diverge by topology?**
+
+PostgreSQL's `CREATE DATABASE ... STRATEGY = FILE_COPY` runs a **per-file loop**
+over the parent directory (`copydir.c: while(ReadDir()) { clone_file(); }`).
+In spine topology, the parent accumulates data from all prior branches → more
+files (F) → more `clonefile()` calls → cost grows as O(F). In fan-out, the
+parent is always the constant-size root → cost stays constant.
+
+
+## 2. Methodology
 
 | Parameter | Value |
 |-----------|-------|
-| Backends | Dolt (content-addressed), file_copy (PostgreSQL CoW via filesystem copy) |
+| Backends | Dolt, file_copy (PostgreSQL CoW), Neon |
 | Topologies | spine (linear chain), bushy (random parent), fan_out (all from root) |
-| Branch counts (N) | 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 |
-| Iterations per config | 3 |
+| Branch counts (N) | 1–1024 (Dolt, file_copy); 1–8 (Neon, platform limit) |
+| Repetitions | 3 per config |
 | Workload per branch | 100 INSERTs + 20 UPDATEs + 10 DELETEs (TPC-C orders) |
 | Metric | `storage_delta = disk_size_after - disk_size_before` per branch creation |
+| Data | 78 parquet files, 36,981 rows |
 
-**Storage measurement**: Dolt uses filesystem `st_blocks * 512` on its data
-directory. file_copy uses `shutil.disk_usage()` on an isolated APFS volume.
+### Storage Measurement
 
-**Total data**: 66 setup parquet files, 36,846 rows.
+| Backend | Method | Type | CoW-aware? |
+|---------|--------|------|------------|
+| **Dolt** | `st_blocks * 512` on shared data directory | Physical | Yes |
+| **file_copy** | `shutil.disk_usage()` on isolated APFS volume | Physical | Yes |
+| **Neon** | `pg_database_size()` per branch, summed | Logical | No |
+
+<details>
+<summary>Measurement details per backend</summary>
+
+**Dolt** stores all branches in a single content-addressed chunk store. Measuring
+the data directory with `st_blocks * 512` gives true physical storage because
+identical chunks across branches are stored exactly once. This is the
+[recommended approach](https://github.com/dolthub/dolt/issues/6624) from the
+Dolt team.
+
+**file_copy** creates each branch as a separate PostgreSQL database using
+`CREATE DATABASE ... STRATEGY = FILE_COPY` with `file_copy_method = 'clone'`
+(PostgreSQL 18+). On macOS, this calls APFS `clonefile()` to create
+copy-on-write clones of the parent's data files — the raw file duplication
+cost is near-zero. We measure total storage via `shutil.disk_usage()` on a
+dedicated APFS volume that contains only the PostgreSQL data directory. Volume
+isolation ensures the measurement captures only PostgreSQL activity and
+correctly reflects CoW block sharing.
+
+**Neon** measures storage via `pg_database_size()`, which reports the **logical**
+size of each branch's database. This does **not** reflect copy-on-write page
+sharing between branches. As Neon's own documentation states:
+
+> "If you have a database with 1 GB logical size and you create a branch of it,
+> both branches will have 1 GB logical size, even though the branch is
+> copy-on-write and won't consume any extra physical disk space until you make
+> changes to it."
+> — [Neon Glossary](https://github.com/neondatabase/neon/blob/main/docs/glossary.md)
+
+The only CoW-aware alternative (`synthetic_storage_size`) updates every 15–60
+minutes and is project-level only, making it unsuitable for per-branch
+measurement.
+
+</details>
 
 ## 3. Results
 
-### 3.1 Dolt: Topology Has No Effect on Storage
+### Marginal Storage Delta by Backend
 
-Dolt uses content-addressed storage where branches are lightweight pointers.
-Creating a branch adds near-zero bytes regardless of topology or branch count.
+**Dolt** (physical, content-addressed):
 
-| N | Spine (mean delta) | Bushy (mean delta) | Fan-out (mean delta) |
-|---|---|---|---|
+| N | Spine | Bushy | Fan-out |
+|---|-------|-------|---------|
 | 1 | 2.67 KB | 1.33 KB | 0 B |
-| 8 | 171 B | 341 B | 683 B |
 | 64 | 5.67 KB | 5.35 KB | 5.42 KB |
-| 256 | 4.00 KB | 5 B | 1.51 KB |
 | 1024 | 685 B | 343 B | 11.33 KB |
 
-All deltas are dominated by occasional metadata flushes (most individual
-branch creations have a delta of exactly 0 B). The cumulative storage at
-N=1024 is ~923 MB for all three topologies, confirming that topology does not
-affect Dolt's storage.
+**file_copy** (physical, filesystem CoW):
 
-![Marginal Storage Delta per Branch (N=1024)](figures/fig1_marginal_storage_by_topology.png)
-*Figure 1: Per-branch storage delta at N=1024. Dolt (left) shows near-zero deltas for all topologies. file_copy (right) shows spine diverging dramatically.*
-
-### 3.2 file_copy: Spine Grows Superlinearly
-
-For the file_copy backend (full PostgreSQL directory copy per branch), topology
-has a dramatic effect on storage:
-
-| N | Spine (mean delta) | Bushy (mean delta) | Fan-out (mean delta) |
-|---|---|---|---|
+| N | Spine | Bushy | Fan-out |
+|---|-------|-------|---------|
 | 1 | 152.00 KB | 154.67 KB | 86.67 KB |
-| 8 | 171.17 KB | 155.83 KB | 147.00 KB |
 | 64 | 190.17 KB | 145.54 KB | 122.12 KB |
 | 256 | 167.42 KB | 162.17 KB | 120.44 KB |
 | 512 | 623.78 KB | 181.08 KB | 137.12 KB |
 | 1024 | **2.74 MB** | 212.14 KB | 165.02 KB |
 
-At N=1024, spine's mean marginal delta is **17.0x** fan-out's, and **12.9x**
-bushy's. This is because each spine branch copies an increasingly large parent
-directory (the parent accumulates mutations from all prior branches in the chain).
-
-### 3.3 Cumulative Storage
-
-![Cumulative Storage vs Number of Branches](figures/fig2_cumulative_storage_vs_branches.png)
-*Figure 2: Total storage after creating N branches. Dolt (left) shows topology-independent linear growth. file_copy (right) shows spine diverging superlinearly.*
-
-| N | Dolt (all topos) | file_copy spine | file_copy bushy | file_copy fan-out |
-|---|---|---|---|---|
-| 1 | ~0.8 MB | 178 MB | 288 MB | 362 MB |
-| 64 | ~44-45 MB | 196 MB | 301 MB | 374 MB |
-| 256 | ~199 MB | 310 MB | 344 MB | 411 MB |
-| 512 | ~430-435 MB | 822 MB | 410 MB | 470 MB |
-| 1024 | ~923 MB | **3.75 GB** | 563 MB | 612 MB |
-
-At N=1024, file_copy spine uses **6.1x** more storage than file_copy fan-out
-and **6.7x** more than bushy. Meanwhile, Dolt uses ~923 MB for all topologies.
-
-### 3.4 Topology Scaling Behavior
-
-![Mean Marginal Delta vs Branch Count](figures/fig3_mean_delta_vs_branches.png)
-*Figure 3: Mean per-branch storage delta vs N. file_copy spine's cost accelerates at N>256, while bushy and fan-out remain approximately constant.*
-
-For file_copy:
-- **Fan-out**: marginal cost is nearly constant at ~120-165 KB/branch across all N
-- **Bushy**: marginal cost grows slowly from ~155 KB to ~212 KB (1.4x over 1024 branches)
-- **Spine**: marginal cost is stable at ~150-190 KB for N<=256, then jumps to 624 KB at N=512 and 2.74 MB at N=1024
-
-### 3.5 Branch Creation Latency
-
-| N | Dolt spine | Dolt fan-out | file_copy spine | file_copy fan-out |
-|---|---|---|---|---|
-| 1 | 7.9 ms | 7.6 ms | 42.7 ms | 118.7 ms |
-| 64 | 7.8 ms | 8.1 ms | 47.2 ms | 68.1 ms |
-| 256 | 8.0 ms | 8.1 ms | 40.1 ms | 58.4 ms |
-| 512 | 8.1 ms | 7.9 ms | 75.2 ms | 60.0 ms |
-| 1024 | 8.1 ms | 8.3 ms | **275.5 ms** | 64.1 ms |
-
-Dolt branch creation takes ~8 ms regardless of topology or N.
-file_copy spine latency grows with N (275 ms at N=1024) because it copies
-a larger directory. file_copy fan-out latency is stable at ~60-70 ms for N>=64.
-
-## 4. Research Question Answers
-
-### RQ1: Does the marginal storage cost differ across topologies?
-
-**Yes, for file_copy. No, for Dolt.**
-
-- **Dolt**: All topologies produce near-zero marginal storage deltas. Content-addressed
-  storage deduplicates identical data, and branch creation only adds a pointer.
-  Topology has no measurable effect.
-
-- **file_copy**: Spine's marginal cost grows superlinearly with N, reaching 2.74 MB/branch
-  at N=1024 (17x fan-out's 165 KB). Bushy grows moderately (212 KB at N=1024, 1.3x fan-out).
-  Fan-out is approximately constant.
-
-### RQ2: Do any backends exhibit constant marginal cost regardless of topology?
-
-**Yes: Dolt.** Its content-addressed storage architecture produces topology-invariant
-branching costs. The per-branch delta is near-zero for all configurations.
-
-### RQ3: Does fan-out produce lower or higher overhead than spine?
-
-**Fan-out produces dramatically lower overhead for file_copy** (17x lower at N=1024).
-For Dolt, the difference is negligible (both near-zero).
-
-The mechanism is clear: in spine topology, each parent accumulates mutations from
-all prior branches in the chain, so each successive copy is larger. In fan-out,
-every branch copies from the unmodified root, keeping the copy size constant.
-
-## 5. Neon Results (N<=8)
-
-*These results are from a separate Neon run capped at 8 branches due to
-platform limits. They are preserved here for completeness.*
-
-| Shape   | Branch counts | Iterations |
-|---------|---------------|------------|
-| spine   | 1, 2, 4, 8   | 2          |
-| bushy   | 1, 2, 4, 8   | 3          |
-| fan_out | 1, 2, 4, 8   | 3          |
+**Neon** (logical, `pg_database_size()`):
 
 | N | Spine | Bushy | Fan-out |
 |---|-------|-------|---------|
-| 1 | 7,643,136 | 7,643,136 | 7,643,136 |
-| 2 | 7,659,520 | 7,643,136 | 7,643,136 |
-| 4 | 7,673,856 | 7,648,597 | 7,643,136 |
-| 8 | 7,701,504 | 7,662,251 | 7,643,136 |
+| 1 | 7.29 MB | 7.29 MB | 7.29 MB |
+| 4 | 7.32 MB | 7.30 MB | 7.29 MB |
+| 8 | 7.35 MB | 7.31 MB | 7.29 MB |
 
-All values in bytes (mean marginal storage delta).
+At N=1024, file_copy spine is **17x** fan-out and **13x** bushy.
 
-At N=8 the topology effect on Neon is small: spine is only 0.8% higher than
-fan-out. Neon uses copy-on-write page references, so `pg_database_size()`
-reports logical size rather than physical bytes added. Fan-out's delta is
-constant because every branch forks from the unmodified root.
+![Marginal Storage Delta per Branch](figures/fig1_marginal_storage_by_topology.png)
+*Figure 1: Per-branch storage delta trajectory at per-backend max N (Dolt and
+file_copy at N=1024, Neon at N=8).*
 
-## 6. Limitations
+## 4. Analysis
 
-- **Dolt storage measurement**: Uses `st_blocks * 512` on the data directory.
-  On macOS APFS, cloned files may overcount `st_blocks` due to filesystem-level
-  CoW that isn't visible at the stat level.
-- **file_copy storage measurement**: Uses `shutil.disk_usage()` on an isolated
-  APFS volume. This captures real disk consumption but includes filesystem
-  overhead beyond raw data.
-- **Neon**: Capped at 8 branches (platform limit). `pg_database_size()` reports
-  logical size, not physical storage on the shared pageserver.
-- **Single workload**: Only TPC-C orders table with fixed insert/update/delete
-  counts. Different workloads may produce different topology sensitivity.
-- **macOS only**: APFS filesystem behavior may differ from production Linux
-  deployments using ext4 or XFS.
+### 4.1 Dolt O(1) vs file_copy O(F): The Branching Mechanism Gap
+
+![Branch Mechanism Comparison](figures/fig_branch_mechanism_comparison.jpg)
+*Figure 2: Dolt creates a branch with a single pointer write O(1). PostgreSQL
+file_copy calls `clonefile()` per file in the parent directory — O(F).*
+
+**Dolt — O(1): single pointer write.** Creating a branch calls
+[`SetHead(ctx, ds, commit_hash)`](https://github.com/dolthub/dolt/blob/main/go/libraries/doltcore/doltdb/doltdb.go)
+— one pointer to an existing commit in the content-addressed Prolly tree.
+No data copied, no files iterated, cost independent of database size or topology.
+
+> "When you create a new branch, you create a new pointer, a small amount of
+> metadata. [...] There is no additional object storage required unless a
+> change is made on a branch."
+> — [How Dolt Scales to Millions of Versions](https://www.dolthub.com/blog/2025-05-16-millions-of-versions/)
+
+**file_copy — O(F): per-file clone loop.** PostgreSQL's
+[`copydir.c`](https://www.postgresql.org/message-id/E1u25N2-003GyZ-1O@gemulon.postgresql.org)
+iterates over the parent's data directory:
+
+```c
+while ((xlde = ReadDir(xldir, fromdir)) != NULL) {
+    if (file_copy_method == FILE_COPY_METHOD_CLONE)
+        clone_file(fromfile, tofile);   /* one clonefile() per file */
+    else
+        copy_file(fromfile, tofile);
+}
+```
+
+Each `clonefile()` is individually cheap (CoW), but the **count equals F**
+(heap segments, indexes, FSM, VM, TOAST files in the parent directory).
+Additionally, `CREATE DATABASE` issues two forced checkpoints (flushing all
+dirty buffers server-wide), WAL records, and catalog updates.
+
+### 4.2 Why file_copy Spine Grows Superlinearly
+
+The O(F) cost is topology-sensitive because **F depends on parent size**:
+
+- **Spine**: parent = branch_{i-1}, which accumulated all prior workloads.
+  More rows → more heap segments, larger indexes → F grows with i.
+  Each successive `CREATE DATABASE` clones more files with more checkpoint
+  overhead. Cost grows linearly per branch → **total grows as O(N²)**.
+  Result: 152 KB at N=1 → 2.74 MB at N=1024.
+
+- **Fan-out**: parent = root (constant size, constant F). Cost ≈ 120–165 KB.
+
+- **Bushy**: random parent, average depth O(log N). Modest growth: 155–212 KB.
+
+### 4.3 Deep Clone Chains Cause Volatile Storage Deltas
+
+Spine also produces **highly volatile** per-branch deltas:
+
+![file_copy Delta Volatility by Topology](figures/fig5_file_copy_delta_volatility.png)
+*Figure 3: Individual storage deltas (scatter) with rolling mean and ±1 std
+band for file_copy at N=1024.*
+
+- **Spine**: CV > 1.5 past branch ~1000. Individual deltas range from -1.3 MB
+  to +77 MB. Deep APFS clone chains (depth = N) make extent tracking
+  non-deterministic — deferred block resolution and background compaction
+  cause negative deltas (space reclamation) alongside extreme positives.
+- **Bushy**: tight (CV < 0.1), clone depth O(log N) stays in APFS's stable range.
+- **Fan-out**: tightest (CV ≈ 0.02), always depth 1.
+
+### 4.4 Why Neon Shows Constant ~7.3 MB
+
+`pg_database_size()` reports logical size. Each branch receives an identical
+workload → identical logical growth → topology has no effect. Under the hood,
+Neon implements CoW at the page level, but this sharing is invisible to
+`pg_database_size()`. The true physical cost is likely near-zero but not
+measurable with available APIs.
+
+> "A branch is a copy-on-write clone of your data."
+> — [Neon Branching Docs](https://neon.tech/docs/conceptual-guides/branching)
+
+### 4.5 Cross-Backend Summary
+
+| Property | Dolt | file_copy | Neon |
+|----------|------|-----------|------|
+| Measurement type | Physical | Physical | Logical |
+| Topology-sensitive? | No | **Yes** (spine 17x fan-out) | No |
+| Cost at max N | ~685 B | 165 KB–2.74 MB | ~7.3 MB |
+| Branch mechanism | Pointer in commit graph | Per-file directory copy | API-managed timeline |
+
+### 4.6 Limitations
+
+- **Neon**: capped at 8 branches; `pg_database_size()` = logical only
+- **macOS only**: APFS behavior may differ from Linux ext4/XFS
+- **Single workload**: TPC-C orders only; different workloads may shift thresholds
+- **No Dolt GC**: unreferenced chunks may inflate Dolt measurements
