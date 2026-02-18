@@ -46,6 +46,20 @@ class DBToolSuite(ABC):
     def get_current_connection(self) -> _pgconn:
         return self.conn
 
+    @abstractmethod
+    def get_total_storage_bytes(self) -> int:
+        """Get the total storage used by the current database/branch.
+
+        Each subclass must implement its own storage measurement strategy:
+        - Directory-based (Dolt, KPG): use ``dbutil.get_directory_size_bytes()``
+        - SQL-based (Neon): ``pg_database_size()`` per branch
+        - Metrics API (Xata): branch-level ``disk`` metric via REST API
+
+        Returns:
+            Total storage in bytes, or 0 if unavailable.
+        """
+        pass
+
     ######################################################################
     # Protected methods
     ######################################################################
@@ -177,9 +191,6 @@ class DBToolSuite(ABC):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
 
     @_require_connection
     def connect_branch(self, branch_name: str, timed: bool = False) -> None:

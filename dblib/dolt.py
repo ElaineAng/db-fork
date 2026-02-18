@@ -1,3 +1,5 @@
+import os
+
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
@@ -5,10 +7,11 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
-DOLT_USER = "postgres"
-DOLT_PASSWORD = "password"
-DOLT_HOST = "localhost"
-DOLT_PORT = 5432
+DOLT_USER = os.environ.get("DOLT_USER", "postgres")
+DOLT_PASSWORD = os.environ.get("DOLT_PASSWORD", "password")
+DOLT_HOST = os.environ.get("DOLT_HOST", "localhost")
+DOLT_PORT = int(os.environ.get("DOLT_PORT", "5432"))
+DOLT_DATA_DIR = os.environ.get("DOLT_DATA_DIR", "/tmp/doltgres_data/databases")
 
 
 def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
@@ -71,6 +74,7 @@ class DoltToolSuite(DBToolSuite):
             collector=collector,
             autocommit=autocommit,
             default_branch_name=default_branch_name,
+            db_name=db_name,
         )
 
     def __init__(
@@ -79,10 +83,12 @@ class DoltToolSuite(DBToolSuite):
         collector: rc.ResultCollector,
         autocommit: bool,
         default_branch_name: str,
+        db_name: str = None,
     ):
         super().__init__(connection, result_collector=collector)
         self._connect_branch_impl(default_branch_name)
         self.autocommit = autocommit
+        self.db_name = db_name
 
     def list_branches(self) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"
@@ -98,7 +104,7 @@ class DoltToolSuite(DBToolSuite):
             # Ignore commit errors (e.g., no changes to commit).
             print(f"Commit failed: {e}")
 
-    def _create_branch_impl(self, branch_name: str, parent_id: str) -> None:
+    def _create_branch_impl(self, branch_name: str, parent_id: str = None) -> None:
         """
         Creates a new branch in the Dolt database.
         """
@@ -122,3 +128,17 @@ class DoltToolSuite(DBToolSuite):
         result = super().execute_sql(cmd)
         # Dolt's branch name is unique and can be used as an ID.
         return (result[0][0], result[0][0])
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage by measuring the Dolt data directory on disk.
+
+        Dolt uses content-addressable Prolly trees with structural sharing
+        across branches. DoltgreSQL doesn't support pg_database_size(), so we
+        measure physical disk usage directly from the data directory.
+        Reference: https://docs.dolthub.com/architecture/storage-engine/prolly-tree
+        """
+        if not self.db_name:
+            return 0
+        return dbutil.get_directory_size_bytes(
+            os.path.join(DOLT_DATA_DIR, self.db_name)
+        )

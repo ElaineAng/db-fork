@@ -1,3 +1,5 @@
+import os
+
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
@@ -5,10 +7,11 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
-PGSQL_USER = "postgres"
-PGSQL_PASSWORD = "password"
-PGSQL_HOST = "localhost"
-PGSQL_PORT = 5432
+PGSQL_USER = os.environ.get("PGSQL_USER", "postgres")
+PGSQL_PASSWORD = os.environ.get("PGSQL_PASSWORD", "password")
+PGSQL_HOST = os.environ.get("PGSQL_HOST", "localhost")
+PGSQL_PORT = int(os.environ.get("PGSQL_PORT", "5432"))
+PGSQL_DATA_DIR = os.environ.get("PGSQL_DATA_DIR", "")
 
 
 class FileCopyToolSuite(DBToolSuite):
@@ -81,6 +84,47 @@ class FileCopyToolSuite(DBToolSuite):
         else:
             self._create_branch_impl(default_branch_name, db_name)
             self._connect_branch_impl(default_branch_name)
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total physical storage across all branch databases.
+
+        On macOS, PGSQL_DATA_DIR is required — it must point to an isolated
+        volume (sparse disk image) so shutil.disk_usage() measures only DB
+        files. See db_setup/setup_pg_volume.sh.
+
+        On Linux, falls back to per-OID st_blocks (accurate without CoW).
+        """
+        if PGSQL_DATA_DIR:
+            return dbutil.get_volume_usage_bytes(PGSQL_DATA_DIR)
+        return self._get_storage_via_st_blocks()
+
+    def _get_storage_via_st_blocks(self) -> int:
+        """Fallback: sum st_blocks across per-OID directories.
+
+        Accurate on Linux ext4/XFS where FILE_COPY does a real copy (no CoW).
+        Would overcount on btrfs or XFS with reflinks — use PGSQL_DATA_DIR
+        with an isolated volume in that case.
+        """
+        branch_names = list(self.shared_branches)
+        if not branch_names:
+            return 0
+
+        cur = self.conn.cursor()
+        cur.execute("SHOW data_directory;")
+        pg_data_dir = cur.fetchone()[0]
+
+        cur.execute(
+            "SELECT oid FROM pg_database WHERE datname = ANY(%s);",
+            (branch_names,),
+        )
+        oids = [str(row[0]) for row in cur.fetchall()]
+        cur.close()
+
+        base_dir = os.path.join(pg_data_dir, "base")
+        total = 0
+        for oid in oids:
+            total += dbutil.get_directory_size_bytes(os.path.join(base_dir, oid))
+        return total
 
     def list_branches(self) -> list[str]:
         return list(shared_branches)
