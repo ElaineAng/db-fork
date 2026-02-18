@@ -95,7 +95,7 @@ class TxnToolSuite(DBToolSuite):
         cur.close()
         self._save_points.append(branch_name)
 
-    def connect_specific_branch(self, op: int) -> None: #TODO type hint
+    def connect_specific_branch(self, op: rslt.OpType) -> None:
         """
         Connects to an existing branch to allow reading and writing data to that
         branch. Return a bool indicating whether the operation was successful.

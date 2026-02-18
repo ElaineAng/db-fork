@@ -58,8 +58,6 @@ def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
         "UPDATE": rslt.OpType.UPDATE,
         "DELETE": rslt.OpType.UPDATE,  # DELETE is a write operation like UPDATE
         "WITH": rslt.OpType.READ,  # If we still have WITH, it's likely a CTE query (read)
-        "SAVEPOINT": rslt.OpType.BRANCH_CREATE,
-        "ROLLBACK": rslt.OpType.BRANCH_CONNECT,
     }
 
     return keyword_map.get(keyword, rslt.OpType.UNSPECIFIED)

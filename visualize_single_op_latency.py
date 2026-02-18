@@ -97,8 +97,8 @@ def load_and_compute_percentiles(parquet_files: list[str]) -> pd.DataFrame:
 OP_TYPE_NAMES = {
     0: "UNSPECIFIED",
     1: "BRANCH",
-    2: "READ",
-    3: "CONNECT",
+    2: "CONNECT",
+    3: "READ",
     4: "INSERT",
     5: "UPDATE",
     6: "RANGE_UPDATE (per-key)",
