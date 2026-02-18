@@ -4,39 +4,30 @@
 
 ## 1. Research Questions & Conclusions
 
-**Motivation**: In a CoW branching system, branches share underlying data. When
-you UPDATE a shared page on one branch, the system must allocate new storage
-for the diverged copy. The concern is: *if N branches all share the same
-pages, does modifying one branch become more expensive because N-1 other
-branches still reference the old version?* This experiment answers that by
-creating N branches, then measuring `storage_delta` around each individual
-SQL statement on the last branch.
-
 **RQ1: Does per-operation storage overhead grow with branch count?**
-
-**No.** All three backends show near-zero per-operation storage delta regardless
-of N or topology. >99% of operations produce exactly 0 bytes of storage growth
-for Dolt and file_copy.
 
 | Backend | Total ops | Non-zero deltas | Non-zero fraction |
 |---------|-----------|-----------------|-------------------|
-| Dolt | 3,190 | 21 | 0.7% |
-| file_copy | 3,190 | 22 | 0.7% |
-| Neon | 1,160 | 72 | 6.2% |
+| **Dolt** | 3,190 | 21 | 0.7% |
+| **file_copy** | 3,190 | 22 | 0.7% |
+| **Neon** | 1,160 | 72 | 6.2% |
+
+**No.** >99% of operations produce exactly 0 bytes of storage growth for Dolt
+and file_copy. Neon shows a higher non-zero fraction (6.2%) due to logical
+measurement, but absolute deltas remain tiny (mean < 1.6 KB at N=8).
 
 **RQ2: Is the overhead topology-dependent?**
 
 **No.** Unlike branch creation (Experiment 1), per-operation storage overhead
-is topology-invariant for all backends. Once a branch exists, modifications
-on it are isolated — the number and arrangement of other branches does not
-affect write amplification.
+is topology-invariant. Once a branch exists, modifications on it are
+isolated — the arrangement of other branches does not affect write
+amplification.
 
 **RQ3: Is per-key overhead constant across range sizes?**
 
-**Effectively yes.** For Dolt and file_copy, per-key delta is 0 B for all
-range sizes (median). For Neon, per-key delta *decreases* with range size
-(614 B at r=1 → 13 B at r=100) due to page-level amortization: one 8 KB
-page allocation spread across more keys.
+**Effectively yes.** For Dolt and file_copy, per-key delta is 0 B (median)
+for all range sizes. For Neon, per-key delta *decreases* with range size
+(614 B at r=1 → 13 B at r=100) due to page-level amortization.
 
 ## 2. Methodology
 
@@ -50,20 +41,13 @@ page allocation spread across more keys.
 | Metric | `storage_delta = disk_size_after - disk_size_before` per operation |
 | Data | 260 runs, 520 parquet files, 7,540 operation measurements |
 
-**Procedure**: Each run follows four phases:
-1. **Initialize** — fresh database with TPC-C orders schema
-2. **Branch setup** — create N branches using the topology's parent rule
-3. **Operation measurement** — on the **last created branch**, execute
-   individual SQL statements, each wrapped with storage measurement:
-   `disk_size_before` → 1 SQL statement → `disk_size_after` → compute delta.
-   Repeated 50× for UPDATE, 20× for RANGE_UPDATE.
-4. **Cleanup** — drop the database
+**Procedure**: Each run creates N branches, then on the **last branch**
+executes individual SQL statements, each wrapped with storage measurement:
+`disk_size_before` → SQL → `disk_size_after` → delta.
 
 **Sub-experiments**:
-- **Exp 2a**: UPDATE + RANGE_UPDATE (r=20) across all topologies. Does per-op
-  overhead grow with N or vary by topology?
-- **Exp 2b**: RANGE_UPDATE with varying range sizes (1, 10, 50, 100), spine
-  only. Is per-key overhead constant?
+- **Exp 2a**: UPDATE + RANGE_UPDATE (r=20) across all topologies
+- **Exp 2b**: RANGE_UPDATE with varying range sizes (1, 10, 50, 100), spine only
 
 ### Storage Measurement
 
@@ -108,17 +92,7 @@ measurement.
 
 ## 3. Results
 
-### 3.1 Non-Zero Delta Distribution
-
-The rare non-zero deltas cluster at backend-specific allocation boundaries:
-
-| Backend | Allocation sizes | Pattern |
-|---------|-----------------|---------|
-| **Dolt** | 16 KB (3), 64 KB (7), 1 MB (11) | Chunk splits/merges |
-| **file_copy** | 8 KB (13), 16 KB (2), 64 KB (2), 1 MB (1) | Page allocations |
-| **Neon** | 8 KB (70), 16 KB (2) | Page allocations |
-
-### 3.2 Point UPDATE vs Branch Count
+### Point UPDATE vs Branch Count
 
 ![Point UPDATE Storage Delta](figures/fig2a_update_storage_delta.png)
 *Figure 1: Per-UPDATE storage delta vs N. Near-zero for all backends with no
@@ -128,22 +102,16 @@ growth trend.*
 - **file_copy**: Zero across all N and topologies
 - **Neon**: Slight upward trend (0–2% at N=1 → 10% at N=8), all non-zero = 8 KB
 
-### 3.3 RANGE_UPDATE (r=20) vs Branch Count
+### RANGE_UPDATE (r=20) vs Branch Count
 
 ![RANGE_UPDATE Storage Delta](figures/fig2b_range_update_storage_delta.png)
 *Figure 2: Per-RANGE_UPDATE(r=20) storage delta vs N. Same pattern: sporadic
 non-zero, no systematic trend.*
 
-### 3.4 Non-Zero Fraction vs Branch Count
-
-![Non-Zero Delta Fraction](figures/fig2e_nonzero_fraction.png)
-*Figure 3: Fraction of operations producing non-zero deltas vs N. Sporadic
-events uncorrelated with branch count.*
-
-### 3.5 Per-Key Delta vs Range Size (Exp 2b)
+### Per-Key Delta vs Range Size (Exp 2b)
 
 ![Per-Key Delta vs Range Size](figures/fig2c_per_key_delta_vs_range_size.png)
-*Figure 4: Per-key storage delta across range sizes (spine topology).*
+*Figure 3: Per-key storage delta across range sizes (spine topology).*
 
 | Backend | r=1 | r=10 | r=20 | r=50 | r=100 |
 |---------|-----|------|------|------|-------|
@@ -159,11 +127,15 @@ amortization.
 
 ### 4.1 Why Per-Operation Overhead Is Near-Zero
 
-**Dolt**: Content-addressed Prolly tree rewrites only affected leaf chunk +
-ancestors. If rewritten chunks fit in allocated space, total storage unchanged.
-Non-zero deltas (0.7%) are chunk splits/merges at fixed sizes (16 KB/64 KB/1 MB),
-uncorrelated with branch count. Each branch operates on its own tree root —
-no cross-branch write amplification.
+![Per-Operation Storage Mechanism](figures/fig_perop_storage_mechanism.jpg)
+*Figure 4: Dolt rewrites only affected chunks in-place. file_copy uses HOT
+updates within existing page free space. Neither triggers new allocation.*
+
+**Dolt**: Content-addressed Prolly tree rewrites only the affected leaf chunk +
+ancestors. If rewritten chunks fit in allocated space, total storage is
+unchanged. Non-zero deltas (0.7%) are chunk splits/merges at fixed sizes
+(16 KB/64 KB/1 MB), uncorrelated with branch count. Each branch operates on
+its own tree root — no cross-branch write amplification.
 
 **file_copy**: Each branch is an independent PostgreSQL database. UPDATEs
 modify heap pages in-place (HOT updates or within existing free space).
