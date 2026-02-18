@@ -14,16 +14,17 @@ enum Backend {
 
 // Type of benchmark operation to perform
 enum OperationType {
-    BRANCH = 0;
-    READ = 1;
-    CONNECT = 2;    
-    INSERT = 3;
-    UPDATE = 4;
-    RANGE_UPDATE = 5;
-    RANGE_READ = 6;
-    CONNECT_FIRST = 7;
-    CONNECT_MID = 8;
-    CONNECT_LAST = 9;
+    UNSPECIFIED = 0;
+    BRANCH = 1;
+    READ = 2;
+    CONNECT = 3;    
+    INSERT = 4;
+    UPDATE = 5;
+    RANGE_UPDATE = 6;
+    RANGE_READ = 7;
+    CONNECT_FIRST = 8;
+    CONNECT_MID = 9;
+    CONNECT_LAST = 10;
 }
 
 // Configuration for reusing an existing database

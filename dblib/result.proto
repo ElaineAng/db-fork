@@ -48,12 +48,14 @@ message Result {
 enum OpType {
   UNSPECIFIED = 0;
   BRANCH_CREATE = 1;
-  BRANCH_CONNECT = 2;
-  READ = 3;
+  READ = 2;
+  BRANCH_CONNECT = 3;
   INSERT = 4;
   UPDATE = 5;
   COMMIT = 6;
-  CONNECT_FIRST = 7;
-  CONNECT_MID = 8;
-  CONNECT_LAST = 9;
+  RANGE_UPDATE = 7;
+  RANGE_READ = 8;
+  CONNECT_FIRST = 9;
+  CONNECT_MID = 10;
+  CONNECT_LAST = 11; 
 }

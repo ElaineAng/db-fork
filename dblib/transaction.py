@@ -16,7 +16,8 @@ class TxnToolSuite(DBToolSuite):
     """
     A suite of tools for interacting with a PGSQL database on a shared connection.
     Uses a single persistent transaction and Postgres SAVEPOINTs to simulate
-    branching.
+    branching. Uses raw SQL to manage transaction instead of psycopg2 semantics
+    to better control behavior.
     """
 
     @classmethod
@@ -88,7 +89,10 @@ class TxnToolSuite(DBToolSuite):
         if parent_id and parent_id != self._save_points[-1]:
             raise Exception("Tried to branch from earlier save point, spine shape only allowed")
         cmd = f"SAVEPOINT {branch_name};"
-        super().execute_sql(cmd)
+        # Allow exceptions to percolate up
+        cur = self.conn.cursor()
+        cur.execute(cmd)
+        cur.close()
         self._save_points.append(branch_name)
 
     def connect_specific_branch(self, op: int) -> None: #TODO type hint
@@ -102,15 +106,12 @@ class TxnToolSuite(DBToolSuite):
         if op == tp.OperationType.CONNECT_FIRST:
             branch = self._save_points[0]
             op_type = rslt.OpType.CONNECT_FIRST
-            print(f"C_F: {op_type}")
         elif op == tp.OperationType.CONNECT_MID:
             branch = self._save_points[int(len(self._save_points) / 2)]
             op_type = rslt.OpType.CONNECT_MID
-            print(f"C_M: {op_type}")
         elif op == tp.OperationType.CONNECT_LAST:
             branch = self._save_points[len(self._save_points) - 1] 
             op_type = rslt.OpType.CONNECT_LAST
-            print(f"C_L: {op_type}")
         try:
             with self.result_collector.maybe_time_ops(
                 op_type=op_type, timed=timed
@@ -132,8 +133,12 @@ class TxnToolSuite(DBToolSuite):
         if branch_name not in self._save_points:
             return # No-op when trying to roll forward
         cmd = f"ROLLBACK TO SAVEPOINT {branch_name};"
+        # Allow exceptions to percolate up
+        cur = self.conn.cursor()
+        cur.execute(cmd)
+        cur.close()
+        # Only truncate if there were no exceptions
         self._save_points.truncate(branch_name)
-        super().execute_sql(cmd)
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         return (self._save_points[-1], self._save_points[-1])
