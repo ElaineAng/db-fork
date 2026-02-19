@@ -63,6 +63,15 @@ def validate_config(config: tp.TaskConfig):
             "with --measure-storage instead."
         )
 
+    if config.WhichOneof("benchmark_mode") == "throughput_benchmark":
+        tc = config.throughput_benchmark
+        if tc.duration_seconds <= 0:
+            raise ValueError("throughput_benchmark.duration_seconds must be > 0")
+        if not tc.operations:
+            raise ValueError("throughput_benchmark.operations must not be empty")
+        if config.measure_storage:
+            raise ValueError("measure_storage is incompatible with throughput mode")
+
     if config.backend == tp.Backend.NEON:
         db_setup = config.database_setup
         source_type = db_setup.WhichOneof("source")
@@ -187,10 +196,16 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         if backend == tp.Backend.DOLT:
             commit_dolt_schema(db_uri)
 
-    # Perform Nth operation setup if configured (create branches + insert data).
-    if config.HasField("nth_op_benchmark"):
-        setup_branches = perform_nth_op_setup(config, info)
-        info.setup_branches = setup_branches
+    # Perform branch setup if the benchmark mode includes a setup block.
+    benchmark_mode = config.WhichOneof("benchmark_mode")
+    setup = None
+    if benchmark_mode == "nth_op_benchmark":
+        setup = config.nth_op_benchmark.setup
+    elif benchmark_mode == "throughput_benchmark" and config.throughput_benchmark.HasField("setup"):
+        setup = config.throughput_benchmark.setup
+
+    if setup and setup.num_branches > 0:
+        info.setup_branches = perform_branch_setup(config, info, setup)
 
     return info
 
@@ -308,19 +323,22 @@ def cleanup_backend(
         XataToolSuite.delete_project(backend_info.xata_project_id)
 
 
-def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
-    """Create branches and perform setup operations for Nth operation benchmark.
+def perform_branch_setup(
+    config: tp.TaskConfig,
+    backend_info: BackendInfo,
+    setup: tp.BenchmarkSetup,
+):
+    """Create branches and perform setup operations before measurement.
 
-    This function is called during the setup phase (before measurement) to
-    create the required state for measuring the Nth operation. It creates
-    branches according to the specified shape and performs inserts, updates,
+    Shared by nth_op and throughput benchmark modes. Creates branches
+    according to the specified shape and performs inserts, updates,
     and deletes on each branch in a randomized order.
 
     Args:
-        config: Task configuration containing nth_op_benchmark settings.
+        config: Task configuration (for backend, db_name, etc.).
         backend_info: Backend info from create_backend_project().
+        setup: BenchmarkSetup message with branch count, shape, and per-branch ops.
     """
-    setup = config.nth_op_benchmark.setup
     num_branches = setup.num_branches
     shape = setup.branch_shape
     inserts_per_branch = setup.inserts_per_branch
@@ -456,6 +474,27 @@ class SharedProgress:
         tqdm.write(msg)
 
 
+class SharedTimer:
+    """Thread-safe timer that signals all threads to stop after a duration."""
+
+    def __init__(self, duration_seconds: float):
+        self._duration = duration_seconds
+        self._stop_event = threading.Event()
+        self._start_time = None
+
+    def start(self):
+        self._start_time = time.monotonic()
+        timer = threading.Timer(self._duration, self._stop_event.set)
+        timer.daemon = True
+        timer.start()
+
+    def should_continue(self) -> bool:
+        return not self._stop_event.is_set()
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self._start_time if self._start_time else 0.0
+
+
 class BenchmarkSuite:
     def __init__(
         self,
@@ -466,6 +505,7 @@ class BenchmarkSuite:
         result_collector: Optional[rc.ResultCollector] = None,
         branch_manager: Optional[SharedBranchManager] = None,
         shared_progress: Optional[SharedProgress] = None,
+        shared_timer: Optional[SharedTimer] = None,
         assigned_branches: Optional[list] = None,
     ):
         self._db_name = config.database_setup.db_name
@@ -476,6 +516,7 @@ class BenchmarkSuite:
         self._shared_result_collector = result_collector
         self._shared_branch_manager = branch_manager
         self._shared_progress = shared_progress
+        self._shared_timer = shared_timer
         self._assigned_branches = (
             assigned_branches or []
         )  # Per-thread exclusive branches
@@ -1268,12 +1309,19 @@ class BenchmarkSuite:
             if key_to_delete in self._modified_keys[cur_branch_id]:
                 self._modified_keys[cur_branch_id].remove(key_to_delete)
 
-    def run_nth_op_benchmark(self):
-        """Measure the cost of a single Nth operation.
+    # ---------------------------------------------------------------
+    # Shared benchmark helpers (DRY)
+    # ---------------------------------------------------------------
+    def _prepare_benchmark(self):
+        """Common setup for all benchmark modes.
 
-        This is called when nth_op_benchmark is configured. The setup (branches
-        and data) has already been created by perform_nth_op_setup(), and we
-        should already be connected to the latest created branch.
+        Resolves the benchmark table, loads schema and datagen, creates
+        a seeded RNG, measures initial DB size, and sets ResultCollector
+        context.
+
+        Returns:
+            (benchmark_table, rnd) — the resolved table name and a
+            thread-local Random instance.
         """
         benchmark_table = self._config.table_name
         if not benchmark_table:
@@ -1304,7 +1352,6 @@ class BenchmarkSuite:
             if self._thread_id == 0:
                 print(f"Error getting initial DB size: {e}")
 
-        # Set context for result collection.
         self.db_tools.result_collector.set_context(
             table_name=benchmark_table,
             table_schema=table_schema,
@@ -1312,140 +1359,118 @@ class BenchmarkSuite:
             seed=seed,
         )
 
-        # Execute timed operation(s).
+        return benchmark_table, rnd
+
+    def _execute_op(self, op, rnd, benchmark_table):
+        """Execute a single benchmark operation (deterministic dispatch).
+
+        Used by nth_op and throughput modes. The randomized mode handles
+        BRANCH specially (via maybe_branch_and_reconnect) so it does its
+        own dispatch for that case.
+        """
+        if op == tp.OperationType.BRANCH:
+            next_bid = self._shared_branch_manager.get_next_branch_id()
+            self.branch_and_connect(next_bid)
+        elif op == tp.OperationType.READ:
+            self.read_op(rnd, benchmark_table)
+        elif op == tp.OperationType.INSERT:
+            self.insert_op(benchmark_table)
+        elif op == tp.OperationType.UPDATE:
+            self.update_op(rnd, benchmark_table)
+        elif op == tp.OperationType.RANGE_UPDATE:
+            self.range_update_op(rnd, benchmark_table)
+        elif op == tp.OperationType.RANGE_READ:
+            self.range_read_op(rnd, benchmark_table)
+        elif op == tp.OperationType.CONNECT:
+            self.connect_to_branch(rnd)
+
+    # ---------------------------------------------------------------
+    # Benchmark modes
+    # ---------------------------------------------------------------
+    def run_nth_op_benchmark(self):
+        """Measure the cost of a single Nth operation.
+
+        The setup (branches and data) has already been created by
+        perform_branch_setup(), and we should already be connected
+        to the latest created branch.
+        """
+        benchmark_table, rnd = self._prepare_benchmark()
+
         op = self._config.nth_op_benchmark.operation
         num_ops = self._config.nth_op_benchmark.num_ops or 1
 
-        # Use shared progress if available (multi-threaded), else use local tqdm
-        use_shared_progress = self._shared_progress is not None
-
         for i in range(num_ops):
-            if op == tp.OperationType.BRANCH:
-                next_bid = self._shared_branch_manager.get_next_branch_id()
-                self.branch_and_connect(next_bid)
-            elif op == tp.OperationType.READ:
-                self.read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.INSERT:
-                self.insert_op(benchmark_table)
-            elif op == tp.OperationType.UPDATE:
-                self.update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_UPDATE:
-                self.range_update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_READ:
-                self.range_read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.CONNECT:
-                self.connect_to_branch(rnd)
-
-            # Update progress
-            if use_shared_progress:
+            self._execute_op(op, rnd, benchmark_table)
+            if self._shared_progress:
                 self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
-        # Get the benchmark table and load the data generator for the table.
-        benchmark_table = self._config.table_name
-        if not benchmark_table:
-            all_tables = dbh.get_all_tables(
-                self.db_tools.get_current_connection()
-            )
-            benchmark_table = random.choice(all_tables)
+        """Run randomized average-cost benchmark with weighted operation mix."""
+        benchmark_table, rnd = self._prepare_benchmark()
 
-        table_schema = self.db_tools.get_table_schema(benchmark_table)
-        if not table_schema:
-            raise ValueError(
-                f"Could not fetch DDL for table {benchmark_table}."
-            )
-
-        self._table_datagen = DynamicDataGenerator(table_schema)
-
-        # Get the random seed for all remainder operations in the benchmark.
-        # Use provided seed for reproducibility, otherwise use current time.
-        seed = self._seed if self._seed is not None else int(time.time())
-        # Create thread-local random instance to avoid interference between threads
-        rnd = random.Random(seed)
-        print(f"Using random seed: {seed}")
-
-        initial_db_size = 0
-        try:
-            initial_db_size = dbh.get_db_size(
-                self.db_tools.get_current_connection()
-            )
-        except Exception as e:
-            if self._thread_id == 0:
-                print(f"Error getting initial DB size: {e}")
-
-        # Set context for result proto collection.
-        self.db_tools.result_collector.set_context(
-            table_name=benchmark_table,
-            table_schema=table_schema,
-            initial_db_size=initial_db_size,
-            seed=seed,
-        )
-
-        # Get the list of operations to perform, and the probability of each
-        # operation.
         randomized_config = self._config.randomized_benchmark
         all_operations = randomized_config.operations
         ops_weights = [OPS_WEIGHT(op) for op in all_operations]
 
-        # Use shared progress if available (multi-threaded)
-        use_shared_progress = self._shared_progress is not None
-
-        # Main benchmark loop
         for _ in range(randomized_config.num_ops):
-            # Get the operation
             cur_ops = rnd.choices(all_operations, ops_weights)[0]
             try:
                 if cur_ops == tp.OperationType.BRANCH:
+                    # Randomized mode uses probabilistic branch-and-reconnect
                     next_bid = self._shared_branch_manager.get_next_branch_id()
-
                     try:
                         self.maybe_branch_and_reconnect(next_bid, rnd)
                     except Exception as e:
                         if "branches limit exceeded" in str(e):
-                            # Update shared state so all threads know
                             self._shared_branch_manager.set_branch_limit_reached()
                         raise e
-                elif cur_ops == tp.OperationType.READ:
-                    try:
-                        self.read_op(rnd, benchmark_table)
-                    except ValueError as e:
-                        if use_shared_progress:
-                            self._shared_progress.write(
-                                f"Error reading key: {e}"
-                            )
-                        else:
-                            tqdm.write(f"Error reading key: {e}")
-                elif cur_ops == tp.OperationType.INSERT:
-                    self.insert_op(benchmark_table)
-                elif cur_ops == tp.OperationType.UPDATE:
-                    self.update_op(rnd, benchmark_table)
-                elif cur_ops == tp.OperationType.RANGE_UPDATE:
-                    self.range_update_op(rnd, benchmark_table)
-                elif cur_ops == tp.OperationType.RANGE_READ:
-                    self.range_read_op(rnd, benchmark_table)
+                else:
+                    self._execute_op(cur_ops, rnd, benchmark_table)
             except Exception as e:
                 msg = f"[Thread {self._thread_id}] Error performing operation: {e}"
-                if use_shared_progress:
+                if self._shared_progress:
                     self._shared_progress.write(msg)
                 else:
                     tqdm.write(msg)
 
-            # Update progress
-            if use_shared_progress:
+            if self._shared_progress:
                 self._shared_progress.update(1)
 
+    def run_throughput_benchmark(self):
+        """Run operations for a fixed wall-clock duration, measuring goodput.
+
+        Used for Experiment 3:
+          3a (branch creation throughput): operations = [BRANCH]
+          3b (CRUD throughput under branching): operations = [READ, UPDATE, ...]
+
+        Goodput (ops/sec) is computed in post-processing from the parquet rows.
+        """
+        benchmark_table, rnd = self._prepare_benchmark()
+
+        tc = self._config.throughput_benchmark
+        all_operations = list(tc.operations)
+        ops_weights = [OPS_WEIGHT(op) for op in all_operations]
+
+        while self._shared_timer.should_continue():
+            op = rnd.choices(all_operations, ops_weights)[0]
+            try:
+                self._execute_op(op, rnd, benchmark_table)
+            except Exception as e:
+                print(f"[Thread {self._thread_id}] Error: {e}")
+
+    # Dispatch table: benchmark_mode field name → method name
+    _BENCHMARK_RUNNERS = {
+        "nth_op_benchmark": "run_nth_op_benchmark",
+        "randomized_benchmark": "run_randomized_avg_benchmark",
+        "throughput_benchmark": "run_throughput_benchmark",
+    }
+
     def run_benchmark(self):
-        # Check which benchmark mode is configured.
-        benchmark_mode = self._config.WhichOneof("benchmark_mode")
-        if benchmark_mode == "nth_op_benchmark":
-            self.run_nth_op_benchmark()
-        elif benchmark_mode == "randomized_benchmark":
-            self.run_randomized_avg_benchmark()
-        else:
-            raise ValueError(
-                "No benchmark mode configured. Set either "
-                "randomized_benchmark or nth_op_benchmark."
-            )
+        mode = self._config.WhichOneof("benchmark_mode")
+        runner_name = self._BENCHMARK_RUNNERS.get(mode)
+        if not runner_name:
+            raise ValueError(f"Unknown benchmark mode: {mode}")
+        getattr(self, runner_name)()
 
 
 if __name__ == "__main__":
@@ -1502,6 +1527,7 @@ if __name__ == "__main__":
 
     # Determine number of iterations based on benchmark mode
     benchmark_mode = config.WhichOneof("benchmark_mode")
+    is_throughput = benchmark_mode == "throughput_benchmark"
     num_iterations = (
         NTH_OP_NUM_RUNS
         if benchmark_mode == "nth_op_benchmark"
@@ -1529,40 +1555,41 @@ if __name__ == "__main__":
         # Setup backend project, database, and schema for this run.
         backend_info = create_backend_project(config)
 
-        # Get branches created during setup (if nth_op_benchmark mode).
+        # Get branches created during setup.
         setup_branches = backend_info.setup_branches or []
 
         # Shared branch manager for unique branch IDs and branch list across threads.
-        # Initialize with branches from setup phase.
         shared_branch_manager = SharedBranchManager(
             initial_branches=setup_branches
         )
 
-        # Calculate total operations for shared progress bar
-        benchmark_mode = config.WhichOneof("benchmark_mode")
-        if benchmark_mode == "nth_op_benchmark":
-            ops_per_thread = config.nth_op_benchmark.num_ops or 1
-        else:
-            ops_per_thread = config.randomized_benchmark.num_ops
-        total_ops = ops_per_thread * num_threads
+        # Throughput mode uses a shared timer; other modes use a progress bar.
+        shared_progress = None
+        shared_timer = None
 
-        # Create shared progress bar for all threads
-        shared_progress = SharedProgress(
-            total=total_ops,
-            desc=f"Benchmark ({num_threads} threads)",
-            disable=args.no_progress,
-        )
+        if is_throughput:
+            duration_sec = config.throughput_benchmark.duration_seconds
+            shared_timer = SharedTimer(duration_sec)
+            print(f"Throughput mode: {duration_sec}s duration, {num_threads} threads")
+        else:
+            if benchmark_mode == "nth_op_benchmark":
+                ops_per_thread = config.nth_op_benchmark.num_ops or 1
+            else:
+                ops_per_thread = config.randomized_benchmark.num_ops
+            total_ops = ops_per_thread * num_threads
+            shared_progress = SharedProgress(
+                total=total_ops,
+                desc=f"Benchmark ({num_threads} threads)",
+                disable=args.no_progress,
+            )
 
         # Partition setup branches among threads
-        # Each thread gets exclusive branches to work with
         thread_branch_assignments = {}
         if setup_branches and num_threads > 1:
-            # Distribute branches evenly among threads
             branches_per_thread = len(setup_branches) // num_threads
             for tid in range(num_threads):
                 start_idx = tid * branches_per_thread
                 end_idx = start_idx + branches_per_thread
-                # Last thread gets any remainder
                 if tid == num_threads - 1:
                     end_idx = len(setup_branches)
                 thread_branch_assignments[tid] = setup_branches[
@@ -1573,14 +1600,10 @@ if __name__ == "__main__":
         def worker_benchmark(
             thread_id: int, backend_info: BackendInfo, assigned_branches: list
         ) -> None:
-            """Worker function that runs benchmark in its own thread with its own connection."""
-            # Set thread-local thread ID for result collection
+            """Worker function that runs benchmark in its own thread."""
             rc.set_current_thread_id(thread_id)
-
-            # Each worker gets its own seed based on the fixed seed for reproducibility.
             worker_seed = fixed_seed + thread_id
 
-            # Create worker's own BenchmarkSuite with shared resources.
             worker_bench = BenchmarkSuite(
                 config,
                 backend_info,
@@ -1589,6 +1612,7 @@ if __name__ == "__main__":
                 result_collector=shared_result_collector,
                 branch_manager=shared_branch_manager,
                 shared_progress=shared_progress,
+                shared_timer=shared_timer,
                 assigned_branches=assigned_branches,
             )
 
@@ -1596,7 +1620,10 @@ if __name__ == "__main__":
                 worker_bench.run_benchmark()
 
         try:
-            # Spawn worker threads.
+            # Start the timer before spawning workers (throughput mode).
+            if shared_timer:
+                shared_timer.start()
+
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = [
                     executor.submit(
@@ -1607,18 +1634,18 @@ if __name__ == "__main__":
                     )
                     for i in range(num_threads)
                 ]
-                # Wait for all workers to complete and collect any exceptions.
                 for future in as_completed(futures):
                     try:
                         future.result()
                     except Exception as e:
                         print(f"Worker thread failed: {e}")
 
-            # Close shared progress bar
-            shared_progress.close()
+            if shared_progress:
+                shared_progress.close()
+            if shared_timer:
+                print(f"Throughput run complete. Elapsed: {shared_timer.elapsed():.1f}s")
 
         finally:
-            # Cleanup backend resources after each run.
             cleanup_backend(
                 config,
                 backend_info,

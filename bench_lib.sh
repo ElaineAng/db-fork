@@ -212,3 +212,140 @@ run_branch_sweep() {
 
     rm -f "$temp_config"
 }
+
+# generate_throughput_textproto CONFIG_FILE BACKEND_UPPER SHAPE_UPPER NUM_THREADS \
+#   DURATION_SECONDS SQL_DUMP_PATH RUN_ID OPERATIONS_CSV [SETUP_NUM_BRANCHES]
+# Writes a throughput_benchmark textproto config to CONFIG_FILE.
+# OPERATIONS_CSV: comma-separated ops, e.g. "BRANCH" or "READ,UPDATE,RANGE_READ,RANGE_UPDATE"
+# SETUP_NUM_BRANCHES: if > 0, includes a setup block with that many branches.
+generate_throughput_textproto() {
+    local config_file="$1"
+    local backend_upper="$2"
+    local shape_upper="$3"
+    local num_threads="$4"
+    local duration_seconds="$5"
+    local sql_dump_path="$6"
+    local run_id="$7"
+    local ops_csv="$8"
+    local setup_num_branches="${9:-0}"
+
+    # Build repeated operations lines
+    local ops_lines=""
+    IFS=',' read -ra ops_arr <<< "$ops_csv"
+    for op in "${ops_arr[@]}"; do
+        ops_lines="${ops_lines}  operations: ${op}\n"
+    done
+
+    # Build optional setup block
+    local setup_block=""
+    if [ "$setup_num_branches" -gt 0 ]; then
+        setup_block="  setup {
+    num_branches: ${setup_num_branches}
+    branch_shape: ${shape_upper}
+    inserts_per_branch: ${INSERTS_PER_BRANCH}
+    updates_per_branch: ${UPDATES_PER_BRANCH}
+    deletes_per_branch: ${DELETES_PER_BRANCH}
+  }"
+    fi
+
+    cat > "$config_file" << EOF
+# Auto-generated config for throughput benchmark
+run_id: "${run_id}"
+backend: ${backend_upper}
+
+table_name: "${TABLE_NAME}"
+starting_branch: ""
+
+database_setup {
+  db_name: "${DB_NAME}"
+  cleanup: true
+  sql_dump {
+    sql_dump_path: "${sql_dump_path}"
+  }
+}
+
+range_update_config {
+  range_size: ${RANGE_SIZE}
+}
+
+autocommit: true
+num_threads: ${num_threads}
+
+throughput_benchmark {
+  duration_seconds: ${duration_seconds}
+$(echo -e "$ops_lines")${setup_block}
+}
+EOF
+}
+
+# run_throughput_sweep BACKEND SQL_DUMP_PATH SHAPE SEED MAX_THREADS DURATION_SECONDS \
+#   EXP_MODE OPERATIONS_CSV [THREAD_LIST...]
+# EXP_MODE: "branch" (3a, no setup) or "crud" (3b, setup branches = num_threads)
+# Loops over thread counts, generates throughput config + runs each.
+run_throughput_sweep() {
+    local backend="$1"
+    local sql_dump_path="$2"
+    local shape="$3"
+    local seed="$4"
+    local max_threads="$5"
+    local duration_seconds="$6"
+    local exp_mode="$7"  # "branch" or "crud"
+    local ops_csv="$8"
+    shift 8
+    local thread_list=("$@")
+
+    validate_backend "$backend"
+    validate_shape "$shape"
+
+    if [ ! -f "$sql_dump_path" ]; then
+        echo "Error: SQL dump file not found: $sql_dump_path"
+        return 1
+    fi
+
+    local sql_basename
+    sql_basename=$(basename "$sql_dump_path" .sql)
+    local sql_prefix="${sql_basename:0:4}"
+
+    local temp_config
+    temp_config=$(mktemp /tmp/${backend}_throughput_config.XXXXXX.textproto)
+
+    local shape_lower
+    shape_lower=$(echo "$shape" | tr '[:upper:]' '[:lower:]')
+
+    echo "==================================================="
+    echo "Throughput Sweep: backend=$backend shape=$shape_lower mode=$exp_mode"
+    echo "  Operations: $ops_csv"
+    echo "  Threads: ${thread_list[*]} (max: $max_threads)"
+    echo "  Duration: ${duration_seconds}s"
+    echo "==================================================="
+
+    for num_threads in "${thread_list[@]}"; do
+        if [ "$num_threads" -gt "$max_threads" ]; then
+            echo "Skipping num_threads=$num_threads (exceeds max=$max_threads)"
+            continue
+        fi
+
+        local setup_branches=0
+        if [ "$exp_mode" = "crud" ]; then
+            setup_branches=$num_threads
+        fi
+
+        local run_id="${backend}_${sql_prefix}_${shape_lower}_${num_threads}t_${exp_mode}_throughput"
+
+        echo ""
+        echo "---------------------------------------------------"
+        echo "Running: $run_id"
+        echo "  Threads: $num_threads, Duration: ${duration_seconds}s, Setup branches: $setup_branches"
+        echo "---------------------------------------------------"
+
+        generate_throughput_textproto "$temp_config" "$BACKEND_UPPER" "$SHAPE_UPPER" \
+            "$num_threads" "$duration_seconds" "$sql_dump_path" "$run_id" \
+            "$ops_csv" "$setup_branches"
+
+        run_one_benchmark "$temp_config" "$seed"
+
+        echo "Completed: $run_id"
+    done
+
+    rm -f "$temp_config"
+}
