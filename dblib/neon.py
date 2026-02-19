@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import sys
 import time
 from typing import Tuple
 from dotenv import load_dotenv
@@ -68,6 +69,7 @@ class NeonToolSuite(DBToolSuite):
     def _request(cls, method: str, endpoint: str, **kwargs):
         """
         Helper method to make requests to the Neon API.
+        Terminates on HTTP 429 (rate limit) with an error report.
         """
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {API_KEY}"
@@ -77,6 +79,17 @@ class NeonToolSuite(DBToolSuite):
         r = requests.request(
             method, NEON_API_BASE_URL + endpoint, headers=headers, **kwargs
         )
+
+        if r.status_code == 429:
+            retry_after = r.headers.get("Retry-After", "unknown")
+            print(
+                f"\nFATAL: Neon API rate limit hit (HTTP 429).\n"
+                f"  Endpoint: {method} {endpoint}\n"
+                f"  Retry-After: {retry_after}\n"
+                f"  Response: {r.text}\n"
+                f"Reduce concurrency or add delays between API calls."
+            )
+            sys.exit(1)
 
         r.raise_for_status()
 

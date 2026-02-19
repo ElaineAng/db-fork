@@ -75,6 +75,24 @@ message NthOperationBenchmark {
     int32 num_ops = 3;             // Number of operations to perform and record (default: 1)
 }
 
+// Configuration for duration-based throughput benchmark mode.
+// Runs operations in a while-loop for a fixed wall-clock duration, measuring
+// how many operations complete (goodput). Used for Experiment 3:
+//   Exp 3a (branch creation throughput): operations = [BRANCH]
+//   Exp 3b (CRUD throughput under branching): operations = [READ, UPDATE, ...]
+message ThroughputBenchmark {
+    // Wall-clock duration in seconds for the measurement phase (e.g. 30).
+    int32 duration_seconds = 1;
+
+    // Operations to run in a random weighted mix during the benchmark.
+    repeated OperationType operations = 2;
+
+    // Optional setup: create branches before measurement phase.
+    // Used for Exp 3b where N branches are pre-created with data.
+    // If absent or num_branches=0, no pre-creation (Exp 3a).
+    BenchmarkSetup setup = 3;
+}
+
 // Configuration for randomized average-cost benchmark mode
 message RandomizedBenchmark {
     // Set of operation types to perform. Operations are selected randomly
@@ -121,9 +139,12 @@ message TaskConfig {
     // Randomized mode: runs multiple random operations and measures average cost.
     RandomizedBenchmark randomized_benchmark = 12;
 
-    // Nth-op mode: performs deterministic setup (branches + data) then measures 
+    // Nth-op mode: performs deterministic setup (branches + data) then measures
     // the cost of a single specified operation.
     NthOperationBenchmark nth_op_benchmark = 13;
+
+    // Throughput mode: runs operations for a fixed duration and measures goodput.
+    ThroughputBenchmark throughput_benchmark = 15;
   }
 }
 
