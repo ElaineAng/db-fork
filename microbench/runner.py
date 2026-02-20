@@ -1,6 +1,7 @@
 from tqdm import tqdm
 from util.import_db import load_sql_file
 import argparse
+import os
 import random
 import sys
 import time
@@ -19,6 +20,7 @@ from microbench.runner_support import (
     SharedBranchManager,
     SharedProgress,
     SharedTimer,
+    classify_failure,
     validate_config,
     get_benchmark_setup,
     get_num_iterations,
@@ -27,6 +29,8 @@ from microbench.runner_support import (
 from util import db_helpers as dbh
 
 from dblib import result_collector as rc
+from dblib import result_failure_pb2 as rf
+from dblib import result_pb2 as rslt
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
@@ -40,6 +44,21 @@ def OPS_WEIGHT(op_type: tp.OperationType):
         return 1
     else:
         return 5
+
+
+_TP_TO_RESULT_OP = {
+    tp.OperationType.BRANCH: rslt.OpType.BRANCH_CREATE,
+    tp.OperationType.CONNECT: rslt.OpType.BRANCH_CONNECT,
+    tp.OperationType.READ: rslt.OpType.READ,
+    tp.OperationType.RANGE_READ: rslt.OpType.READ,
+    tp.OperationType.INSERT: rslt.OpType.INSERT,
+    tp.OperationType.UPDATE: rslt.OpType.UPDATE,
+    tp.OperationType.RANGE_UPDATE: rslt.OpType.UPDATE,
+}
+
+
+def to_result_op_type(op: tp.OperationType) -> rslt.OpType:
+    return _TP_TO_RESULT_OP.get(op, rslt.OpType.UNSPECIFIED)
 
 
 def build_branch_tree(
@@ -316,6 +335,7 @@ def perform_branch_setup(
     setup_result_collector = rc.ResultCollector(
         run_id=f"{config.run_id}_setup",
     )
+    setup_result_collector.set_outcome_phase(rf.PHASE_SETUP)
     setup_branch_manager = SharedBranchManager()
 
     with BenchmarkSuite(
@@ -493,10 +513,21 @@ class BenchmarkSuite:
                     )
                 self.db_tools.connect_branch(initial_branch, timed=False)
 
+            result_collector.set_outcome_phase(rf.PHASE_EXECUTE)
             return self
 
         except Exception as e:
             print(f"Error during BenchmarkSuite setup: {e}")
+            classification = classify_failure(e)
+            result_collector.flush_failure_record(
+                op_type=rslt.OpType.UNSPECIFIED,
+                phase=rf.PHASE_SETUP,
+                category=classification.category,
+                reason=classification.reason,
+                sqlstate=classification.sqlstate,
+                raw_error=str(e),
+            )
+            setattr(e, "_outcome_recorded", True)
             # Clean up any created projects on error.
             if self._config.database_setup.cleanup and self._backend_info:
                 if self._backend_info.neon_project_id:
@@ -514,7 +545,20 @@ class BenchmarkSuite:
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
-        self.db_tools.close_connection()
+        try:
+            self.db_tools.close_connection()
+        except Exception as e:
+            classification = classify_failure(e)
+            self.db_tools.result_collector.flush_failure_record(
+                op_type=rslt.OpType.UNSPECIFIED,
+                phase=rf.PHASE_CLEANUP,
+                category=classification.category,
+                reason=classification.reason,
+                sqlstate=classification.sqlstate,
+                raw_error=str(e),
+            )
+            setattr(e, "_outcome_recorded", True)
+            raise
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
@@ -1227,6 +1271,7 @@ class BenchmarkSuite:
             initial_db_size=initial_db_size,
             seed=seed,
         )
+        self.db_tools.result_collector.set_outcome_phase(rf.PHASE_EXECUTE)
 
         return benchmark_table, rnd
 
@@ -1301,6 +1346,24 @@ class BenchmarkSuite:
         else:
             tqdm.write(msg)
 
+    def _record_execute_failure(
+        self,
+        op: tp.OperationType,
+        error: Exception,
+        observed_latency_seconds: float = 0.0,
+    ) -> None:
+        classification = classify_failure(error)
+        self.db_tools.result_collector.flush_failure_record(
+            op_type=to_result_op_type(op),
+            phase=rf.PHASE_EXECUTE,
+            category=classification.category,
+            reason=classification.reason,
+            sqlstate=classification.sqlstate,
+            raw_error=str(error),
+            observed_latency_seconds=observed_latency_seconds,
+        )
+        self._report_op_error(error)
+
     # ---------------------------------------------------------------
     # Benchmark modes
     # ---------------------------------------------------------------
@@ -1342,7 +1405,7 @@ class BenchmarkSuite:
                     overrides=randomized_overrides,
                 )
             except Exception as e:
-                self._report_op_error(e)
+                self._record_execute_failure(cur_ops, e)
 
             if self._shared_progress:
                 self._shared_progress.update(1)
@@ -1364,10 +1427,15 @@ class BenchmarkSuite:
 
         while self._shared_timer.should_continue():
             op = rnd.choices(all_operations, ops_weights)[0]
+            op_start = time.perf_counter()
             try:
                 self._execute_op(op, rnd, benchmark_table)
             except Exception as e:
-                self._report_op_error(e)
+                self._record_execute_failure(
+                    op,
+                    e,
+                    observed_latency_seconds=time.perf_counter() - op_start,
+                )
 
     # Dispatch table: benchmark_mode field name → method name
     _BENCHMARK_RUNNERS = {
@@ -1443,8 +1511,14 @@ if __name__ == "__main__":
     if num_iterations > 1:
         print(f"Running {num_iterations} iterations for averaging")
 
+    rc.set_current_thread_id(0)
+    run_stats_dir = os.environ.get("RUN_STATS_DIR", "/tmp/run_stats")
+
     # Shared result collector across all runs (appends to same parquet)
-    shared_result_collector = rc.ResultCollector(run_id=config.run_id)
+    shared_result_collector = rc.ResultCollector(
+        run_id=config.run_id,
+        output_dir=run_stats_dir,
+    )
 
     # Generate a fixed seed once to use across all iterations for reproducibility.
     # If args.seed is provided, use it; otherwise generate one from time.
@@ -1457,8 +1531,25 @@ if __name__ == "__main__":
             print(f"Run {run_idx + 1}/{num_iterations}")
             print(f"{'=' * 60}")
 
-        # Setup backend project, database, and schema for this run.
-        backend_info = create_backend_project(config)
+        backend_info = None
+        shared_progress = None
+        shared_timer = None
+
+        try:
+            # Setup backend project, database, and schema for this run.
+            backend_info = create_backend_project(config)
+        except Exception as e:
+            classification = classify_failure(e)
+            shared_result_collector.flush_failure_record(
+                op_type=rslt.OpType.UNSPECIFIED,
+                phase=rf.PHASE_SETUP,
+                category=classification.category,
+                reason=classification.reason,
+                sqlstate=classification.sqlstate,
+                raw_error=str(e),
+            )
+            print(f"Run setup failed: {e}")
+            continue
 
         # Get branches created during setup.
         setup_branches = backend_info.setup_branches or []
@@ -1467,10 +1558,6 @@ if __name__ == "__main__":
         shared_branch_manager = SharedBranchManager(
             initial_branches=setup_branches
         )
-
-        # Throughput mode uses a shared timer; other modes use a progress bar.
-        shared_progress = None
-        shared_timer = None
 
         if is_throughput:
             duration_sec = config.throughput_benchmark.duration_seconds
@@ -1518,8 +1605,21 @@ if __name__ == "__main__":
                 assigned_branches=assigned_branches,
             )
 
-            with worker_bench:
-                worker_bench.run_benchmark()
+            try:
+                with worker_bench:
+                    worker_bench.run_benchmark()
+            except Exception as e:
+                if not getattr(e, "_outcome_recorded", False):
+                    classification = classify_failure(e)
+                    shared_result_collector.flush_failure_record(
+                        op_type=rslt.OpType.UNSPECIFIED,
+                        phase=rf.PHASE_RUNNER_ORCHESTRATION,
+                        category=classification.category,
+                        reason=classification.reason,
+                        sqlstate=classification.sqlstate,
+                        raw_error=str(e),
+                    )
+                print(f"Worker thread failed: {e}")
 
         try:
             # Start the timer before spawning workers (throughput mode).
@@ -1540,18 +1640,51 @@ if __name__ == "__main__":
                     try:
                         future.result()
                     except Exception as e:
+                        if not getattr(e, "_outcome_recorded", False):
+                            classification = classify_failure(e)
+                            shared_result_collector.flush_failure_record(
+                                op_type=rslt.OpType.UNSPECIFIED,
+                                phase=rf.PHASE_RUNNER_ORCHESTRATION,
+                                category=classification.category,
+                                reason=classification.reason,
+                                sqlstate=classification.sqlstate,
+                                raw_error=str(e),
+                            )
                         print(f"Worker thread failed: {e}")
-
+        except Exception as e:
+            if not getattr(e, "_outcome_recorded", False):
+                classification = classify_failure(e)
+                shared_result_collector.flush_failure_record(
+                    op_type=rslt.OpType.UNSPECIFIED,
+                    phase=rf.PHASE_RUNNER_ORCHESTRATION,
+                    category=classification.category,
+                    reason=classification.reason,
+                    sqlstate=classification.sqlstate,
+                    raw_error=str(e),
+                )
+            print(f"Run orchestration failed: {e}")
+        finally:
             if shared_progress:
                 shared_progress.close()
             if shared_timer:
                 print(f"Throughput run complete. Elapsed: {shared_timer.elapsed():.1f}s")
 
-        finally:
-            cleanup_backend(
-                config,
-                backend_info,
-            )
+            try:
+                cleanup_backend(
+                    config,
+                    backend_info,
+                )
+            except Exception as e:
+                classification = classify_failure(e)
+                shared_result_collector.flush_failure_record(
+                    op_type=rslt.OpType.UNSPECIFIED,
+                    phase=rf.PHASE_CLEANUP,
+                    category=classification.category,
+                    reason=classification.reason,
+                    sqlstate=classification.sqlstate,
+                    raw_error=str(e),
+                )
+                print(f"Cleanup failed: {e}")
 
     # Write all collected results to parquet (appends across runs).
     shared_result_collector.write_to_parquet()
