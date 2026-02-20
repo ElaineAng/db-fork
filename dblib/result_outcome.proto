@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package dblib;
+
+import "dblib/result_failure.proto";
+import "dblib/result_latency.proto";
+
+message Outcome {
+  bool success = 1;
+  FailureInfo failure = 2;
+  LatencyOutcome latency = 3;
+}

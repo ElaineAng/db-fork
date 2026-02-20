@@ -91,6 +91,17 @@ message ThroughputBenchmark {
     // Used for Exp 3b where N branches are pre-created with data.
     // If absent or num_branches=0, no pre-creation (Exp 3a).
     BenchmarkSetup setup = 3;
+
+    // Multiplier for latency-based failure threshold:
+    // threshold = baseline_latency * slow_latency_multiplier.
+    // If unset or <= 0, runtime defaults to 10.0.
+    double slow_latency_multiplier = 4;
+
+    // Compatibility field. Ignored in fixed-baseline mode.
+    string baseline_parquet_path = 5;
+
+    // Compatibility field. In fixed-baseline mode this is ignored.
+    int32 baseline_min_samples = 6;
 }
 
 // Configuration for randomized average-cost benchmark mode
@@ -147,4 +158,3 @@ message TaskConfig {
     ThroughputBenchmark throughput_benchmark = 15;
   }
 }
-

@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package dblib;
+
+message LatencyOutcome {
+  double observed_latency_seconds = 1;
+  double baseline_latency_seconds = 2;
+  double threshold_latency_seconds = 3;
+  double multiplier = 4;
+  bool threshold_exceeded = 5;
+  string baseline_source = 6;
+}

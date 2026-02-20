@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package dblib;
+
+enum FailureCategory {
+  FAILURE_NONE = 0;
+  FAILURE_LOCK_CONTENTION = 1;
+  FAILURE_TIMEOUT = 2;
+  FAILURE_RESOURCE_LIMIT = 3;
+  FAILURE_CONNECTION = 4;
+  FAILURE_BACKEND_STATE_CONFLICT = 5;
+  FAILURE_CONSTRAINT_OR_DATA = 6;
+  FAILURE_INTERNAL_BUG = 7;
+  FAILURE_UNKNOWN = 8;
+}
+
+enum FailurePhase {
+  PHASE_EXECUTE = 0;
+  PHASE_SETUP = 1;
+  PHASE_CLEANUP = 2;
+  PHASE_RUNNER_ORCHESTRATION = 3;
+}
+
+message FailureInfo {
+  FailureCategory category = 1;
+  FailurePhase phase = 2;
+  string reason = 3;
+  string sqlstate = 4;
+  string raw_error = 5;
+}

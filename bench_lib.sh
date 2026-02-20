@@ -214,7 +214,8 @@ run_branch_sweep() {
 }
 
 # generate_throughput_textproto CONFIG_FILE BACKEND_UPPER SHAPE_UPPER NUM_THREADS \
-#   DURATION_SECONDS SQL_DUMP_PATH RUN_ID OPERATIONS_CSV [SETUP_NUM_BRANCHES]
+#   DURATION_SECONDS SQL_DUMP_PATH RUN_ID OPERATIONS_CSV [SETUP_NUM_BRANCHES] \
+#   [SLOW_LATENCY_MULTIPLIER] [BASELINE_PARQUET_PATH] [BASELINE_MIN_SAMPLES]
 # Writes a throughput_benchmark textproto config to CONFIG_FILE.
 # OPERATIONS_CSV: comma-separated ops, e.g. "BRANCH" or "READ,UPDATE,RANGE_READ,RANGE_UPDATE"
 # SETUP_NUM_BRANCHES: if > 0, includes a setup block with that many branches.
@@ -228,6 +229,9 @@ generate_throughput_textproto() {
     local run_id="$7"
     local ops_csv="$8"
     local setup_num_branches="${9:-0}"
+    local slow_latency_multiplier="${10:-10.0}"
+    local baseline_parquet_path="${11:-}"
+    local baseline_min_samples="${12:-50}"
 
     # Build repeated operations lines
     local ops_lines=""
@@ -246,6 +250,11 @@ generate_throughput_textproto() {
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
   }"
+    fi
+
+    local baseline_block=""
+    if [ -n "$baseline_parquet_path" ]; then
+        baseline_block="  baseline_parquet_path: \"${baseline_parquet_path}\""
     fi
 
     cat > "$config_file" << EOF
@@ -273,7 +282,10 @@ num_threads: ${num_threads}
 
 throughput_benchmark {
   duration_seconds: ${duration_seconds}
+  slow_latency_multiplier: ${slow_latency_multiplier}
+  baseline_min_samples: ${baseline_min_samples}
 $(echo -e "$ops_lines")${setup_block}
+${baseline_block}
 }
 EOF
 }

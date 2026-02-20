@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package dblib;
 
+import "dblib/result_outcome.proto";
+
 // Result message for structured logging
 message Result {
   // Unique identifier for the run
@@ -42,6 +44,9 @@ message Result {
 
   // Thread ID for multi-threaded benchmark runs
   int32 thread_id = 13;
+
+  // Structured success/failure + latency-threshold outcome.
+  Outcome outcome = 14;
 }
 
 // Enum for different types of database operations
@@ -54,4 +59,3 @@ enum OpType {
   UPDATE = 5;
   COMMIT = 6;
 }
-
