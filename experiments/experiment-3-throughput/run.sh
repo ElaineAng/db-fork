@@ -1,13 +1,7 @@
 #!/bin/bash
-# Experiment 3: Operation Throughput Under Branching
-# Date: 2026-02-19
-#
-# Exp 3a: Branch creation throughput (T concurrent threads, 30s)
-# Exp 3b: CRUD throughput under branching (N branches, N threads, 30s)
-#
-# Backends: Dolt, file_copy (Neon optional via ENABLE_NEON=1).
+# Experiment 3: throughput matrix with non-blocking per-point execution.
 
-set -e
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -16,10 +10,19 @@ source "$REPO_ROOT/bench_lib.sh"
 SEED="${SEED:-42}"
 DURATION_SECONDS="${DURATION_SECONDS:-30}"
 SQL_DUMP="${SQL_DUMP:-$REPO_ROOT/db_setup/tpcc_schema.sql}"
-ENABLE_NEON="${ENABLE_NEON:-0}"   # Set to 1 to include Neon
+ENABLE_NEON="${ENABLE_NEON:-0}"
+RUN_STATS_DIR="${RUN_STATS_DIR:-/tmp/run_stats}"
+RESULTS_ROOT="$SCRIPT_DIR/results"
+DATA_DIR="$RESULTS_ROOT/data"
+LOG_DIR="$RESULTS_ROOT/logs"
+MANIFEST_PATH="$RESULTS_ROOT/run_manifest.csv"
+
 THREAD_LIST=(1 2 4 8 16 32 64 128)
 THREAD_LIST_NEON=(1 2 4 8)
 CRUD_OPS_CSV="READ,UPDATE,RANGE_READ,RANGE_UPDATE"
+SLOW_LATENCY_MULTIPLIER="10.0"
+
+export RUN_STATS_DIR
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "Error: python3 not found in PATH."
@@ -31,92 +34,246 @@ if [ ! -f "$SQL_DUMP" ]; then
     exit 1
 fi
 
-run_throughput_mode() {
+mkdir -p "$RUN_STATS_DIR" "$DATA_DIR" "$LOG_DIR"
+
+SQL_BASENAME="$(basename "$SQL_DUMP" .sql)"
+SQL_PREFIX="${SQL_BASENAME:0:4}"
+
+write_manifest_header() {
+    cat > "$MANIFEST_PATH" <<'CSV'
+run_id,backend,shape,mode,threads,runner_exit_code,parquet_present,setup_parquet_present,summary_present,status,attempted_ops,successful_ops,failed_exception_ops,failed_slow_ops,success_rate,top_failure_category,top_failure_reason
+CSV
+}
+
+build_run_id() {
     local backend="$1"
     local shape="$2"
-    local exp_mode="$3"        # branch | crud
-    local ops_csv="$4"
-    local max_threads="$5"
-    shift 5
-    local thread_list=("$@")
+    local threads="$3"
+    local mode="$4"
+    echo "exp3_${backend}_${shape}_${threads}t_${mode}_${SQL_PREFIX}"
+}
+
+collect_run_artifacts() {
+    local run_id="$1"
+    local filename
+    for filename in "${run_id}.parquet" "${run_id}_setup.parquet" "${run_id}_summary.json"; do
+        if [ -f "$RUN_STATS_DIR/$filename" ]; then
+            mv -f "$RUN_STATS_DIR/$filename" "$DATA_DIR/$filename"
+        fi
+    done
+}
+
+append_manifest_row() {
+    local run_id="$1"
+    local backend="$2"
+    local shape="$3"
+    local mode="$4"
+    local threads="$5"
+    local exit_code="$6"
+    local parquet_present="$7"
+    local setup_present="$8"
+    local summary_present="$9"
+    local summary_path="${10}"
+
+    python3 - "$MANIFEST_PATH" "$run_id" "$backend" "$shape" "$mode" "$threads" "$exit_code" "$parquet_present" "$setup_present" "$summary_present" "$summary_path" <<'PY'
+import csv
+import json
+import os
+import sys
+
+(
+    manifest_path,
+    run_id,
+    backend,
+    shape,
+    mode,
+    threads,
+    exit_code,
+    parquet_present,
+    setup_present,
+    summary_present,
+    summary_path,
+) = sys.argv[1:]
+
+summary = {}
+if summary_present == "1" and os.path.exists(summary_path):
+    try:
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except Exception:
+        summary = {}
+
+attempted_ops = int(summary.get("attempted_ops", 0) or 0)
+successful_ops = int(summary.get("successful_ops", 0) or 0)
+failed_exception_ops = int(summary.get("failed_exception_ops", 0) or 0)
+failed_slow_ops = int(summary.get("failed_slow_ops", 0) or 0)
+success_rate = float(summary.get("success_rate", 0.0) or 0.0)
+top_failure_category = str(summary.get("top_failure_category", "") or "")
+top_failure_reason = str(summary.get("top_failure_reason", "") or "")
+
+if summary_present != "1":
+    status = "MISSING"
+elif parquet_present == "1" and failed_exception_ops == 0 and failed_slow_ops == 0:
+    status = "SUCCESS"
+elif attempted_ops > 0 and (failed_exception_ops > 0 or failed_slow_ops > 0):
+    status = "PARTIAL"
+elif attempted_ops == 0 or (int(exit_code) != 0 and successful_ops == 0):
+    status = "FAILED"
+else:
+    status = "FAILED"
+
+with open(manifest_path, "a", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(
+        [
+            run_id,
+            backend,
+            shape,
+            mode,
+            int(threads),
+            int(exit_code),
+            int(parquet_present),
+            int(setup_present),
+            int(summary_present),
+            status,
+            attempted_ops,
+            successful_ops,
+            failed_exception_ops,
+            failed_slow_ops,
+            success_rate,
+            top_failure_category,
+            top_failure_reason,
+        ]
+    )
+PY
+}
+
+run_point() {
+    local backend="$1"
+    local shape="$2"
+    local mode="$3"
+    local threads="$4"
+    local ops_csv="$5"
+
+    local run_id
+    run_id="$(build_run_id "$backend" "$shape" "$threads" "$mode")"
 
     local backend_upper
-    backend_upper=$(echo "$backend" | tr '[:lower:]' '[:upper:]')
+    backend_upper="$(echo "$backend" | tr '[:lower:]' '[:upper:]')"
     local shape_upper
-    shape_upper=$(echo "$shape" | tr '[:lower:]' '[:upper:]')
+    shape_upper="$(echo "$shape" | tr '[:lower:]' '[:upper:]')"
 
-    local sql_basename
-    sql_basename=$(basename "$SQL_DUMP" .sql)
-    local sql_prefix="${sql_basename:0:4}"
+    local setup_branches=0
+    if [ "$mode" = "crud" ]; then
+        setup_branches="$threads"
+    fi
 
     local temp_config
-    temp_config=$(mktemp "/tmp/${backend}_${exp_mode}_throughput.XXXXXX.textproto")
+    temp_config="$(mktemp "/tmp/exp3_${backend}_${shape}_${threads}_${mode}.XXXXXX")"
 
-    for num_threads in "${thread_list[@]}"; do
-        if [ "$num_threads" -gt "$max_threads" ]; then
-            continue
-        fi
+    generate_throughput_textproto \
+        "$temp_config" \
+        "$backend_upper" \
+        "$shape_upper" \
+        "$threads" \
+        "$DURATION_SECONDS" \
+        "$SQL_DUMP" \
+        "$run_id" \
+        "$ops_csv" \
+        "$setup_branches" \
+        "$SLOW_LATENCY_MULTIPLIER"
 
-        local setup_branches=0
-        if [ "$exp_mode" = "crud" ]; then
-            setup_branches="$num_threads"
-        fi
+    rm -f \
+        "$RUN_STATS_DIR/${run_id}.parquet" \
+        "$RUN_STATS_DIR/${run_id}_setup.parquet" \
+        "$RUN_STATS_DIR/${run_id}_summary.json" \
+        "$DATA_DIR/${run_id}.parquet" \
+        "$DATA_DIR/${run_id}_setup.parquet" \
+        "$DATA_DIR/${run_id}_summary.json"
 
-        local run_id="exp3_${backend}_${shape}_${num_threads}t_${exp_mode}_${sql_prefix}"
-        echo "Running: $run_id"
+    local log_file="$LOG_DIR/${run_id}.log"
+    echo "Running: $run_id"
+    python3 -m microbench.runner --config "$temp_config" --seed "$SEED" --no-progress >"$log_file" 2>&1
+    local exit_code=$?
 
-        generate_throughput_textproto \
-            "$temp_config" \
-            "$backend_upper" \
-            "$shape_upper" \
-            "$num_threads" \
-            "$DURATION_SECONDS" \
-            "$SQL_DUMP" \
-            "$run_id" \
-            "$ops_csv" \
-            "$setup_branches"
+    collect_run_artifacts "$run_id"
 
-        python3 -m microbench.runner --config "$temp_config" --seed "$SEED" --no-progress
+    local parquet_present=0
+    local setup_present=0
+    local summary_present=0
 
-        rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/* || true
-    done
+    [ -f "$DATA_DIR/${run_id}.parquet" ] && parquet_present=1
+    [ -f "$DATA_DIR/${run_id}_setup.parquet" ] && setup_present=1
+    [ -f "$DATA_DIR/${run_id}_summary.json" ] && summary_present=1
+
+    append_manifest_row \
+        "$run_id" \
+        "$backend" \
+        "$shape" \
+        "$mode" \
+        "$threads" \
+        "$exit_code" \
+        "$parquet_present" \
+        "$setup_present" \
+        "$summary_present" \
+        "$DATA_DIR/${run_id}_summary.json"
 
     rm -f "$temp_config"
+    rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/* || true
+}
+
+run_backend_matrix() {
+    local backend="$1"
+    shift
+    local thread_list=("$@")
+
+    local shape
+    local mode
+    local threads
+
+    for shape in spine bushy fan_out; do
+        for mode in branch crud; do
+            local ops_csv="BRANCH"
+            if [ "$mode" = "crud" ]; then
+                ops_csv="$CRUD_OPS_CSV"
+            fi
+
+            for threads in "${thread_list[@]}"; do
+                run_point "$backend" "$shape" "$mode" "$threads" "$ops_csv"
+            done
+        done
+    done
 }
 
 load_env
-eval "$("$REPO_ROOT/db_setup/setup_pg_volume.sh")"
+if ! eval "$("$REPO_ROOT/db_setup/setup_pg_volume.sh")"; then
+    echo "Error: failed to set up pg volume."
+    exit 1
+fi
 trap "$REPO_ROOT/db_setup/teardown_pg_volume.sh" EXIT
+
+write_manifest_header
 
 echo "============================================="
 echo "Experiment 3: Operation Throughput Under Branching"
 echo "============================================="
 echo "seed=$SEED duration=${DURATION_SECONDS}s"
 echo "sql_dump=$SQL_DUMP"
+echo "run_stats_dir=$RUN_STATS_DIR"
+echo "results_dir=$DATA_DIR"
 
-for SHAPE in spine bushy fan_out; do
-    echo "--- Dolt / shape=$SHAPE ---"
-    run_throughput_mode dolt "$SHAPE" branch "BRANCH" 128 "${THREAD_LIST[@]}"
-    run_throughput_mode dolt "$SHAPE" crud "$CRUD_OPS_CSV" 128 "${THREAD_LIST[@]}"
-done
-
-for SHAPE in spine bushy fan_out; do
-    echo "--- file_copy / shape=$SHAPE ---"
-    run_throughput_mode file_copy "$SHAPE" branch "BRANCH" 128 "${THREAD_LIST[@]}"
-    run_throughput_mode file_copy "$SHAPE" crud "$CRUD_OPS_CSV" 128 "${THREAD_LIST[@]}"
-done
+run_backend_matrix "dolt" "${THREAD_LIST[@]}"
+run_backend_matrix "file_copy" "${THREAD_LIST[@]}"
 
 if [ "$ENABLE_NEON" = "1" ]; then
-    for SHAPE in spine bushy fan_out; do
-        echo "--- Neon / shape=$SHAPE ---"
-        run_throughput_mode neon "$SHAPE" branch "BRANCH" 8 "${THREAD_LIST_NEON[@]}"
-        run_throughput_mode neon "$SHAPE" crud "$CRUD_OPS_CSV" 8 "${THREAD_LIST_NEON[@]}"
-    done
+    run_backend_matrix "neon" "${THREAD_LIST_NEON[@]}"
 else
     echo "Neon skipped (set ENABLE_NEON=1 to run Neon with threads 1,2,4,8)."
 fi
 
 echo "============================================="
 echo "Experiment 3 complete."
-echo "Results in /tmp/run_stats/"
+echo "Data: $DATA_DIR"
+echo "Logs: $LOG_DIR"
+echo "Manifest: $MANIFEST_PATH"
 echo "============================================="
