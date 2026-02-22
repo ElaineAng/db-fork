@@ -21,7 +21,21 @@ from abc import ABC, abstractmethod
 
 
 class WorkflowOps(ABC):
-    """Abstract base class for workflow-specific SQL operations."""
+    """Abstract base class for workflow-specific SQL operations.
+
+    Args:
+        scale: Database scale factor (= number of warehouses).  At scale=10
+            the seed data contains 10 warehouses, 1000 items, and 100
+            customers per (warehouse, district).  Other ranges scale
+            proportionally: items = 100*scale, customers/district = 10*scale.
+    """
+
+    def __init__(self, scale: int = 1):
+        s = max(1, scale)
+        self.num_warehouses = s
+        self.num_items = 100 * s
+        self.num_customers = 10 * s   # per (warehouse, district)
+        self.num_districts = 10       # fixed in TPC-C
 
     @abstractmethod
     def mutate_ddl(self, step_id: int) -> list[str]:
@@ -148,8 +162,8 @@ class FailureReproOps(WorkflowOps):
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         # M_d=45 DML statements: replay recorded transaction prefix.
-        w_id = rng.randint(1, 10)
-        d_id = rng.randint(1, 10)
+        w_id = rng.randint(1, self.num_warehouses)
+        d_id = rng.randint(1, self.num_districts)
         o_id = 3000 + step_id
         stmts = []
 
@@ -266,8 +280,8 @@ class MctsOps(WorkflowOps):
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         # M_d=1: reassign stock quantity
-        w_id = rng.randint(1, 10)
-        i_id = rng.randint(1, 100000)
+        w_id = rng.randint(1, self.num_warehouses)
+        i_id = rng.randint(1, self.num_items)
         qty = rng.randint(1, 10)
         return [
             f"""UPDATE stock SET s_quantity = s_quantity - {qty}
@@ -303,23 +317,23 @@ class SimulationOps(WorkflowOps):
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         # M_d=50: ~30 rounds of (insert order + decrement stock + replenish)
         stmts = []
-        w_id = rng.randint(1, 10)
+        w_id = rng.randint(1, self.num_warehouses)
 
         for day in range(16):
-            d_id = rng.randint(1, 10)
+            d_id = rng.randint(1, self.num_districts)
             o_id = 5000 + thread_id * 1000 + step_id * 100 + day
 
             # Demand arrives: insert order
             stmts.append(
                 f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
                     o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
-                    VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, 3000)},
+                    VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, self.num_customers)},
                             NULL, 5, 1, CURRENT_TIMESTAMP)
                     ON CONFLICT DO NOTHING;"""
             )
 
             # Fulfill: decrement stock
-            i_id = rng.randint(1, 100000)
+            i_id = rng.randint(1, self.num_items)
             qty = rng.randint(1, 5)
             stmts.append(
                 f"""UPDATE stock SET s_quantity = s_quantity - {qty}
@@ -334,18 +348,21 @@ class SimulationOps(WorkflowOps):
             )
 
         # Remaining stmts to reach ~50 (16*3 = 48, add 2 more)
+        # Use the last inserted order's o_id/d_id so FK is satisfied
+        last_o_id = 5000 + thread_id * 1000 + step_id * 100 + 15
+        last_d_id = d_id  # from the last loop iteration
         stmts.append(
             f"""INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id,
                 ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d,
                 ol_quantity, ol_amount, ol_dist_info)
-                VALUES (5000 + {thread_id}, 1, {w_id}, 1,
-                        {rng.randint(1, 100000)}, {w_id}, NULL, 3,
+                VALUES ({last_o_id}, {last_d_id}, {w_id}, 1,
+                        {rng.randint(1, self.num_items)}, {w_id}, NULL, 3,
                         {round(rng.uniform(1, 500), 2)}, 'dist_info')
                 ON CONFLICT DO NOTHING;"""
         )
         stmts.append(
             f"""UPDATE stock SET s_quantity = s_quantity - 1
-                WHERE s_i_id = {rng.randint(1, 100000)}
+                WHERE s_i_id = {rng.randint(1, self.num_items)}
                 AND s_w_id = {w_id} AND s_quantity > 0;"""
         )
 
@@ -370,11 +387,12 @@ class SimulationOps(WorkflowOps):
         ]
 
 
-def get_workflow_ops(workflow_type) -> WorkflowOps:
+def get_workflow_ops(workflow_type, scale: int = 1) -> WorkflowOps:
     """Factory function to get the workflow operations for a given type.
 
     Args:
         workflow_type: WorkflowType enum value from task_pb2.
+        scale: Database scale factor (1 = 10 WH / 1K items / 100 cust per district).
 
     Returns:
         An instance of the corresponding WorkflowOps subclass.
@@ -393,4 +411,4 @@ def get_workflow_ops(workflow_type) -> WorkflowOps:
     cls = mapping.get(workflow_type)
     if cls is None:
         raise ValueError(f"Unknown workflow type: {workflow_type}")
-    return cls()
+    return cls(scale=scale)
