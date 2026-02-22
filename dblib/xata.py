@@ -1,5 +1,7 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
@@ -61,22 +63,38 @@ class XataToolSuite(DBToolSuite):
         }
         default_branch = cls._request("POST", endpoint, json=branch_payload)
 
+        conn_string = cls._poll_branch_active(
+            project_details["id"],
+            default_branch["id"],
+            initial_conn_string=default_branch.get("connectionString"),
+            initial_status_type=(default_branch.get("status") or {}).get(
+                "statusType", ""
+            ),
+        )
+
         # Use the "postgres" database as the default.
         return (
             project_details["id"],
             default_branch["id"],
             default_branch["name"],
-            cls.add_db_name_to_connection_string(
-                default_branch["connectionString"], "postgres"
-            ),
+            cls.add_db_name_to_connection_string(conn_string, "postgres"),
         )
 
     @classmethod
     def delete_project(cls, project_id: str) -> None:
         """
         Deletes a Xata project by its ID.
+        Deletes all branches first, as required by the Xata API.
         """
-        return cls._request("DELETE", f"projects/{project_id}")
+        endpoint = f"projects/{project_id}/branches"
+        response = cls._request("GET", endpoint)
+        for branch in response.get("branches", []):
+            cls._request(
+                "DELETE",
+                f"projects/{project_id}/branches/{branch['id']}",
+            )
+        time.sleep(2)
+        cls._request("DELETE", f"projects/{project_id}")
 
     @classmethod
     def init_for_bench(
@@ -118,7 +136,54 @@ class XataToolSuite(DBToolSuite):
 
         r.raise_for_status()
 
+        if r.status_code == 204 or not r.content:
+            return {}
         return r.json()
+
+    _READY_STATUSES = {"STATUS_TYPE_ACTIVE", "STATUS_TYPE_HEALTHY"}
+
+    @classmethod
+    def _poll_branch_active(
+        cls,
+        project_id: str,
+        branch_id: str,
+        initial_conn_string: str = None,
+        initial_status_type: str = "",
+        max_attempts: int = 30,
+        interval: float = 10.0,
+    ) -> str:
+        """Poll until a branch has a connectionString and a ready status.
+
+        A connection string can appear while the compute is still
+        STATUS_TYPE_TRANSIENT, which causes "unable to authenticate"
+        errors.  This method blocks until both conditions are met.
+
+        Returns:
+            The connection string for the active branch.
+
+        Raises:
+            RuntimeError: If the branch is not ready after polling.
+        """
+        conn_string = initial_conn_string
+        status_type = initial_status_type
+        endpoint = f"projects/{project_id}/branches/{branch_id}"
+        for _ in range(max_attempts):
+            if conn_string and status_type in cls._READY_STATUSES:
+                return conn_string
+            time.sleep(interval)
+            details = cls._request("GET", endpoint)
+            conn_string = details.get("connectionString")
+            status_type = (details.get("status") or {}).get("statusType", "")
+
+        if not conn_string:
+            raise RuntimeError(
+                f"Branch {branch_id} connection string not available after "
+                f"{max_attempts} attempts"
+            )
+        raise RuntimeError(
+            f"Branch {branch_id} not active after {max_attempts} attempts "
+            f"(status: {status_type})"
+        )
 
     @classmethod
     def _get_xata_connection_uri(
@@ -191,10 +256,23 @@ class XataToolSuite(DBToolSuite):
         branch_payload = {
             "mode": "inherit",
             "name": branch_name,
-            "parent_id": parent_id,
+            "parentID": parent_id,
         }
         res = self.__class__._request("POST", endpoint, json=branch_payload)
-        self._all_branches[branch_name] = (res["id"], res["connectionString"])
+        branch_id = res["id"]
+
+        conn_string = self.__class__._poll_branch_active(
+            self.project_id,
+            branch_id,
+            initial_conn_string=res.get("connectionString"),
+            initial_status_type=(res.get("status") or {}).get("statusType", ""),
+        )
+
+        db_name = self.conn.get_dsn_parameters()["dbname"]
+        uri = self.__class__.add_db_name_to_connection_string(
+            conn_string, db_name
+        )
+        self._all_branches[branch_name] = (branch_id, uri)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -234,18 +312,61 @@ class XataToolSuite(DBToolSuite):
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
 
-    def _delete_branch_impl(
-        self, branch_name: str, branch_id: str
-    ) -> None:
-        """Delete a branch via the Xata API."""
-        bid = branch_id
-        if not bid:
-            info = self._all_branches.get(branch_name)
-            if info:
-                bid = info[0]
-        if not bid:
-            raise ValueError(
-                f"Cannot delete branch '{branch_name}': unknown branch ID"
-            )
-        self._delete_branch(bid)
-        self._all_branches.pop(branch_name, None)
+    def _get_branch_instance_ids(self, branch_id: str) -> list[str]:
+        """Get instance IDs for a branch from its detail endpoint."""
+        endpoint = f"projects/{self.project_id}/branches/{branch_id}"
+        details = self.__class__._request("GET", endpoint)
+        instances = details.get("status", {}).get("instances", [])
+        return [inst["id"] for inst in instances]
+
+    def _get_branch_disk_bytes(self, branch_id: str) -> int:
+        """Get disk usage in bytes for a single branch via the metrics API."""
+        instance_ids = self._get_branch_instance_ids(branch_id)
+        if not instance_ids:
+            return 0
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(minutes=5)
+
+        endpoint = f"projects/{self.project_id}/branches/{branch_id}/metrics"
+        payload = {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "metric": "disk",
+            "instances": instance_ids,
+            "aggregations": ["max"],
+        }
+        response = self.__class__._request("POST", endpoint, json=payload)
+
+        max_bytes = 0
+        for series in response.get("series", []):
+            for point in series.get("values", []):
+                val = point.get("value", 0)
+                if val > max_bytes:
+                    max_bytes = val
+        return int(max_bytes)
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total disk usage across all branches in the Xata project.
+
+        Queries the Xata branch metrics API for the ``disk`` metric on each
+        branch and sums the results.
+
+        Note: The disk metric reports **logical** per-instance size, not
+        physical storage.  Xata uses CoW at the storage layer, so branches
+        share underlying blocks, but each PostgreSQL instance reports its
+        full logical footprint.  The sum therefore overcounts actual physical
+        storage — shared data is counted once per branch.
+
+        Returns:
+            Total storage in bytes, or 0 if unavailable.
+        """
+        try:
+            branches = self._get_xata_branches()
+            total = 0
+            for _, (branch_id, _) in branches.items():
+                total += self._get_branch_disk_bytes(branch_id)
+            return total
+        except Exception as e:
+            print(f"Warning: Could not get Xata storage metrics: {e}")
+            return 0

@@ -8,6 +8,7 @@ enum Backend {
     DOLT = 1;
     KPG = 2;
     XATA = 3;
+    FILE_COPY = 4;
 }
 
 // Type of benchmark operation to perform
@@ -110,6 +111,10 @@ message TaskConfig {
 
   // Number of worker threads for parallel benchmark execution (default: 1)
   int32 num_threads = 11;
+
+  // Whether to measure storage (disk_size_before/after) around each update operation.
+  // When enabled, update and range_update ops will record per-op storage deltas.
+  bool measure_storage = 14;
 
   // Benchmark mode: either randomized average-cost or deterministic Nth operation.
   oneof benchmark_mode {

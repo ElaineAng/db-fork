@@ -1,11 +1,17 @@
 #!/bin/bash
 # run_single_thread_bench.sh - Single-threaded benchmark script for nth-op measurements
 #
-# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]
+# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] [--measure-storage] [--operations <ops>] [--range-size <n>]
 # Example: ./run_single_thread_bench.sh DOLT db_setup/tpcc_schema.sql
 #          ./run_single_thread_bench.sh NEON db_setup/tpcc_schema.sql --seed 12345 --max-branches 128 --shape bushy
+#          ./run_single_thread_bench.sh DOLT data/tpcc.sql --max-branches 2 --measure-storage
+#          ./run_single_thread_bench.sh DOLT data/tpcc.sql --operations UPDATE,RANGE_UPDATE --measure-storage
+#          ./run_single_thread_bench.sh DOLT data/tpcc.sql --operations RANGE_UPDATE --range-size 50
 
 set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/bench_lib.sh"
 
 # Parse arguments
 BACKEND=""
@@ -13,6 +19,8 @@ SQL_DUMP_PATH=""
 SEED=""
 MAX_BRANCHES=1024
 SHAPE="spine"
+MEASURE_STORAGE=false
+OPS_STRING=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -26,6 +34,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --shape)
             SHAPE="$2"
+            shift 2
+            ;;
+        --measure-storage)
+            MEASURE_STORAGE=true
+            shift
+            ;;
+        --operations)
+            OPS_STRING="$2"
+            shift 2
+            ;;
+        --range-size)
+            RANGE_SIZE="$2"
             shift 2
             ;;
         *)
@@ -44,34 +64,15 @@ done
 
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]"
-    echo "  backend: dolt, neon, kpg, xata"
+    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] [--measure-storage]"
+    echo "  backend: dolt, neon, kpg, xata, file_copy"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
     echo "  --shape: (optional) Branch tree shape: spine, bushy, or fan_out (default: spine)"
-    exit 1
-fi
-
-# Convert backend to uppercase for proto config
-BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
-
-# Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata"
-    exit 1
-fi
-
-# Convert shape to uppercase for proto config and validate
-SHAPE_UPPER=$(echo "$SHAPE" | tr '[:lower:]' '[:upper:]')
-if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
-    echo "Error: Invalid shape '$SHAPE'. Must be one of: spine, bushy, fan_out"
-    exit 1
-fi
-
-# Check if SQL dump file exists
-if [ ! -f "$SQL_DUMP_PATH" ]; then
-    echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
+    echo "  --measure-storage: (optional) Measure disk_size_before/after around each update op (reduces num_ops)"
+    echo "  --operations: (optional) Comma-separated list of operations (default: BRANCH). E.g. UPDATE,RANGE_UPDATE"
+    echo "  --range-size: (optional) Range size for RANGE_UPDATE operation (default: 20)"
     exit 1
 fi
 
@@ -80,131 +81,25 @@ if [ -z "$SEED" ]; then
     SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 fi
 
-# Configuration parameters
-# NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
-NUM_BRANCHES_LIST=(16)
-OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
-# OPERATIONS=(BRANCH)
-
-# Other fixed config values
-TABLE_NAME="orders"
-DB_NAME="microbench"
-INSERTS_PER_BRANCH=100
-UPDATES_PER_BRANCH=20
-DELETES_PER_BRANCH=10
-RANGE_SIZE=20
-
-# Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_bench_config.XXXXXX.textproto)
-
-cleanup() {
-    rm -f "$TEMP_CONFIG"
-}
-trap cleanup EXIT
-
-# Extract first 4 chars of sql_dump filename for run_id
-SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
-SQL_PREFIX=${SQL_BASENAME:0:4}
-
-# Function to get num_ops based on operation type
-get_num_ops() {
-    local op=$1
-    case $op in
-        BRANCH)
-            echo 1
-            ;;
-        RANGE_UPDATE)
-            echo 200
-            ;;
-        CONNECT|READ|UPDATE|RANGE_READ)
-            echo 1000
-            ;;
-        *)
-            echo 1000
-            ;;
-    esac
-}
+# Override OPERATIONS if --operations was provided
+if [ -n "$OPS_STRING" ]; then
+    IFS=',' read -ra OPERATIONS <<< "$OPS_STRING"
+else
+    OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
+fi
 
 echo "==================================================="
 echo "Single-Thread Benchmark Script"
 echo "Backend: $BACKEND"
-echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
+echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPERATIONS[*]}"
-echo "Num Branches: ${NUM_BRANCHES_LIST[*]} (max: $MAX_BRANCHES)"
-echo "Branch Shape: $SHAPE_UPPER"
+echo "Num Branches: max=$MAX_BRANCHES"
+echo "Branch Shape: $SHAPE"
 echo "Random Seed: $SEED"
+echo "Measure Storage: $MEASURE_STORAGE"
 echo "==================================================="
 
-# Loop through all combinations
-for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
-    # Skip if exceeds max_branches
-    if [ "$NUM_BRANCHES" -gt "$MAX_BRANCHES" ]; then
-        echo "Skipping num_branches=$NUM_BRANCHES (exceeds max_branches=$MAX_BRANCHES)"
-        continue
-    fi
-    
-    for OPERATION in "${OPERATIONS[@]}"; do
-        NUM_OPS=$(get_num_ops "$OPERATION")
-        SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_${SHAPE_LOWER}"
-        
-        echo ""
-        echo "---------------------------------------------------"
-        echo "Running: $RUN_ID"
-        echo "  Operation: $OPERATION, Num Ops: $NUM_OPS, Branches: $NUM_BRANCHES"
-        echo "---------------------------------------------------"
-        
-        # Generate config file
-        cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for single-thread benchmark
-run_id: "${RUN_ID}"
-backend: ${BACKEND_UPPER}
-
-table_name: "${TABLE_NAME}"
-starting_branch: ""
-
-database_setup {
-  db_name: "${DB_NAME}"
-  cleanup: true
-  sql_dump {
-    sql_dump_path: "${SQL_DUMP_PATH}"
-  }
-}
-
-range_update_config {
-  range_size: ${RANGE_SIZE}
-}
-
-autocommit: true
-num_threads: 1
-
-nth_op_benchmark {
-  operation: ${OPERATION}
-  num_ops: ${NUM_OPS}
-  setup {
-    num_branches: ${NUM_BRANCHES}
-    branch_shape: ${SHAPE_UPPER}
-    inserts_per_branch: ${INSERTS_PER_BRANCH}
-    updates_per_branch: ${UPDATES_PER_BRANCH}
-    deletes_per_branch: ${DELETES_PER_BRANCH}
-  }
-}
-EOF
-        
-        echo "Config generated at: $TEMP_CONFIG"
-        cat "$TEMP_CONFIG"
-        echo ""
-        
-        # Run the benchmark
-        echo "Starting benchmark..."
-        python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED
-        
-        # Clean up dropped databases to prevent disk space explosion
-        rm -rf ~/doltgres/databases/.dolt_dropped_databases/*
-        
-        echo "Completed: $RUN_ID"
-    done
-done
+run_branch_sweep "$BACKEND" "$SQL_DUMP_PATH" "$SHAPE" "$SEED" "$MAX_BRANCHES" "$MEASURE_STORAGE" "${OPERATIONS[@]}"
 
 echo ""
 echo "==================================================="

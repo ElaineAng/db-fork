@@ -22,7 +22,9 @@ from dblib import result_collector as rc
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
+from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
+from dblib.storage import StorageMeasurer
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -53,6 +55,14 @@ def build_branch_tree(
 
 
 def validate_config(config: tp.TaskConfig):
+    if config.measure_storage and config.num_threads > 1:
+        raise ValueError(
+            "measure_storage is incompatible with num_threads > 1. "
+            "Concurrent writes from other threads pollute each thread's "
+            "before/after storage deltas. Use the single-threaded script "
+            "with --measure-storage instead."
+        )
+
     if config.backend == tp.Backend.NEON:
         db_setup = config.database_setup
         source_type = db_setup.WhichOneof("source")
@@ -74,6 +84,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -104,6 +115,13 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_uri = KpgToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.FILE_COPY:
+        info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
+        info.default_uri = FileCopyToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default FILE_COPY connection URI: {info.default_uri}")
+
 
     elif backend == tp.Backend.NEON:
         if require_db_setup:
@@ -200,6 +218,9 @@ def get_initial_connection_uri(
     elif backend == tp.Backend.KPG:
         return KpgToolSuite.get_initial_connection_uri(db_name)
 
+    elif backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.get_initial_connection_uri(db_name)
+
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
             backend_info.neon_project_id,
@@ -261,7 +282,9 @@ def cleanup_backend(
     db_name = db_name or config.database_setup.db_name
 
     # Delete the database using a direct connection through default_uri.
-    if backend_info.default_uri and db_name:
+    if backend_info.file_copy_info:
+        FileCopyToolSuite.cleanup(backend_info.file_copy_info)
+    elif backend_info.default_uri and db_name:
         conn = None
         cur = None
         try:
@@ -459,6 +482,7 @@ class BenchmarkSuite:
         self._require_db_setup = (
             config.database_setup.WhichOneof("source") == "sql_dump"
         )
+        self._measure_storage = config.measure_storage
 
         # Mapping between table name and data generator.
         self._table_datagen = None
@@ -513,6 +537,14 @@ class BenchmarkSuite:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )
+            elif self._config.backend == tp.Backend.FILE_COPY:
+                db_tools = FileCopyToolSuite.init_for_bench(
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                    self._backend_info.file_copy_info.branches,
+                )
             elif self._config.backend == tp.Backend.NEON:
                 print(
                     f"Default Neon branch name: {self._root_branch_name}, "
@@ -540,6 +572,7 @@ class BenchmarkSuite:
 
             self._add_branch(self._root_branch_name)
             self.db_tools = db_tools
+            self._storage = StorageMeasurer(db_tools, self._measure_storage)
 
             # If this thread has assigned branches (FAN_OUT mode), connect to the first one
             if self._assigned_branches:
@@ -585,9 +618,12 @@ class BenchmarkSuite:
         )
         if not branch_limit_reached:
             next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
-            self.db_tools.create_branch(
-                branch_name=next_branch_name, parent_id=cur_id
-            )
+            with self._storage.measure():
+                self.db_tools.create_branch(
+                    branch_name=next_branch_name, parent_id=cur_id
+                )
+            self.db_tools.result_collector.record_num_keys_touched(0)
+            self.db_tools.result_collector.flush_record()
             self._add_branch(next_branch_name)
 
             # Toss a fair coin to connect to the new branch, or stay on the
@@ -619,10 +655,13 @@ class BenchmarkSuite:
         _, cur_id = self.db_tools.get_current_branch()
         next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
 
-        # Create branch (timed)
-        self.db_tools.create_branch(
-            branch_name=next_branch_name, parent_id=cur_id, timed=True
-        )
+        # Create branch (timed, with optional storage measurement)
+        with self._storage.measure():
+            self.db_tools.create_branch(
+                branch_name=next_branch_name, parent_id=cur_id, timed=True
+            )
+        self.db_tools.result_collector.record_num_keys_touched(0)
+        self.db_tools.result_collector.flush_record()
         self._add_branch(next_branch_name)
 
         # Connect to the new branch (timed)
@@ -743,6 +782,25 @@ class BenchmarkSuite:
             except Exception:
                 continue
 
+    def _execute_timed_op(self, sql, row_data, commit_message):
+        """Execute SQL with timing and optional storage measurement.
+
+        Bypasses execute_sql(timed=True) auto-flush so disk_size_before and
+        disk_size_after land on the same record.
+        """
+
+        result_collector = self.db_tools.result_collector
+        db_tools = self.db_tools
+
+        with self._storage.measure():
+            op_type = rc.GetOpTypeFromSQL(sql)
+            with result_collector.maybe_time_ops(timed=True, op_type=op_type):
+                db_tools.execute_sql(sql, row_data, timed=False)
+                if not db_tools.autocommit:
+                    db_tools.commit_changes(timed=False, message=commit_message)
+        result_collector.record_sql_query(f"{sql} -- args: {row_data}")
+        result_collector.flush_record()
+
     def update_op(self, rnd, benchmark_table, timed: bool = True) -> None:
         """Update a random row in the table.
 
@@ -799,14 +857,18 @@ class BenchmarkSuite:
             self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the update.
-        self.db_tools.execute_sql(update_sql, row_data, timed=timed)
+        if timed:
+            self._execute_timed_op(update_sql, row_data, "update")
+        else:
+            # NOTE: Never call execute_sql(timed=True) directly — its auto-flush
+            # conflicts with StorageMeasurer. Use _execute_timed_op for timed ops.
+            self.db_tools.execute_sql(update_sql, row_data, timed=False)
+
         # Track the modified key.
         if key_to_update not in self._modified_keys.get(cur_branch_id, []):
             self._modified_keys.setdefault(cur_branch_id, []).append(
                 key_to_update
             )
-        if timed and not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True, message="update")
 
     def range_update_op(self, rnd, benchmark_table) -> None:
         """Perform a range update on multiple rows.
@@ -859,15 +921,13 @@ class BenchmarkSuite:
         )
 
         # Run the range update.
-        self.db_tools.execute_sql(update_sql, row_data, timed=True)
+        self._execute_timed_op(update_sql, row_data, "range update")
 
         # Track all actual keys in the range as modified.
         modified_list = self._modified_keys.setdefault(cur_branch_id, [])
         for key in range_info["keys_in_range"]:
             if key not in modified_list:
                 modified_list.append(key)
-        if not self.db_tools.autocommit:
-            self.db_tools.commit_changes(timed=True, message="range update")
         return len(range_info["keys_in_range"])
 
     def range_read_op(self, rnd, benchmark_table) -> int:
@@ -1005,16 +1065,17 @@ class BenchmarkSuite:
         """
         # Initialize RNG with seed for reproducible operation ordering.
         rnd = random.Random(self._seed)
+        db_tools = self.db_tools
 
         # Initialize datagen for inserts.
         benchmark_table = self._config.table_name
         if not benchmark_table:
             all_tables = dbh.get_all_tables(
-                self.db_tools.get_current_connection()
+                db_tools.get_current_connection()
             )
             benchmark_table = rnd.choice(all_tables)
 
-        table_schema = self.db_tools.get_table_schema(benchmark_table)
+        table_schema = db_tools.get_table_schema(benchmark_table)
         if not table_schema:
             raise ValueError(
                 f"Could not fetch DDL for table {benchmark_table}."
@@ -1025,10 +1086,10 @@ class BenchmarkSuite:
 
         # Get column info for inserts.
         col_names = dbh.get_all_columns(
-            self.db_tools.get_current_connection(), benchmark_table
+            db_tools.get_current_connection(), benchmark_table
         )
 
-        _, current_parent_id = self.db_tools.get_current_branch()
+        _, current_parent_id = db_tools.get_current_branch()
         root_branch_id = current_parent_id
 
         # Track branch IDs for BUSHY shape (random parent selection).
@@ -1054,26 +1115,35 @@ class BenchmarkSuite:
 
             if shape == tp.BranchShape.SPINE:
                 # Linear: branch from current
-                self.db_tools.create_branch(
-                    branch_name, current_parent_id, timed=True
-                )
-                self.db_tools.connect_branch(branch_name, timed=False)
-                _, current_parent_id = self.db_tools.get_current_branch()
+                with self._storage.measure():
+                    db_tools.create_branch(
+                        branch_name, current_parent_id, timed=True
+                    )
+                db_tools.result_collector.record_num_keys_touched(0)
+                db_tools.result_collector.flush_record()
+                db_tools.connect_branch(branch_name, timed=False)
+                _, current_parent_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, current_parent_id))
             elif shape == tp.BranchShape.FAN_OUT:
                 # Fan-out: always branch from root
-                self.db_tools.create_branch(
-                    branch_name, root_branch_id, timed=True
-                )
-                self.db_tools.connect_branch(branch_name, timed=False)
-                _, new_branch_id = self.db_tools.get_current_branch()
+                with self._storage.measure():
+                    db_tools.create_branch(
+                        branch_name, root_branch_id, timed=True
+                    )
+                db_tools.result_collector.record_num_keys_touched(0)
+                db_tools.result_collector.flush_record()
+                db_tools.connect_branch(branch_name, timed=False)
+                _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
             else:  # BUSHY
                 # Bushy: branch from a random existing branch
                 parent_name, parent_id = rnd.choice(branch_ids)
-                self.db_tools.create_branch(branch_name, parent_id, timed=True)
-                self.db_tools.connect_branch(branch_name, timed=False)
-                _, new_branch_id = self.db_tools.get_current_branch()
+                with self._storage.measure():
+                    db_tools.create_branch(branch_name, parent_id, timed=True)
+                db_tools.result_collector.record_num_keys_touched(0)
+                db_tools.result_collector.flush_record()
+                db_tools.connect_branch(branch_name, timed=False)
+                _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
 
             # Perform setup operations on this branch.
@@ -1089,7 +1159,7 @@ class BenchmarkSuite:
             self._add_branch(branch_name)
 
         # Get the last branch info to return.
-        last_branch_name, last_branch_id = self.db_tools.get_current_branch()
+        last_branch_name, last_branch_id = db_tools.get_current_branch()
 
         print(
             f"Setup complete: {num_branches} branches created, "
@@ -1401,7 +1471,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable progress bar (useful for running in background/tmux).",
     )
-
     args = parser.parse_args()
 
     # Load and parse the textproto config file
