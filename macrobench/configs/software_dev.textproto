@@ -1,6 +1,6 @@
 # Software Development workflow (Table 1, Section 3.3)
-# DDL-heavy: schema migrations, seed data, integrity tests.
-# Tree shape: moderate depth chain (F=3, D=10).
+# DDL-heavy: schema migrations, backfill, integrity tests.
+# Tree shape: moderate depth (F_r=5, F_i=3, D=3).
 
 run_id: "macro_software_dev"
 backend: DOLT
@@ -10,28 +10,24 @@ database_setup {
     db_name: "macrobench_softdev"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/tpcc_schema.sql"
+        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
     }
 }
 
 setup {
-    workers: 2       # T
-    total_steps: 20  # S
-    db_size: 10      # W (warehouse scale factor)
-    max_fanout: 3    # F
-    max_depth: 10    # D
+    workers: 5              # T
+    total_steps: 20         # S (per worker)
+    root_fanout: 5          # F_r
+    inner_fanout: 3         # F_i
+    max_depth: 3            # D
+    cross_branch_queries: 1 # C
 }
 
 step {
-    mutations: 5     # M
-    ddl_count: 3     # M_DDL
-    queries: 5       # Q
-    merge_prob: 0.1  # mu
-}
-
-background {
-    interval: 20     # B
-    prune_fraction: 0 # gamma
+    schema_changes: 1   # M_s
+    data_mutations: 1   # M_d
+    eval_queries: 2     # Q_v
+    prune_prob: 0.1     # gamma
 }
 
 autocommit: true

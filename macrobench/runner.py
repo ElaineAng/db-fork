@@ -1,8 +1,9 @@
-"""Macrobenchmark runner implementing the work-queue automaton from Section 3.3.
+"""Macrobenchmark runner implementing the round-robin execution model from
+Section 3.3.
 
-T worker threads collectively execute S steps over a shared branch tree.
-Each step: Assign -> Branch -> Mutate -> Evaluate -> Merge (probabilistic).
-A background pass fires every B completed steps to compare + prune.
+T worker threads each perform S steps over a shared branch tree.
+Each step: Branch -> Mutate -> Evaluate -> (mark committed) -> Prune.
+C cross-branch queries are spread evenly across the S steps.
 
 Usage:
     python -m macrobench.runner --config macrobench/configs/software_dev.textproto
@@ -14,7 +15,6 @@ import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 from google.protobuf import text_format
 
@@ -37,32 +37,6 @@ from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
-
-
-class StepCounter:
-    """Thread-safe atomic step counter.
-
-    Workers call try_claim() to get the next step number. Returns None
-    when all S steps have been claimed.
-    """
-
-    def __init__(self, total: int):
-        self._count = 0
-        self._total = total
-        self._lock = threading.Lock()
-
-    def try_claim(self) -> Optional[int]:
-        """Atomically claim the next step. Returns step number or None."""
-        with self._lock:
-            if self._count >= self._total:
-                return None
-            step = self._count
-            self._count += 1
-            return step
-
-    def current(self) -> int:
-        with self._lock:
-            return self._count
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -116,33 +90,6 @@ def _create_db_tools(config, backend_info, result_collector):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _do_merge(db_tools, config, branch_node):
-    """Merge a branch into its parent via the DBToolSuite API.
-
-    Connects to the parent (target) branch, then calls merge_branch()
-    which dispatches to the backend-specific implementation:
-      - Dolt:  native dolt_merge() with auto conflict resolution
-      - Neon:  branch restore (overwrites target with source state)
-      - KPG/Xata: no-op (timing still recorded)
-
-    Args:
-        db_tools: The DBToolSuite instance.
-        config: MacroBenchConfig.
-        branch_node: The BranchNode being merged into its parent.
-    """
-    parent = branch_node.parent
-    if parent is None:
-        return
-
-    # Switch to the target (parent) branch before merging.
-    db_tools.connect_branch(parent.name, timed=False)
-    db_tools.merge_branch(
-        source_branch=branch_node.name,
-        timed=True,
-        message=f"merge {branch_node.name}",
-    )
-
-
 def _do_delete_branch(db_tools, branch_node):
     """Delete a branch via the DBToolSuite API.
 
@@ -165,59 +112,52 @@ def _do_delete_branch(db_tools, branch_node):
     )
 
 
-def _run_background_pass(
+def _should_run_cross_branch(step_id: int, total_steps: int,
+                             cross_branch_count: int) -> bool:
+    """Determine if this step should run a cross-branch query.
+
+    C cross-branch queries are spread evenly across S steps.
+    When C=1, the query fires on the last step.
+    """
+    if cross_branch_count <= 0 or total_steps <= 0:
+        return False
+    if cross_branch_count >= total_steps:
+        return True  # run every step
+    interval = max(1, total_steps // cross_branch_count)
+    return (step_id + 1) % interval == 0
+
+
+def _run_cross_branch_queries(
     db_tools,
-    config,
     branch_tree: BranchTree,
     workflow_ops: WorkflowOps,
+    progress,
+    thread_id: int,
 ):
-    """Execute the background process: compare + prune.
-
-    1. Run compare queries on each alive branch.
-    2. Prune gamma fraction of branches.
-
-    Args:
-        db_tools: DBToolSuite for this thread.
-        config: MacroBenchConfig.
-        branch_tree: Shared BranchTree.
-        workflow_ops: Workflow operations providing compare queries.
-    """
-    gamma = config.background.prune_fraction
-
-    # Phase 1: Cross-branch comparison
+    """Execute cross-branch compare queries on pre-committed leaf branches."""
     compare_queries = workflow_ops.compare()
-    alive_nodes = branch_tree.get_alive_non_root()
+    if not compare_queries:
+        return
 
-    for node in alive_nodes:
+    leaves = branch_tree.get_pre_committed_leaves()
+    for node in leaves:
+        if not node.alive:
+            continue
         try:
             db_tools.connect_branch(node.name, timed=False)
             for query in compare_queries:
                 try:
-                    result = db_tools.execute_sql(query, timed=True)
-                    # Use the first numeric result as reward signal
-                    if result and result[0]:
-                        for val in result[0]:
-                            if isinstance(val, (int, float)) and val is not None:
-                                branch_tree.set_reward(node, float(val))
-                                break
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Phase 2: Prune
-    if gamma > 0:
-        candidates = branch_tree.get_prune_candidates(gamma)
-        for node in candidates:
-            try:
-                # Ensure we're not on the branch we're about to delete.
-                db_tools.connect_branch(
-                    branch_tree.root.name, timed=False
-                )
-                _do_delete_branch(db_tools, node)
-            except Exception:
-                pass
-            branch_tree.mark_dead(node)
+                    db_tools.execute_sql(query, timed=True)
+                except Exception as e:
+                    progress.write(
+                        f"[T{thread_id}] Compare query failed on "
+                        f"{node.name}: {e}"
+                    )
+        except Exception as e:
+            progress.write(
+                f"[T{thread_id}] Connect failed for compare on "
+                f"{node.name}: {e}"
+            )
 
 
 def worker_fn(
@@ -225,24 +165,24 @@ def worker_fn(
     config,
     backend_info: BackendInfo,
     branch_tree: BranchTree,
-    step_counter: StepCounter,
     result_collector: rc.ResultCollector,
     workflow_ops: WorkflowOps,
     progress: SharedProgress,
-    bg_lock: threading.Lock,
 ):
     """Worker thread function implementing the per-step automaton.
+
+    Each thread independently performs S steps in round-robin fashion.
+    Per-step cycle: Branch -> Mutate -> Evaluate -> mark committed -> Prune.
+    Cross-branch queries are interleaved at evenly spaced steps.
 
     Args:
         thread_id: Unique thread identifier.
         config: MacroBenchConfig.
         backend_info: Connection info.
         branch_tree: Shared branch tree.
-        step_counter: Shared atomic step counter.
         result_collector: Shared result collector.
         workflow_ops: SQL operations for the configured workflow.
         progress: Shared progress bar.
-        bg_lock: Lock ensuring only one thread runs background at a time.
     """
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
@@ -258,20 +198,27 @@ def worker_fn(
         seed=42 + thread_id,
     )
 
-    try:
-        while True:
-            step_id = step_counter.try_claim()
-            if step_id is None:
-                break
+    S = config.setup.total_steps
+    C = config.setup.cross_branch_queries
 
-            # --- Assign ---
+    try:
+        for step_id in range(S):
+            # --- Wait for branch slot (Neon 20-branch limit) ---
+            if not branch_tree.wait_for_slot(timeout=60.0):
+                progress.write(
+                    f"[T{thread_id}] Timed out waiting for branch slot "
+                    f"at step {step_id}, skipping."
+                )
+                progress.update(1)
+                continue
+
+            # --- Branch ---
             parent_node = branch_tree.assign_parent(rng)
             if parent_node is None:
                 # Tree is full (no eligible parents). Skip this step.
                 progress.update(1)
                 continue
 
-            # --- Branch ---
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
                 # Connect to parent first
@@ -299,13 +246,11 @@ def worker_fn(
             child_node = branch_tree.add_child(
                 parent_node, branch_name, new_branch_id
             )
-            branch_tree.increment_visit(parent_node)
 
-            # --- Mutate ---
-            # Execute M_DDL DDL statements
+            # --- Mutate (DDL: M_s schema changes) ---
             ddl_stmts = workflow_ops.mutate_ddl(step_id)
             for i, stmt in enumerate(ddl_stmts):
-                if i >= config.step.ddl_count:
+                if i >= config.step.schema_changes:
                     break
                 try:
                     db_tools.execute_sql(stmt, timed=True)
@@ -316,11 +261,12 @@ def worker_fn(
                         f"[T{thread_id}] DDL failed at step {step_id}: {e}"
                     )
 
-            # Execute M - M_DDL DML statements
-            dml_count = config.step.mutations - config.step.ddl_count
-            dml_stmts = workflow_ops.mutate_dml(step_id, rng)
+            # --- Mutate (DML: M_d data mutations) ---
+            dml_stmts = workflow_ops.mutate_dml(
+                step_id, rng, thread_id=thread_id
+            )
             for i, stmt in enumerate(dml_stmts):
-                if i >= dml_count:
+                if i >= config.step.data_mutations:
                     break
                 try:
                     db_tools.execute_sql(stmt, timed=True)
@@ -331,48 +277,52 @@ def worker_fn(
                         f"[T{thread_id}] DML failed at step {step_id}: {e}"
                     )
 
-            # --- Evaluate ---
+            # --- Evaluate (Q_v queries) ---
             eval_queries = workflow_ops.evaluate()
             for i, query in enumerate(eval_queries):
-                if i >= config.step.queries:
+                if i >= config.step.eval_queries:
                     break
                 try:
-                    result = db_tools.execute_sql(query, timed=True)
-                    # Use first numeric result as reward
-                    if result and result[0]:
-                        for val in result[0]:
-                            if isinstance(val, (int, float)) and val is not None:
-                                branch_tree.set_reward(child_node, float(val))
-                                break
+                    db_tools.execute_sql(query, timed=True)
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Eval failed at step {step_id}: {e}"
                     )
 
-            # --- Merge (probabilistic) ---
-            if config.step.merge_prob > 0 and rng.random() < config.step.merge_prob:
+            # --- Mark pre-committed (eligible for cross-branch reads) ---
+            branch_tree.mark_pre_committed(child_node)
+
+            # --- Prune (probabilistic gamma) ---
+            should_prune = (config.step.prune_prob > 0
+                            and rng.random() < config.step.prune_prob)
+            if should_prune:
+                # Wait until no cross-branch queries are running.
+                branch_tree.wait_prune_safe()
+                branch_tree.mark_dead(child_node)
                 try:
-                    _do_merge(db_tools, config, child_node)
+                    db_tools.connect_branch(
+                        branch_tree.root.name, timed=False
+                    )
+                    _do_delete_branch(db_tools, child_node)
                 except Exception as e:
                     progress.write(
-                        f"[T{thread_id}] Merge failed at step {step_id}: {e}"
+                        f"[T{thread_id}] Prune failed at step "
+                        f"{step_id}: {e}"
                     )
+            else:
+                # Survived pruning — promote to committed (parent-eligible)
+                branch_tree.mark_committed(child_node)
 
-            # --- Background pass (inline) ---
-            bg_interval = config.background.interval
-            if bg_interval > 0 and (step_id + 1) % bg_interval == 0:
-                if bg_lock.acquire(blocking=False):
-                    try:
-                        _run_background_pass(
-                            db_tools, config, branch_tree,
-                            workflow_ops,
-                        )
-                    except Exception as e:
-                        progress.write(
-                            f"[T{thread_id}] Background pass failed: {e}"
-                        )
-                    finally:
-                        bg_lock.release()
+            # --- Cross-branch queries (C spread over S) ---
+            if _should_run_cross_branch(step_id, S, C):
+                branch_tree.begin_cross_branch()
+                try:
+                    _run_cross_branch_queries(
+                        db_tools, branch_tree, workflow_ops,
+                        progress, thread_id,
+                    )
+                finally:
+                    branch_tree.end_cross_branch()
 
             progress.update(1)
 
@@ -431,6 +381,12 @@ def main():
         action="store_true",
         help="Disable progress bar.",
     )
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        default="/tmp/run_stats",
+        help="Directory to save parquet results (default: /tmp/run_stats).",
+    )
 
     args = parser.parse_args()
 
@@ -449,19 +405,22 @@ def main():
     print(f"Run ID: {config.run_id}")
     print(f"Backend: {tp.Backend.Name(config.backend)}")
     print(f"Workflow: {tp.WorkflowType.Name(config.workflow)}")
-    print(f"Workers: {config.setup.workers}, Steps: {config.setup.total_steps}")
     print(
-        f"Tree: F={config.setup.max_fanout}, D={config.setup.max_depth}"
+        f"Workers: {config.setup.workers}, "
+        f"Steps/worker: {config.setup.total_steps}"
     )
     print(
-        f"Per-step: M={config.step.mutations} "
-        f"(DDL={config.step.ddl_count}), Q={config.step.queries}, "
-        f"mu={config.step.merge_prob}"
+        f"Tree: F_r={config.setup.root_fanout}, "
+        f"F_i={config.setup.inner_fanout}, "
+        f"D={config.setup.max_depth}"
     )
     print(
-        f"Background: B={config.background.interval}, "
-        f"gamma={config.background.prune_fraction}"
+        f"Per-step: M_s={config.step.schema_changes}, "
+        f"M_d={config.step.data_mutations}, "
+        f"Q_v={config.step.eval_queries}, "
+        f"gamma={config.step.prune_prob}"
     )
+    print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
 
     # Set up backend and database
     micro_config = _build_microbench_config(config)
@@ -469,23 +428,34 @@ def main():
 
     # Initialize components
     workflow_ops = get_workflow_ops(config.workflow)
-    step_counter = StepCounter(config.setup.total_steps)
+
+    # Neon limits active branches to 20 (including the default branch).
+    max_active = 20 if config.backend == tp.Backend.NEON else 0
+    if max_active:
+        print(f"Branch limit: {max_active} active branches (Neon)")
 
     branch_tree = BranchTree(
         root_name=backend_info.default_branch_name,
-        root_id=backend_info.default_branch_id or backend_info.default_branch_name,
-        max_fanout=config.setup.max_fanout,
+        root_id=(
+            backend_info.default_branch_id
+            or backend_info.default_branch_name
+        ),
+        root_fanout=config.setup.root_fanout,
+        inner_fanout=config.setup.inner_fanout,
         max_depth=config.setup.max_depth,
+        max_active_branches=max_active,
     )
 
-    result_collector = rc.ResultCollector(run_id=config.run_id)
+    result_collector = rc.ResultCollector(
+        run_id=config.run_id, output_dir=args.outdir
+    )
     num_workers = max(1, config.setup.workers)
+    total_work = num_workers * config.setup.total_steps
     progress = SharedProgress(
-        total=config.setup.total_steps,
+        total=total_work,
         desc=f"Macrobench ({num_workers} workers)",
         disable=args.no_progress,
     )
-    bg_lock = threading.Lock()
 
     print(f"\nStarting macrobenchmark with {num_workers} worker(s)...")
     start_time = time.time()
@@ -499,11 +469,9 @@ def main():
                     config=config,
                     backend_info=backend_info,
                     branch_tree=branch_tree,
-                    step_counter=step_counter,
                     result_collector=result_collector,
                     workflow_ops=workflow_ops,
                     progress=progress,
-                    bg_lock=bg_lock,
                 )
                 for i in range(num_workers)
             ]

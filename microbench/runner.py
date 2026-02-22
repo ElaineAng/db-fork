@@ -231,12 +231,12 @@ def create_benchmark_database(uri: str, db_name: str) -> None:
         conn = psycopg2.connect(uri)
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cur = conn.cursor()
-        create_db_command = f"CREATE DATABASE {db_name};"
         try:
-            cur.execute(create_db_command)
-            print("Database created successfully.")
-        except psycopg2.errors.DuplicateDatabase:
-            print(f"Database '{db_name}' already exists.")
+            cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
+        except Exception as drop_err:
+            print(f"Warning: could not drop existing database: {drop_err}")
+        cur.execute(f"CREATE DATABASE {db_name};")
+        print("Database created successfully.")
     except Exception as e:
         print(f"Error creating database: {e}")
     finally:

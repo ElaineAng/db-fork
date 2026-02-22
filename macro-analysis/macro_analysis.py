@@ -54,12 +54,12 @@ OP_SHORT = {
 WORKFLOW_LABELS = {
     "software_dev": "Software\nDevelopment",
     "failure_repro": "Failure\nReproduction",
-    "data_curation": "Data\nCuration",
-    "what_if": "What-If\nAnalysis",
+    "data_cleaning": "Data\nCleaning",
+    "mcts": "MCTS",
     "simulation": "Simulation",
 }
 
-WORKFLOW_ORDER = ["software_dev", "failure_repro", "data_curation", "what_if", "simulation"]
+WORKFLOW_ORDER = ["software_dev", "failure_repro", "data_cleaning", "mcts", "simulation"]
 
 # Branch management ops vs data ops
 BRANCH_OPS = {1, 2, 8, 9}  # create, connect, delete, merge
@@ -80,8 +80,8 @@ COLORS = {
 WF_COLORS = {
     "software_dev": "#2176AE",
     "failure_repro": "#E8554E",
-    "data_curation": "#57B894",
-    "what_if": "#F5A623",
+    "data_cleaning": "#57B894",
+    "mcts": "#F5A623",
     "simulation": "#9B59B6",
 }
 

@@ -1,10 +1,10 @@
 """Per-workflow SQL operations for the macrobenchmark.
 
-Each workflow class provides concrete SQL statements for the three phases
-of an automaton step: mutate (DDL + DML), evaluate (read queries), and
-compare (cross-branch queries run during background passes).
+Each workflow class provides concrete SQL statements for the phases
+of a step: mutate (DDL + DML), evaluate (read queries), and
+compare (cross-branch queries spread across steps).
 
-SQL statements are derived from Figure 2 in the paper (Section 3.3).
+SQL statements are derived from Figure 1 in the paper (Section 3.3).
 The CH-benCHmark schema tables used:
   warehouse, district, customer, item, stock, orders, new_order, order_line
 
@@ -18,7 +18,6 @@ KPG, Xata).  Specifically we avoid:
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class WorkflowOps(ABC):
@@ -29,19 +28,21 @@ class WorkflowOps(ABC):
         """Return DDL statements for this step.
 
         Args:
-            step_id: Global step number (can be used to vary statements).
+            step_id: Step number within this thread.
 
         Returns:
             List of SQL DDL strings.
         """
 
     @abstractmethod
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         """Return DML statements for this step.
 
         Args:
-            step_id: Global step number.
+            step_id: Step number within this thread.
             rng: random.Random instance for generating random values.
+            thread_id: Worker thread ID (used by some workflows to
+                       differentiate strategies).
 
         Returns:
             List of SQL DML strings.
@@ -49,7 +50,7 @@ class WorkflowOps(ABC):
 
     @abstractmethod
     def evaluate(self) -> list[str]:
-        """Return evaluation queries for this step.
+        """Return per-branch evaluation queries for this step.
 
         Returns:
             List of SQL SELECT strings.
@@ -57,127 +58,127 @@ class WorkflowOps(ABC):
 
     @abstractmethod
     def compare(self) -> list[str]:
-        """Return per-branch comparison queries for background passes.
+        """Return cross-branch comparison queries.
 
-        These queries are executed on each alive branch individually
-        (the runner connects to each branch in turn).
+        These queries are executed on each committed leaf branch
+        individually (the runner connects to each branch in turn)
+        during cross-branch query passes.
 
         Returns:
-            List of SQL SELECT strings.
+            List of SQL SELECT strings.  Empty list if C=--- for
+            this workflow.
         """
 
 
 class SoftwareDevOps(WorkflowOps):
     """Software development workflow: DDL-heavy schema migrations.
 
-    Mutate: CREATE TABLE, ALTER TABLE, seed data via INSERT...SELECT.
-    Evaluate: FK integrity checks, application query simulation.
-    Compare: Run the same test queries on sibling branches.
+    Mutate: ALTER TABLE to add columns, UPDATE to backfill.
+    Evaluate: Null check + distribution query.
+    Compare: Distribution query across branches.
     """
 
     def mutate_ddl(self, step_id: int) -> list[str]:
-        # Use step_id to create unique table/column names per step to avoid
-        # conflicts across steps on the same branch.
-        suffix = step_id % 1000
+        # M_s=1 DDL per step.  We provide two options so the runner
+        # can pick up to schema_changes of them.
         return [
-            f"""CREATE TABLE IF NOT EXISTS customer_preferences_{suffix} (
-                id SERIAL PRIMARY KEY,
-                c_w_id INT NOT NULL,
-                c_d_id INT NOT NULL,
-                c_id INT NOT NULL,
-                theme VARCHAR(20) DEFAULT 'light',
-                language VARCHAR(10) DEFAULT 'en',
-                notifications BOOL DEFAULT true
-            );""",
-            f"ALTER TABLE customer ADD COLUMN "
-            f"c_display_name_{suffix} VARCHAR(100);",
+            "ALTER TABLE customer ADD COLUMN loyalty_tier VARCHAR(8);",
+            "ALTER TABLE customer ADD COLUMN c_credit_limit DECIMAL(10,2);",
         ]
 
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
-        suffix = step_id % 1000
-        w_id = rng.randint(1, 10)
-        d_id = rng.randint(1, 10)
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
+        # M_d=1 DML per step: backfill the loyalty_tier column.
         return [
-            f"""INSERT INTO customer_preferences_{suffix}
-                (c_w_id, c_d_id, c_id, theme, language, notifications)
-                SELECT c_w_id, c_d_id, c_id, 'light', 'en', true
-                FROM customer
-                WHERE c_w_id = {w_id} AND c_d_id = {d_id}
-                ON CONFLICT DO NOTHING;""",
+            """UPDATE customer SET loyalty_tier = CASE
+                   WHEN c_ytd_payment > 9000 THEN 'Gold'
+                   WHEN c_ytd_payment > 5000 THEN 'Silver'
+                   ELSE 'Bronze'
+               END;""",
         ]
 
     def evaluate(self) -> list[str]:
+        # Q_v=2
         return [
-            # Schema sanity: count tables created by DDL migrations
-            """SELECT COUNT(*) FROM information_schema.tables
-               WHERE table_schema = 'public';""",
-            # Column count check: how many columns on customer table
-            """SELECT COUNT(*) FROM information_schema.columns
-               WHERE table_name = 'customer';""",
-            # Application query simulation: customer lookup
-            """SELECT c.c_id, c.c_first, c.c_last
-               FROM customer c
-               WHERE c.c_w_id = 1 AND c.c_d_id = 1
-               LIMIT 10;""",
-            # FK-like integrity check: orphan orders
-            """SELECT COUNT(*) FROM orders o
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM customer c
-                   WHERE c.c_w_id = o.o_w_id AND c.c_d_id = o.o_d_id
-                     AND c.c_id = o.o_c_id
-               );""",
+            "SELECT COUNT(*) FROM customer WHERE loyalty_tier IS NULL;",
+            """SELECT loyalty_tier, COUNT(*), AVG(c_ytd_payment)
+               FROM customer GROUP BY loyalty_tier;""",
         ]
 
     def compare(self) -> list[str]:
+        # C=1 cross-branch query
         return [
-            # Same integrity check used as "test suite" on each branch
-            """SELECT COUNT(*) FROM information_schema.tables
-               WHERE table_schema = 'public';""",
-            """SELECT COUNT(*) FROM customer;""",
+            """SELECT loyalty_tier, COUNT(*), AVG(c_ytd_payment)
+               FROM customer GROUP BY loyalty_tier;""",
         ]
 
 
 class FailureReproOps(WorkflowOps):
     """Failure reproduction: transaction replay + constraint modification.
 
-    Mutate: INSERT/UPDATE with edge-case values, ALTER constraints.
-    Evaluate: Corruption checks (negative amounts, orphan rows).
-    Compare: Audit trail capture (count mutations per branch).
+    Mutate: INSERT/UPDATE/DELETE/ALTER replaying a recorded transaction log.
+    Evaluate: Invariant check (order line count mismatch).
+    Compare: No cross-branch queries (C=---).
     """
 
     def mutate_ddl(self, step_id: int) -> list[str]:
+        # Part of the mixed DDL+DML replay.  Up to M_s=5 schema changes.
         suffix = step_id % 1000
-        # Toggle constraint: drop then re-add to test hypothesis
+        stmts = [
+            "ALTER TABLE order_line ADD COLUMN "
+            f"ol_discount_{suffix} DECIMAL(5,2);",
+        ]
+        # Additional DDL ops to fill M_s=5
         if step_id % 2 == 0:
-            return [
-                f"ALTER TABLE order_line DROP CONSTRAINT IF EXISTS "
-                f"ol_amount_check_{suffix};",
-            ]
-        else:
-            return [
-                f"ALTER TABLE order_line ADD CONSTRAINT "
-                f"ol_amount_check_{suffix} CHECK (ol_amount >= 0);",
-            ]
+            stmts.append(
+                f"ALTER TABLE order_line DROP COLUMN ol_discount_{suffix};"
+            )
+        stmts.append(
+            f"ALTER TABLE order_line ADD CONSTRAINT "
+            f"ol_amount_check_{suffix} CHECK (ol_amount >= 0);"
+        )
+        stmts.append(
+            f"ALTER TABLE order_line DROP CONSTRAINT IF EXISTS "
+            f"ol_amount_check_{suffix};"
+        )
+        stmts.append(
+            f"ALTER TABLE orders ADD COLUMN "
+            f"o_flag_{suffix} BOOLEAN DEFAULT false;"
+        )
+        return stmts
 
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
-        stmts = []
-        # Replay suspect transaction sequence with edge-case values
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
+        # M_d=45 DML statements: replay recorded transaction prefix.
         w_id = rng.randint(1, 10)
         d_id = rng.randint(1, 10)
         o_id = 3000 + step_id
+        stmts = []
 
+        # Insert order
         stmts.append(
             f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
                 o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
-                VALUES ({o_id}, {d_id}, {w_id}, 1, NULL, 5, 1,
-                        EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::BIGINT)
+                VALUES ({o_id}, {d_id}, {w_id}, 42, NULL, 5, 1,
+                        CURRENT_TIMESTAMP)
                 ON CONFLICT DO NOTHING;"""
         )
 
-        # Inject edge-case: negative quantity in order_line
-        for i in range(min(5, step_id % 10 + 1)):
+        # Update customer balance
+        stmts.append(
+            f"""UPDATE customer SET c_balance = c_balance - 72.50
+                WHERE c_w_id = {w_id} AND c_d_id = {d_id} AND c_id = 42;"""
+        )
+
+        # Delete order lines (replay of cleanup)
+        stmts.append(
+            f"""DELETE FROM order_line
+                WHERE ol_o_id = {o_id} AND ol_d_id = {d_id}
+                AND ol_w_id = {w_id};"""
+        )
+
+        # Pad with order line inserts to reach ~45 DML
+        for i in range(42):
             ol_num = i + 1
-            amount = rng.choice([-1, -5, 0, 1, 100])
+            amount = rng.choice([-1, 0, 1, 50, 100])
             stmts.append(
                 f"""INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id,
                     ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d,
@@ -187,241 +188,185 @@ class FailureReproOps(WorkflowOps):
                     ON CONFLICT DO NOTHING;"""
             )
 
-        # Update existing rows with suspect values
-        stmts.append(
-            f"""UPDATE order_line SET ol_amount = -1
-                WHERE ol_o_id = {o_id} AND ol_d_id = {d_id}
-                AND ol_w_id = {w_id} AND ol_number = 1;"""
-        )
-
         return stmts
 
     def evaluate(self) -> list[str]:
+        # Q_v=1: invariant check — order line count mismatch
         return [
-            # Check for negative amounts (corruption indicator)
-            "SELECT COUNT(*) FROM order_line WHERE ol_amount < 0;",
-            # Orphan order lines
-            """SELECT COUNT(*) FROM order_line ol
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM orders o
-                   WHERE o.o_id = ol.ol_o_id
-                     AND o.o_d_id = ol.ol_d_id
-                     AND o.o_w_id = ol.ol_w_id
+            """SELECT o_id FROM orders o
+               WHERE o_ol_cnt <> (
+                   SELECT COUNT(*) FROM order_line ol
+                   WHERE ol.ol_o_id = o.o_id
+                     AND ol.ol_d_id = o.o_d_id
+                     AND ol.ol_w_id = o.o_w_id
                );""",
-            # Constraint violations
-            """SELECT COUNT(*) FROM order_line
-               WHERE ol_quantity <= 0;""",
         ]
 
     def compare(self) -> list[str]:
-        return [
-            # Audit trail: count of mutations (negative amounts injected)
-            "SELECT COUNT(*) FROM order_line WHERE ol_amount < 0;",
-            "SELECT COUNT(*) FROM orders;",
-        ]
-
-
-class DataCurationOps(WorkflowOps):
-    """Data curation: bulk DML / CTAS for feature synthesis.
-
-    Mutate: CREATE TABLE + INSERT...SELECT with aggregation, bulk rewrite.
-    Evaluate: Null rate, distribution stats, full-scan validation.
-    Compare: Metric aggregation across branches.
-    """
-
-    def mutate_ddl(self, step_id: int) -> list[str]:
-        suffix = step_id % 1000
-        # Split CTAS into CREATE TABLE + INSERT...SELECT for Dolt compat.
-        return [
-            f"""CREATE TABLE IF NOT EXISTS customer_features_{suffix} (
-                c_w_id SMALLINT,
-                c_d_id SMALLINT,
-                c_id INT,
-                total_spend DECIMAL(12, 2),
-                order_cnt BIGINT,
-                last_order BIGINT
-            );""",
-            f"""INSERT INTO customer_features_{suffix}
-                (c_w_id, c_d_id, c_id, total_spend, order_cnt, last_order)
-                SELECT c.c_w_id, c.c_d_id, c.c_id,
-                    COALESCE(SUM(ol.ol_amount), 0),
-                    COUNT(DISTINCT o.o_id),
-                    MAX(o.o_entry_d)
-                FROM customer c
-                LEFT JOIN orders o
-                    ON c.c_w_id = o.o_w_id AND c.c_d_id = o.o_d_id
-                       AND c.c_id = o.o_c_id
-                LEFT JOIN order_line ol
-                    ON o.o_id = ol.ol_o_id AND o.o_d_id = ol.ol_d_id
-                       AND o.o_w_id = ol.ol_w_id
-                WHERE c.c_w_id = {(step_id % 10) + 1}
-                GROUP BY c.c_w_id, c.c_d_id, c.c_id
-                ON CONFLICT DO NOTHING;""",
-        ]
-
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
-        suffix = step_id % 1000
-        # Apply imputation: set NULL total_spend to 0 (Dolt doesn't
-        # support subqueries in UPDATE SET, so we avoid rolling_avg).
-        return [
-            f"""UPDATE customer_features_{suffix}
-                SET total_spend = 0
-                WHERE total_spend IS NULL;""",
-        ]
-
-    def evaluate(self) -> list[str]:
-        return [
-            # Customer count (base table scan)
-            "SELECT COUNT(*) FROM customer;",
-            # Distribution stats on order_line amounts
-            """SELECT MIN(ol_amount), MAX(ol_amount),
-                      AVG(ol_amount), STDDEV(ol_amount)
-               FROM order_line;""",
-            # Order-customer join aggregation
-            """SELECT COUNT(DISTINCT o.o_id) AS total_orders,
-                      COUNT(DISTINCT o.o_c_id) AS unique_customers
-               FROM orders o;""",
-        ]
-
-    def compare(self) -> list[str]:
-        return [
-            # Per-branch quality metrics (CASE instead of FILTER)
-            """SELECT AVG(ol_amount) AS avg_spend,
-                      COUNT(*) AS row_count
-               FROM order_line;""",
-        ]
-
-
-class WhatIfOps(WorkflowOps):
-    """What-if analysis (MCTS): lightweight DML + analytical reward queries.
-
-    Mutate: UPDATE stock assignments (no DDL).
-    Evaluate: Revenue and low-stock analytical queries.
-    Compare: Cross-branch reward aggregation.
-    """
-
-    def mutate_ddl(self, step_id: int) -> list[str]:
-        # What-if has M_DDL = 0
+        # C=--- (no cross-branch queries for failure repro)
         return []
 
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
-        # Reassign products to different warehouses
-        target_w_id = rng.randint(1, 10)
-        i_id_start = rng.randint(1, 90000)
-        i_id_end = i_id_start + rng.randint(100, 1000)
+
+class DataCleaningOps(WorkflowOps):
+    """Data cleaning: multiple strategies on overlapping data regions.
+
+    Each worker thread applies a different cleaning strategy on its branch.
+    Mutate: UPDATE (impute) or DELETE (drop nulls) on customer.c_balance.
+    Evaluate: Per-branch correctness check (negative balance count).
+    Compare: Cross-branch quality ranking (null count + spread).
+    """
+
+    def mutate_ddl(self, step_id: int) -> list[str]:
+        # M_s=1 — data cleaning may add a flag column
         return [
-            f"""UPDATE stock SET s_w_id = {target_w_id}
-                WHERE s_i_id BETWEEN {i_id_start} AND {i_id_end}
-                AND s_w_id != {target_w_id};""",
+            "ALTER TABLE customer ADD COLUMN c_cleaned BOOLEAN DEFAULT false;",
         ]
 
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
+        # M_d=1: strategy depends on thread_id
+        if thread_id % 2 == 0:
+            # Strategy A: impute missing c_balance with 0 (Dolt does not
+            # support correlated subqueries in UPDATE SET).
+            return [
+                "UPDATE customer SET c_balance = 0 WHERE c_balance IS NULL;",
+            ]
+        else:
+            # Strategy B: drop rows with null c_balance
+            return [
+                "DELETE FROM customer WHERE c_balance IS NULL;",
+            ]
+
     def evaluate(self) -> list[str]:
+        # Q_v=1: per-branch correctness check
         return [
-            # Analytical reward query: revenue and low-stock
-            # Using CASE instead of FILTER for Dolt compatibility
-            """SELECT w.w_id,
-                      SUM(ol.ol_amount) AS revenue,
-                      COUNT(DISTINCT CASE WHEN s.s_quantity < 10
-                            THEN s.s_i_id END) AS low_stock_items
-               FROM order_line ol
-               JOIN stock s ON ol.ol_i_id = s.s_i_id
-                           AND ol.ol_supply_w_id = s.s_w_id
-               JOIN warehouse w ON s.s_w_id = w.w_id
-               GROUP BY w.w_id
-               ORDER BY revenue DESC
-               LIMIT 10;""",
+            """SELECT COUNT(CASE WHEN c_balance < 0 THEN 1 END) AS invalid
+               FROM customer;""",
         ]
 
     def compare(self) -> list[str]:
+        # C=2: cross-branch quality ranking
         return [
-            # Same reward query used for ranking across branches
-            """SELECT SUM(ol.ol_amount) AS total_revenue,
-                      COUNT(DISTINCT CASE WHEN s.s_quantity < 10
-                            THEN s.s_i_id END) AS low_stock
-               FROM order_line ol
-               JOIN stock s ON ol.ol_i_id = s.s_i_id
-                           AND ol.ol_supply_w_id = s.s_w_id;""",
+            """SELECT COUNT(CASE WHEN c_balance IS NULL THEN 1 END) AS nulls,
+                      MAX(c_ytd_payment) - MIN(c_ytd_payment) AS spread
+               FROM customer;""",
         ]
+
+
+class MctsOps(WorkflowOps):
+    """Monte Carlo Tree Search: lightweight DML + analytical reward queries.
+
+    Mutate: UPDATE stock assignments (no DDL).
+    Evaluate: Revenue query (total fulfillment cost).
+    Compare: No cross-branch queries (C=---).
+    """
+
+    def mutate_ddl(self, step_id: int) -> list[str]:
+        # M_s=--- (no DDL)
+        return []
+
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
+        # M_d=1: reassign stock quantity
+        w_id = rng.randint(1, 10)
+        i_id = rng.randint(1, 100000)
+        qty = rng.randint(1, 10)
+        return [
+            f"""UPDATE stock SET s_quantity = s_quantity - {qty}
+                WHERE s_w_id = {w_id} AND s_i_id = {i_id}
+                AND s_quantity >= {qty};""",
+        ]
+
+    def evaluate(self) -> list[str]:
+        # Q_v=1: reward query — total fulfillment cost
+        return [
+            """SELECT SUM(ol_amount) AS total_cost
+               FROM order_line ol
+               JOIN warehouse w ON ol.ol_supply_w_id = w.w_id;""",
+        ]
+
+    def compare(self) -> list[str]:
+        # C=--- (no cross-branch queries)
+        return []
 
 
 class SimulationOps(WorkflowOps):
-    """Simulation: sequential DML per time step (no DDL).
+    """MC Simulation: sequential DML per time step (no DDL).
 
-    Mutate: INSERT orders, UPDATE stock quantities, trigger replenishment.
-    Evaluate: Stockout count, total fulfillment cost.
-    Compare: Cross-branch aggregation (mean, VaR, max).
+    Mutate: INSERT orders, UPDATE stock (decrement + replenish), ~50 stmts.
+    Evaluate: Stockout count + total fulfillment cost.
+    Compare: Same metrics for cross-branch aggregation.
     """
 
     def mutate_ddl(self, step_id: int) -> list[str]:
-        # Simulation has M_DDL = 0
+        # M_s=--- (no DDL)
         return []
 
-    def mutate_dml(self, step_id: int, rng) -> list[str]:
+    def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
+        # M_d=50: ~30 rounds of (insert order + decrement stock + replenish)
         stmts = []
         w_id = rng.randint(1, 10)
-        d_id = rng.randint(1, 10)
-        o_id = 5000 + step_id
 
-        # Insert new order
-        stmts.append(
-            f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
-                o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
-                VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, 3000)},
-                        NULL, {rng.randint(1, 15)}, 1,
-                        EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::BIGINT)
-                ON CONFLICT DO NOTHING;"""
-        )
+        for day in range(16):
+            d_id = rng.randint(1, 10)
+            o_id = 5000 + thread_id * 1000 + step_id * 100 + day
 
-        # Insert order lines
-        for ol_num in range(1, rng.randint(2, 6)):
-            i_id = rng.randint(1, 100000)
-            qty = rng.randint(1, 10)
+            # Demand arrives: insert order
             stmts.append(
-                f"""INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id,
-                    ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d,
-                    ol_quantity, ol_amount, ol_dist_info)
-                    VALUES ({o_id}, {d_id}, {w_id}, {ol_num}, {i_id},
-                            {w_id}, NULL, {qty},
-                            {round(rng.uniform(1, 500), 2)}, 'dist_info')
+                f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
+                    o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
+                    VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, 3000)},
+                            NULL, 5, 1, CURRENT_TIMESTAMP)
                     ON CONFLICT DO NOTHING;"""
             )
 
-        # Decrement stock
-        stmts.append(
-            f"""UPDATE stock SET s_quantity = s_quantity - {rng.randint(1, 5)}
-                WHERE s_i_id = {rng.randint(1, 100000)}
-                AND s_w_id = {w_id}
-                AND s_quantity > 5;"""
-        )
+            # Fulfill: decrement stock
+            i_id = rng.randint(1, 100000)
+            qty = rng.randint(1, 5)
+            stmts.append(
+                f"""UPDATE stock SET s_quantity = s_quantity - {qty}
+                    WHERE s_i_id = {i_id} AND s_w_id = {w_id}
+                    AND s_quantity >= {qty};"""
+            )
 
-        # Replenishment trigger: restock items below threshold
+            # Replenish: restock items below threshold
+            stmts.append(
+                f"""UPDATE stock SET s_quantity = s_quantity + 100
+                    WHERE s_quantity < 10 AND s_w_id = {w_id};"""
+            )
+
+        # Remaining stmts to reach ~50 (16*3 = 48, add 2 more)
         stmts.append(
-            f"""UPDATE stock SET s_quantity = s_quantity + 100
-                WHERE s_quantity < 10 AND s_w_id = {w_id};"""
+            f"""INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id,
+                ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d,
+                ol_quantity, ol_amount, ol_dist_info)
+                VALUES (5000 + {thread_id}, 1, {w_id}, 1,
+                        {rng.randint(1, 100000)}, {w_id}, NULL, 3,
+                        {round(rng.uniform(1, 500), 2)}, 'dist_info')
+                ON CONFLICT DO NOTHING;"""
+        )
+        stmts.append(
+            f"""UPDATE stock SET s_quantity = s_quantity - 1
+                WHERE s_i_id = {rng.randint(1, 100000)}
+                AND s_w_id = {w_id} AND s_quantity > 0;"""
         )
 
         return stmts
 
     def evaluate(self) -> list[str]:
+        # Q_v=1: per-branch outcome metrics
         return [
-            # Stockout count and fulfillment cost (CASE instead of FILTER)
             """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
-                      AVG(s_quantity) AS avg_stock
-               FROM stock;""",
-            """SELECT SUM(ol_amount) AS total_cost,
-                      COUNT(*) AS total_lines
-               FROM order_line;""",
+                      SUM(ol.ol_amount) AS total_cost
+               FROM stock s
+               JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
         ]
 
     def compare(self) -> list[str]:
+        # C=1: cross-branch aggregation (per-branch portion)
         return [
-            # Per-branch outcome metrics for cross-branch aggregation
             """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
-                      AVG(s_quantity) AS avg_stock,
-                      MIN(s_quantity) AS min_stock
-               FROM stock;""",
-            """SELECT SUM(ol_amount) AS total_cost
-               FROM order_line;""",
+                      SUM(ol.ol_amount) AS total_cost
+               FROM stock s
+               JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
         ]
 
 
@@ -440,8 +385,8 @@ def get_workflow_ops(workflow_type) -> WorkflowOps:
     mapping = {
         tp.WorkflowType.SOFTWARE_DEV: SoftwareDevOps,
         tp.WorkflowType.FAILURE_REPRO: FailureReproOps,
-        tp.WorkflowType.DATA_CURATION: DataCurationOps,
-        tp.WorkflowType.WHAT_IF: WhatIfOps,
+        tp.WorkflowType.DATA_CLEANING: DataCleaningOps,
+        tp.WorkflowType.MCTS: MctsOps,
         tp.WorkflowType.SIMULATION: SimulationOps,
     }
 

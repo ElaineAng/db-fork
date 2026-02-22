@@ -14,8 +14,8 @@ enum Backend {
 enum WorkflowType {
     SOFTWARE_DEV = 0;
     FAILURE_REPRO = 1;
-    DATA_CURATION = 2;
-    WHAT_IF = 3;
+    DATA_CLEANING = 2;
+    MCTS = 3;
     SIMULATION = 4;
 }
 
@@ -43,25 +43,21 @@ message DatabaseSetup {
 
 // Setup parameters (Section 3.3, Table 1 "Setup" group)
 message SetupParams {
-    int32 workers = 1;          // T: number of worker threads
-    int32 total_steps = 2;      // S: total steps across all workers
-    int32 db_size = 3;          // W: warehouse scale factor
-    int32 max_fanout = 4;       // F: max children per node
-    int32 max_depth = 5;        // D: max nesting level
+    int32 workers = 1;              // T: number of worker threads
+    int32 total_steps = 2;          // S: steps per worker (round-robin)
+    reserved 3;                     // was db_size
+    int32 root_fanout = 4;          // F_r: max children of root node
+    int32 max_depth = 5;            // D: max nesting level
+    int32 inner_fanout = 6;         // F_i: max children of inner nodes
+    int32 cross_branch_queries = 7; // C: cross-branch queries spread over S steps
 }
 
 // Per-step parameters (Section 3.3, Table 1 "Per-step" group)
 message StepParams {
-    int32 mutations = 1;        // M: total DDL + DML statements per step
-    int32 ddl_count = 2;        // M_DDL: schema-change statements per step
-    int32 queries = 3;          // Q: evaluation queries per step
-    float merge_prob = 4;       // mu: probability of merging after evaluation
-}
-
-// Background process parameters (Section 3.3, Table 1 "Bg." group)
-message BackgroundParams {
-    int32 interval = 1;         // B: steps between background passes
-    float prune_fraction = 2;   // gamma: fraction of live branches pruned per pass
+    int32 data_mutations = 1;   // M_d: data-mutation statements per step
+    int32 schema_changes = 2;   // M_s: schema-change statements per step
+    int32 eval_queries = 3;     // Q_v: evaluation queries per step
+    float prune_prob = 4;       // gamma: probability of pruning after evaluation
 }
 
 // Top-level macrobenchmark configuration
@@ -72,7 +68,7 @@ message MacroBenchConfig {
     DatabaseSetup database_setup = 4;
     SetupParams setup = 5;
     StepParams step = 6;
-    BackgroundParams background = 7;
+    // field 7 removed (was BackgroundParams background)
     bool autocommit = 8;
 }
 

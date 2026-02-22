@@ -169,7 +169,7 @@ def _oltp_queries(rng):
                     o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
                 VALUES ({10000 + rng.randint(0, 90000)}, {d_id}, {w_id}, {c_id},
                         NULL, {rng.randint(1, 15)}, 1,
-                        EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::BIGINT)
+                        CURRENT_TIMESTAMP)
                 ON CONFLICT DO NOTHING;""",
         ),
         # Range read (order lines for an order)

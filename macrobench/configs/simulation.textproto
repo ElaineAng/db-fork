@@ -1,6 +1,6 @@
-# Simulation workflow (Table 1, Section 3.3)
+# MC Simulation workflow (Table 1, Section 3.3)
 # Sequential DML per time step, batch fork from single parent.
-# Tree shape: flat star (D=1, F=50).
+# Tree shape: flat star (F_r=1000, D=1).
 
 run_id: "macro_simulation"
 backend: DOLT
@@ -10,28 +10,23 @@ database_setup {
     db_name: "macrobench_sim"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/tpcc_schema.sql"
+        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
     }
 }
 
 setup {
-    workers: 20      # T
-    total_steps: 50  # S
-    db_size: 100     # W
-    max_fanout: 50   # F
-    max_depth: 1     # D (forces flat star)
+    workers: 1000           # T
+    total_steps: 1          # S (per worker; each trial = 1 branch)
+    root_fanout: 1000       # F_r
+    max_depth: 1            # D (forces flat star)
+    cross_branch_queries: 1 # C
 }
 
 step {
-    mutations: 50    # M
-    ddl_count: 0     # M_DDL
-    queries: 5       # Q
-    merge_prob: 0    # mu
-}
-
-background {
-    interval: 50     # B
-    prune_fraction: 1.0 # gamma (discard all after aggregation)
+    schema_changes: 0   # M_s (no DDL)
+    data_mutations: 50  # M_d
+    eval_queries: 1     # Q_v
+    prune_prob: 1.0     # gamma (discard all after eval)
 }
 
 autocommit: true

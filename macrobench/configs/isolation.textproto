@@ -6,7 +6,7 @@ database_setup {
     db_name: "isolation_bench"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/tpcc_schema.sql"
+        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
     }
 }
 
