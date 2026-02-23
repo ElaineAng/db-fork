@@ -13,7 +13,6 @@ import argparse
 import random
 import sys
 import time
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from google.protobuf import text_format
@@ -113,20 +112,17 @@ def _do_delete_branch(db_tools, branch_node):
     )
 
 
-def _should_run_cross_branch(
-    step_id: int, total_steps: int, cross_branch_count: int
-) -> bool:
-    """Determine if this step should run a cross-branch query.
+def _cross_branch_steps(total_steps: int, cross_branch_count: int) -> set[int]:
+    """Return the set of step IDs after which a cross-branch query should run.
 
     C cross-branch queries are spread evenly across S steps.
-    When C=1, the query fires on the last step.
     """
     if cross_branch_count <= 0 or total_steps <= 0:
-        return False
+        return set()
     if cross_branch_count >= total_steps:
-        return True  # run every step
+        return set(range(total_steps))
     interval = max(1, total_steps // cross_branch_count)
-    return (step_id + 1) % interval == 0
+    return {s for s in range(total_steps) if (s + 1) % interval == 0}
 
 
 def _run_cross_branch_queries(
@@ -135,6 +131,7 @@ def _run_cross_branch_queries(
     workflow_ops: WorkflowOps,
     progress,
     thread_id: int,
+    result_collector: rc.ResultCollector = None,
 ):
     """Execute cross-branch compare queries on pre-committed leaf branches."""
     compare_queries = workflow_ops.compare()
@@ -146,7 +143,11 @@ def _run_cross_branch_queries(
         if not node.alive:
             continue
         try:
-            db_tools.connect_branch(node.name, timed=True)
+            connect_fn = lambda: db_tools.connect_branch(node.name, timed=True)
+            if result_collector:
+                _retry_on_429(connect_fn, result_collector)
+            else:
+                connect_fn()
             for query in compare_queries:
                 try:
                     db_tools.execute_sql(query, timed=True)
@@ -161,11 +162,12 @@ def _run_cross_branch_queries(
             )
 
 
-def _retry_on_429(fn, result_collector, max_retries=5, base_delay=1.0):
-    """Retry a callable with exponential backoff on HTTP 429 / rate-limit errors.
+def _retry_on_429(fn, result_collector, max_retries=10, base_delay=1.0):
+    """Retry a callable with exponential backoff + jitter on rate-limit errors.
 
-    Each retry wait is recorded as an API_RETRY_WAIT timing entry so the
-    overhead of rate-limiting is visible in the benchmark results.
+    Handles HTTP 429, Neon "too many running operations", and similar
+    rate-limit responses.  Each retry wait is recorded as an
+    API_RETRY_WAIT timing entry so the overhead is visible in results.
     """
     from dblib import result_pb2 as rslt
 
@@ -186,6 +188,8 @@ def _retry_on_429(fn, result_collector, max_retries=5, base_delay=1.0):
                     is_rate_limit = code == 429
             if is_rate_limit and attempt < max_retries - 1:
                 delay = base_delay * (2**attempt)
+                # Add jitter (0.5x–1.5x) to avoid thundering herd.
+                delay *= 0.5 + random.random()
                 # Record the retry wait (including sleep) as a timed event.
                 with result_collector.maybe_time_ops(
                     op_type=rslt.OpType.API_RETRY_WAIT, timed=True
@@ -237,9 +241,28 @@ def worker_fn(
 
     S = config.setup.total_steps
     C = config.setup.cross_branch_queries
+    cb_steps = _cross_branch_steps(S, C)
 
     try:
-        for step_id in range(S):
+        step_id = 0
+        while step_id < S:
+            # --- Cross-branch query turn (doesn't count as a step) ---
+            if step_id in cb_steps:
+                cb_steps.discard(step_id)
+                branch_tree.begin_cross_branch()
+                try:
+                    _run_cross_branch_queries(
+                        db_tools,
+                        branch_tree,
+                        workflow_ops,
+                        progress,
+                        thread_id,
+                        result_collector=result_collector,
+                    )
+                finally:
+                    branch_tree.end_cross_branch()
+                continue
+
             # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
             if not branch_tree.wait_for_slot(timeout=60.0):
                 progress.write(
@@ -247,6 +270,7 @@ def worker_fn(
                     f"at step {step_id}, skipping."
                 )
                 progress.update(1)
+                step_id += 1
                 continue
 
             # --- Branch ---
@@ -254,11 +278,12 @@ def worker_fn(
             if parent_node is None:
                 # Tree is full (no eligible parents). Skip this step.
                 progress.update(1)
+                step_id += 1
                 continue
 
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
-                # Create child branch (retry on 429 rate-limit)
+                # Create child branch (retry on rate-limit)
                 _retry_on_429(
                     lambda: db_tools.create_branch(
                         branch_name, parent_node.branch_id, timed=True
@@ -266,13 +291,17 @@ def worker_fn(
                     result_collector,
                 )
                 # Connect to the new branch
-                db_tools.connect_branch(branch_name, timed=True)
+                _retry_on_429(
+                    lambda: db_tools.connect_branch(branch_name, timed=True),
+                    result_collector,
+                )
             except Exception as e:
                 progress.write(
                     f"[T{thread_id}] Branch creation failed at step "
                     f"{step_id}: {e}"
                 )
                 progress.update(1)
+                step_id += 1
                 continue
 
             # Get the branch ID from the backend
@@ -330,20 +359,6 @@ def worker_fn(
             # --- Mark pre-committed (eligible for cross-branch reads) ---
             branch_tree.mark_pre_committed(child_node)
 
-            # --- Cross-branch queries (C spread over S) ---
-            if _should_run_cross_branch(step_id, S, C):
-                branch_tree.begin_cross_branch()
-                try:
-                    _run_cross_branch_queries(
-                        db_tools,
-                        branch_tree,
-                        workflow_ops,
-                        progress,
-                        thread_id,
-                    )
-                finally:
-                    branch_tree.end_cross_branch()
-
             # --- Prune (probabilistic gamma) ---
             should_prune = (
                 config.step.prune_prob > 0
@@ -354,8 +369,13 @@ def worker_fn(
                 branch_tree.wait_prune_safe()
                 branch_tree.mark_dead(child_node)
                 try:
-                    db_tools.connect_branch(branch_tree.root.name, timed=True)
-                    # Delete branch (retry on 429 rate-limit)
+                    _retry_on_429(
+                        lambda: db_tools.connect_branch(
+                            branch_tree.root.name, timed=True
+                        ),
+                        result_collector,
+                    )
+                    # Delete branch (retry on rate-limit)
                     _retry_on_429(
                         lambda: _do_delete_branch(db_tools, child_node),
                         result_collector,
@@ -369,6 +389,7 @@ def worker_fn(
                 branch_tree.mark_committed(child_node)
 
             progress.update(1)
+            step_id += 1
 
     except Exception as e:
         progress.write(f"[T{thread_id}] Worker crashed: {e}")

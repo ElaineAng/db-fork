@@ -32,16 +32,20 @@ class WorkflowOps(ABC):
 
     def __init__(self, scale: int = 0):
         s = max(0, scale)
+        # TPC-C constant: always 10 districts per warehouse.
+        self.districts_per_warehouse = 10
         if s == 0:
             self.num_warehouses = 10
             self.num_items = 1000
             self.num_customers = 10000
             self.num_districts = 100
+            self.customers_per_district = 100
         else:
             self.num_warehouses = s
             self.num_items = 100000
             self.num_customers = 30000 * s  # tpcc standard
             self.num_districts = 10 * s  # tpcc standard
+            self.customers_per_district = 3000  # tpcc standard
 
     @abstractmethod
     def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
@@ -175,8 +179,8 @@ class FailureReproOps(WorkflowOps):
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         # M_d=45 DML statements: replay recorded transaction prefix.
         w_id = rng.randint(1, self.num_warehouses)
-        d_id = rng.randint(1, self.num_districts)
-        o_id = 3000 + step_id
+        d_id = rng.randint(1, self.districts_per_warehouse)
+        o_id = 100_000 + thread_id * 100_000 + step_id
         stmts = []
 
         # Insert order
@@ -330,18 +334,21 @@ class SimulationOps(WorkflowOps):
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
         # M_d=50: ~30 rounds of (insert order + decrement stock + replenish)
+        # o_id space: each (thread, step) gets a block of 100 IDs.
+        # Use large multipliers to avoid collisions across threads.
         stmts = []
         w_id = rng.randint(1, self.num_warehouses)
+        base_o_id = 100_000 + thread_id * 100_000 + step_id * 100
 
         for day in range(16):
-            d_id = rng.randint(1, self.num_districts)
-            o_id = 5000 + thread_id * 1000 + step_id * 100 + day
+            d_id = rng.randint(1, self.districts_per_warehouse)
+            o_id = base_o_id + day
 
             # Demand arrives: insert order
             stmts.append(
                 f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
                     o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
-                    VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, self.num_customers)},
+                    VALUES ({o_id}, {d_id}, {w_id}, {rng.randint(1, self.customers_per_district)},
                             NULL, 5, 1, CURRENT_TIMESTAMP)
                     ON CONFLICT DO NOTHING;"""
             )
@@ -363,7 +370,7 @@ class SimulationOps(WorkflowOps):
 
         # Remaining stmts to reach ~50 (16*3 = 48, add 2 more)
         # Use the last inserted order's o_id/d_id so FK is satisfied
-        last_o_id = 5000 + thread_id * 1000 + step_id * 100 + 15
+        last_o_id = base_o_id + 15
         last_d_id = d_id  # from the last loop iteration
         stmts.append(
             f"""INSERT INTO order_line (ol_o_id, ol_d_id, ol_w_id,
