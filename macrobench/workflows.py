@@ -24,25 +24,33 @@ class WorkflowOps(ABC):
     """Abstract base class for workflow-specific SQL operations.
 
     Args:
-        scale: Database scale factor (= number of warehouses).  At scale=10
+        scale: Database scale factor (= number of warehouses).  At scale=1
             the seed data contains 10 warehouses, 1000 items, and 100
             customers per (warehouse, district).  Other ranges scale
             proportionally: items = 100*scale, customers/district = 10*scale.
     """
 
-    def __init__(self, scale: int = 1):
-        s = max(1, scale)
-        self.num_warehouses = s
-        self.num_items = 100 * s
-        self.num_customers = 10 * s   # per (warehouse, district)
-        self.num_districts = 10       # fixed in TPC-C
+    def __init__(self, scale: int = 0):
+        s = max(0, scale)
+        if s == 0:
+            self.num_warehouses = 10
+            self.num_items = 1000
+            self.num_customers = 10000
+            self.num_districts = 100
+        else:
+            self.num_warehouses = s
+            self.num_items = 100000
+            self.num_customers = 30000 * s  # tpcc standard
+            self.num_districts = 10 * s  # tpcc standard
 
     @abstractmethod
-    def mutate_ddl(self, step_id: int) -> list[str]:
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
         """Return DDL statements for this step.
 
         Args:
             step_id: Step number within this thread.
+            thread_id: Worker thread ID, used to generate unique column
+                names so that child branches don't conflict with parents.
 
         Returns:
             List of SQL DDL strings.
@@ -92,18 +100,20 @@ class SoftwareDevOps(WorkflowOps):
     Compare: Distribution query across branches.
     """
 
-    def mutate_ddl(self, step_id: int) -> list[str]:
-        # M_s=1 DDL per step.  We provide two options so the runner
-        # can pick up to schema_changes of them.
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
+        # M_s=1 DDL per step.  Suffix with thread/step to avoid
+        # "column already exists" on child branches that inherit parent schema.
+        suffix = f"t{thread_id}_s{step_id}"
         return [
-            "ALTER TABLE customer ADD COLUMN loyalty_tier VARCHAR(8);",
-            "ALTER TABLE customer ADD COLUMN c_credit_limit DECIMAL(10,2);",
+            f"ALTER TABLE customer ADD COLUMN loyalty_tier_{suffix} VARCHAR(8);",
+            f"ALTER TABLE customer ADD COLUMN credit_lim_{suffix} DECIMAL(10,2);",
         ]
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
-        # M_d=1 DML per step: backfill the loyalty_tier column.
+        # M_d=1 DML per step: backfill the loyalty_tier column for this branch.
+        suffix = f"t{thread_id}_s{step_id}"
         return [
-            """UPDATE customer SET loyalty_tier = CASE
+            f"""UPDATE customer SET loyalty_tier_{suffix} = CASE
                    WHEN c_ytd_payment > 9000 THEN 'Gold'
                    WHEN c_ytd_payment > 5000 THEN 'Silver'
                    ELSE 'Bronze'
@@ -111,18 +121,18 @@ class SoftwareDevOps(WorkflowOps):
         ]
 
     def evaluate(self) -> list[str]:
-        # Q_v=2
+        # Q_v=2: use existing columns that are always present
         return [
-            "SELECT COUNT(*) FROM customer WHERE loyalty_tier IS NULL;",
-            """SELECT loyalty_tier, COUNT(*), AVG(c_ytd_payment)
-               FROM customer GROUP BY loyalty_tier;""",
+            "SELECT COUNT(*) FROM customer WHERE c_credit = 'BC';",
+            """SELECT c_credit, COUNT(*), AVG(c_ytd_payment)
+               FROM customer GROUP BY c_credit;""",
         ]
 
     def compare(self) -> list[str]:
         # C=1 cross-branch query
         return [
-            """SELECT loyalty_tier, COUNT(*), AVG(c_ytd_payment)
-               FROM customer GROUP BY loyalty_tier;""",
+            """SELECT c_credit, COUNT(*), AVG(c_ytd_payment)
+               FROM customer GROUP BY c_credit;""",
         ]
 
 
@@ -134,9 +144,11 @@ class FailureReproOps(WorkflowOps):
     Compare: No cross-branch queries (C=---).
     """
 
-    def mutate_ddl(self, step_id: int) -> list[str]:
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
         # Part of the mixed DDL+DML replay.  Up to M_s=5 schema changes.
-        suffix = step_id % 1000
+        # Use thread_id + step_id suffix so child branches don't collide
+        # with columns inherited from the parent.
+        suffix = f"t{thread_id}_s{step_id}"
         stmts = [
             "ALTER TABLE order_line ADD COLUMN "
             f"ol_discount_{suffix} DECIMAL(5,2);",
@@ -230,10 +242,12 @@ class DataCleaningOps(WorkflowOps):
     Compare: Cross-branch quality ranking (null count + spread).
     """
 
-    def mutate_ddl(self, step_id: int) -> list[str]:
-        # M_s=1 — data cleaning may add a flag column
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
+        # M_s=1 — data cleaning adds a flag column, suffixed to avoid
+        # collisions on child branches that inherit parent schema.
+        suffix = f"t{thread_id}_s{step_id}"
         return [
-            "ALTER TABLE customer ADD COLUMN c_cleaned BOOLEAN DEFAULT false;",
+            f"ALTER TABLE customer ADD COLUMN c_cleaned_{suffix} BOOLEAN DEFAULT false;",
         ]
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
@@ -274,7 +288,7 @@ class MctsOps(WorkflowOps):
     Compare: No cross-branch queries (C=---).
     """
 
-    def mutate_ddl(self, step_id: int) -> list[str]:
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
         # M_s=--- (no DDL)
         return []
 
@@ -310,7 +324,7 @@ class SimulationOps(WorkflowOps):
     Compare: Same metrics for cross-branch aggregation.
     """
 
-    def mutate_ddl(self, step_id: int) -> list[str]:
+    def mutate_ddl(self, step_id: int, thread_id: int = 0) -> list[str]:
         # M_s=--- (no DDL)
         return []
 

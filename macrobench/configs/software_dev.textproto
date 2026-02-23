@@ -10,7 +10,7 @@ database_setup {
     db_name: "macrobench_softdev"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
+        sql_dump_path: "db_setup/ch-w1.sql"
     }
 }
 
@@ -19,8 +19,9 @@ setup {
     total_steps: 20         # S (per worker)
     root_fanout: 5          # F_r
     inner_fanout: 3         # F_i
-    max_depth: 3            # D
+    max_depth: 4            # D
     cross_branch_queries: 1 # C
+    db_scale: 0             # 10 warehouses, 1K items, 100 cust/district
 }
 
 step {

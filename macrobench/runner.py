@@ -113,8 +113,9 @@ def _do_delete_branch(db_tools, branch_node):
     )
 
 
-def _should_run_cross_branch(step_id: int, total_steps: int,
-                             cross_branch_count: int) -> bool:
+def _should_run_cross_branch(
+    step_id: int, total_steps: int, cross_branch_count: int
+) -> bool:
     """Determine if this step should run a cross-branch query.
 
     C cross-branch queries are spread evenly across S steps.
@@ -145,7 +146,7 @@ def _run_cross_branch_queries(
         if not node.alive:
             continue
         try:
-            db_tools.connect_branch(node.name, timed=False)
+            db_tools.connect_branch(node.name, timed=True)
             for query in compare_queries:
                 try:
                     db_tools.execute_sql(query, timed=True)
@@ -156,9 +157,44 @@ def _run_cross_branch_queries(
                     )
         except Exception as e:
             progress.write(
-                f"[T{thread_id}] Connect failed for compare on "
-                f"{node.name}: {e}"
+                f"[T{thread_id}] Connect failed for compare on {node.name}: {e}"
             )
+
+
+def _retry_on_429(fn, result_collector, max_retries=5, base_delay=1.0):
+    """Retry a callable with exponential backoff on HTTP 429 / rate-limit errors.
+
+    Each retry wait is recorded as an API_RETRY_WAIT timing entry so the
+    overhead of rate-limiting is visible in the benchmark results.
+    """
+    from dblib import result_pb2 as rslt
+
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = (
+                "429" in msg or "too many" in msg or "running operations" in msg
+            )
+            # NeonAPIError loses the HTTP status code; check the
+            # underlying response object if available.
+            if not is_rate_limit and hasattr(e, "response"):
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    code = getattr(resp, "status_code", 0)
+                    is_rate_limit = code == 429
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                # Record the retry wait (including sleep) as a timed event.
+                with result_collector.maybe_time_ops(
+                    op_type=rslt.OpType.API_RETRY_WAIT, timed=True
+                ):
+                    time.sleep(delay)
+                result_collector.record_num_keys_touched(0)
+                result_collector.flush_record()
+            else:
+                raise
 
 
 def worker_fn(
@@ -173,7 +209,7 @@ def worker_fn(
     """Worker thread function implementing the per-step automaton.
 
     Each thread independently performs S steps in round-robin fashion.
-    Per-step cycle: Branch -> Mutate -> Evaluate -> mark committed -> Prune.
+    Per-step cycle: Branch -> Mutate -> Evaluate -> mark pre-committed -> (optional) Prune -> mark committed.
     Cross-branch queries are interleaved at evenly spaced steps.
 
     Args:
@@ -204,7 +240,7 @@ def worker_fn(
 
     try:
         for step_id in range(S):
-            # --- Wait for branch slot (Neon 20-branch limit) ---
+            # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
             if not branch_tree.wait_for_slot(timeout=60.0):
                 progress.write(
                     f"[T{thread_id}] Timed out waiting for branch slot "
@@ -222,14 +258,15 @@ def worker_fn(
 
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
-                # Connect to parent first
-                db_tools.connect_branch(parent_node.name, timed=False)
-                # Create child branch
-                db_tools.create_branch(
-                    branch_name, parent_node.branch_id, timed=True
+                # Create child branch (retry on 429 rate-limit)
+                _retry_on_429(
+                    lambda: db_tools.create_branch(
+                        branch_name, parent_node.branch_id, timed=True
+                    ),
+                    result_collector,
                 )
                 # Connect to the new branch
-                db_tools.connect_branch(branch_name, timed=False)
+                db_tools.connect_branch(branch_name, timed=True)
             except Exception as e:
                 progress.write(
                     f"[T{thread_id}] Branch creation failed at step "
@@ -249,7 +286,7 @@ def worker_fn(
             )
 
             # --- Mutate (DDL: M_s schema changes) ---
-            ddl_stmts = workflow_ops.mutate_ddl(step_id)
+            ddl_stmts = workflow_ops.mutate_ddl(step_id, thread_id=thread_id)
             for i, stmt in enumerate(ddl_stmts):
                 if i >= config.step.schema_changes:
                     break
@@ -293,37 +330,43 @@ def worker_fn(
             # --- Mark pre-committed (eligible for cross-branch reads) ---
             branch_tree.mark_pre_committed(child_node)
 
-            # --- Prune (probabilistic gamma) ---
-            should_prune = (config.step.prune_prob > 0
-                            and rng.random() < config.step.prune_prob)
-            if should_prune:
-                # Wait until no cross-branch queries are running.
-                branch_tree.wait_prune_safe()
-                branch_tree.mark_dead(child_node)
-                try:
-                    db_tools.connect_branch(
-                        branch_tree.root.name, timed=False
-                    )
-                    _do_delete_branch(db_tools, child_node)
-                except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] Prune failed at step "
-                        f"{step_id}: {e}"
-                    )
-            else:
-                # Survived pruning — promote to committed (parent-eligible)
-                branch_tree.mark_committed(child_node)
-
             # --- Cross-branch queries (C spread over S) ---
             if _should_run_cross_branch(step_id, S, C):
                 branch_tree.begin_cross_branch()
                 try:
                     _run_cross_branch_queries(
-                        db_tools, branch_tree, workflow_ops,
-                        progress, thread_id,
+                        db_tools,
+                        branch_tree,
+                        workflow_ops,
+                        progress,
+                        thread_id,
                     )
                 finally:
                     branch_tree.end_cross_branch()
+
+            # --- Prune (probabilistic gamma) ---
+            should_prune = (
+                config.step.prune_prob > 0
+                and rng.random() < config.step.prune_prob
+            )
+            if should_prune:
+                # Wait until no cross-branch queries are running.
+                branch_tree.wait_prune_safe()
+                branch_tree.mark_dead(child_node)
+                try:
+                    db_tools.connect_branch(branch_tree.root.name, timed=True)
+                    # Delete branch (retry on 429 rate-limit)
+                    _retry_on_429(
+                        lambda: _do_delete_branch(db_tools, child_node),
+                        result_collector,
+                    )
+                except Exception as e:
+                    progress.write(
+                        f"[T{thread_id}] Prune failed at step {step_id}: {e}"
+                    )
+            else:
+                # Survived pruning — promote to committed (parent-eligible)
+                branch_tree.mark_committed(child_node)
 
             progress.update(1)
 
@@ -419,7 +462,7 @@ def main():
         f"Per-step: M_s={config.step.schema_changes}, "
         f"M_d={config.step.data_mutations}, "
         f"Q_v={config.step.eval_queries}, "
-        f"gamma={config.step.prune_prob}"
+        f"gamma={config.step.prune_prob:.2f}"
     )
     print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
 
@@ -432,13 +475,16 @@ def main():
         schema_path = config.database_setup.sql_dump.sql_dump_path
         seed_path = schema_path.replace("_schema.sql", "_seed.sql")
         from pathlib import Path
-        if Path(seed_path).exists():
+
+        if seed_path != schema_path and Path(seed_path).exists():
             from microbench.runner import get_initial_connection_uri
+
             db_uri = get_initial_connection_uri(micro_config, backend_info)
             print(f"Loading seed data: {seed_path}")
             load_sql_file(db_uri, seed_path)
             if config.backend == tp.Backend.DOLT:
                 from dblib.dolt import commit_dolt_schema
+
                 commit_dolt_schema(db_uri, message="Load seed data")
 
     # Initialize components
@@ -454,8 +500,7 @@ def main():
     branch_tree = BranchTree(
         root_name=backend_info.default_branch_name,
         root_id=(
-            backend_info.default_branch_id
-            or backend_info.default_branch_name
+            backend_info.default_branch_id or backend_info.default_branch_name
         ),
         root_fanout=config.setup.root_fanout,
         inner_fanout=config.setup.inner_fanout,

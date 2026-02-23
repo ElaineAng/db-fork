@@ -59,6 +59,6 @@ enum OpType {
   COMMIT = 6;
   DDL = 7;
   BRANCH_DELETE = 8;
-  MERGE = 9;
+  API_RETRY_WAIT = 9;
 }
 

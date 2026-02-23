@@ -21,6 +21,7 @@ setup {
     inner_fanout: 3         # F_i
     max_depth: 3            # D
     cross_branch_queries: 2 # C
+    db_scale: 0             # 1 warehouses, 1K items, 100 cust/district
 }
 
 step {

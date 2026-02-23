@@ -22,14 +22,14 @@ class FileCopyToolSuite(DBToolSuite):
     @classmethod
     def get_default_connection_uri(cls) -> str:
         return dbutil.format_db_uri(
-                PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres"
-                )
+            PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres"
+        )
 
     @classmethod
     def get_branch_uri(cls, branch_name) -> str:
         return dbutil.format_db_uri(
-                PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, branch_name
-                )
+            PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, branch_name
+        )
 
     @classmethod
     def get_initial_connection_uri(cls, db_name: str) -> str:
@@ -37,45 +37,45 @@ class FileCopyToolSuite(DBToolSuite):
 
     @classmethod
     def init_for_bench(
-            cls,
-            collector: rc.ResultCollector,
-            db_name: str,
-            autocommit: bool,
-            default_branch_name: str,
-            shared_branches: set,
-            ):
+        cls,
+        collector: rc.ResultCollector,
+        db_name: str,
+        autocommit: bool,
+        default_branch_name: str,
+        shared_branches: set,
+    ):
         uri = cls.get_branch_uri(db_name)
 
         conn = psycopg2.connect(uri)
         if autocommit:
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         return cls(
-                connection=conn,
-                collector=collector,
-                db_name=db_name,
-                connection_uri=uri,
-                autocommit=autocommit,
-                default_branch_name=default_branch_name,
-                shared_branches=shared_branches,
-                )
+            connection=conn,
+            collector=collector,
+            db_name=db_name,
+            connection_uri=uri,
+            autocommit=autocommit,
+            default_branch_name=default_branch_name,
+            shared_branches=shared_branches,
+        )
 
     def __init__(
-            self,
-            connection: _pgconn,
-            collector: rc.ResultCollector,
-            db_name: str,
-            connection_uri: str,
-            autocommit: bool,
-            default_branch_name: str,
-            shared_branches: set,
-            ):
+        self,
+        connection: _pgconn,
+        collector: rc.ResultCollector,
+        db_name: str,
+        connection_uri: str,
+        autocommit: bool,
+        default_branch_name: str,
+        shared_branches: set,
+    ):
         super().__init__(connection, result_collector=collector)
-        self._connection_uri        = connection_uri
-        self.autocommit             = autocommit
-        self.shared_branches        = shared_branches
+        self._connection_uri = connection_uri
+        self.autocommit = autocommit
+        self.shared_branches = shared_branches
         shared_branches.add(db_name)
-        self._all_branches          = dict()
-        self.current_branch_name    = ""
+        self._all_branches = dict()
+        self.current_branch_name = ""
 
         # Initial connection is to template db (e.g. "microbench")
         # Switch to main
@@ -123,12 +123,13 @@ class FileCopyToolSuite(DBToolSuite):
         base_dir = os.path.join(pg_data_dir, "base")
         total = 0
         for oid in oids:
-            total += dbutil.get_directory_size_bytes(os.path.join(base_dir, oid))
+            total += dbutil.get_directory_size_bytes(
+                os.path.join(base_dir, oid)
+            )
         return total
 
     def list_branches(self) -> list[str]:
-        return list(shared_branches)
-
+        return list(self.shared_branches)
 
     def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
         if parent_name:
@@ -138,9 +139,13 @@ class FileCopyToolSuite(DBToolSuite):
         try:
             super().execute_sql(cmd)
         except psycopg2.errors.DuplicateDatabase as e:
-            raise Exception(f"Cannot create branch {branch_name}, already exists: {e}")
+            raise Exception(
+                f"Cannot create branch {branch_name}, already exists: {e}"
+            )
         self.current_branch_name = branch_name
-        self._all_branches[branch_name] = self.__class__.get_branch_uri(branch_name)
+        self._all_branches[branch_name] = self.__class__.get_branch_uri(
+            branch_name
+        )
         self.shared_branches.add(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
@@ -182,8 +187,8 @@ class FileCopyToolSuite(DBToolSuite):
 
     @classmethod
     def cleanup(cls, info):
-        conn    = None
-        cur     = None
+        conn = None
+        cur = None
         db_name = info.db_name
         try:
             # Change back to original file copy method
@@ -204,13 +209,12 @@ class FileCopyToolSuite(DBToolSuite):
             if conn:
                 conn.close()
 
-
     class FileCopyInfo:
         def __init__(self, db_name: str):
             # Meta object stores branch names for cleanup outside of FCTS class
-            self.branches       = set() # enforces unique name on branches
-            self.db_name        = db_name
-            self.prev_method    = ""
+            self.branches = set()  # enforces unique name on branches
+            self.db_name = db_name
+            self.prev_method = ""
             self.change_file_copy_method("clone")
 
         def change_file_copy_method(self, method: str) -> None:

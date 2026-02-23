@@ -89,7 +89,7 @@ class NeonToolSuite(DBToolSuite):
         branch_id: str,
         db_name: str,
         max_retries: int = 5,
-        retry_delay: float = 2.0,
+        retry_delay: float = 0.5,
     ) -> str:
         """
         Retrieves the connection URI for a specific Neon database branch.
