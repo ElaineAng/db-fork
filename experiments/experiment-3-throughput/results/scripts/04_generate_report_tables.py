@@ -31,6 +31,7 @@ CATEGORY_NAME = {
     7: "FAILURE_INTERNAL_BUG",
     8: "FAILURE_UNKNOWN",
 }
+BRANCH_CREATE_OP_TYPE = 1
 
 
 @dataclass
@@ -47,6 +48,7 @@ class RunStats:
     failed_exception_ops: int
     success_rate: float
     throughput_ops_sec: float
+    branch_create_throughput_ops_sec: float
     per_thread_mean: float
     per_thread_cv: float
     zero_threads: int
@@ -101,8 +103,14 @@ def load_stats(data_dir: Path, duration: float) -> list[RunStats]:
         if not meta:
             continue
 
-        cols = ["thread_id", "outcome_success", "failure_category", "failure_reason"]
-        df = pd.read_parquet(p, columns=cols)
+        cols = ["thread_id", "op_type", "outcome_success", "failure_category", "failure_reason"]
+        try:
+            df = pd.read_parquet(p, columns=cols)
+        except Exception:
+            # Backward-compatibility for older parquet rows without op_type.
+            fallback_cols = ["thread_id", "outcome_success", "failure_category", "failure_reason"]
+            df = pd.read_parquet(p, columns=fallback_cols)
+            df["op_type"] = np.nan
 
         if "outcome_success" not in df.columns:
             df["outcome_success"] = True
@@ -119,6 +127,9 @@ def load_stats(data_dir: Path, duration: float) -> list[RunStats]:
         attempted = int(len(df))
         successful = int(df["outcome_success"].sum())
         failed = attempted - successful
+        branch_create_successful = int(
+            ((df["op_type"] == BRANCH_CREATE_OP_TYPE) & df["outcome_success"]).sum()
+        )
 
         failed_mask = ~df["outcome_success"]
         failed_df = df[failed_mask]
@@ -154,6 +165,7 @@ def load_stats(data_dir: Path, duration: float) -> list[RunStats]:
                 failed_exception_ops=failed_exc,
                 success_rate=(successful / attempted) if attempted else 0.0,
                 throughput_ops_sec=(successful / float(duration)),
+                branch_create_throughput_ops_sec=(branch_create_successful / float(duration)),
                 per_thread_mean=mean_pt,
                 per_thread_cv=cv_pt,
                 zero_threads=zero_threads,
@@ -210,6 +222,8 @@ def pick_best(
     vals = [v for v in vals if v is not None]
     if not vals:
         return None
+    if mode == "branch":
+        return max(vals, key=lambda x: x.branch_create_throughput_ops_sec)
     return max(vals, key=lambda x: x.throughput_ops_sec)
 
 
@@ -271,21 +285,28 @@ def gen_table_2_branch_backend_summary(
             t1 = ix.get((b, sh, "branch", t1_thread))
             tmax = ix.get((b, sh, "branch", tmax_thread))
             if t1 is not None:
-                t1_vals.append(t1.throughput_ops_sec)
+                t1_vals.append(t1.branch_create_throughput_ops_sec)
             if tmax is not None:
-                tmax_vals.append(tmax.throughput_ops_sec)
+                tmax_vals.append(tmax.branch_create_throughput_ops_sec)
             for t in threads:
                 cur = ix.get((b, sh, "branch", t))
                 if cur is None:
                     continue
-                if best is None or cur.throughput_ops_sec > best.throughput_ops_sec:
+                if (
+                    best is None
+                    or cur.branch_create_throughput_ops_sec
+                    > best.branch_create_throughput_ops_sec
+                ):
                     best = cur
 
         t1_range = f"{fmt(min(t1_vals))} - {fmt(max(t1_vals))}" if t1_vals else "NA"
         tmax_range = f"{fmt(min(tmax_vals))} - {fmt(max(tmax_vals))}" if tmax_vals else "NA"
         peak = "NA"
         if best is not None:
-            peak = f"{fmt(best.throughput_ops_sec)} ({best.shape}, T={best.threads})"
+            peak = (
+                f"{fmt(best.branch_create_throughput_ops_sec)}"
+                f" ({best.shape}, T={best.threads})"
+            )
 
         rows.append(
             [
@@ -300,9 +321,9 @@ def gen_table_2_branch_backend_summary(
     return md_table(
         [
             "Backend",
-            "T1 branch throughput (ops/s, min-max over topology)",
-            "Peak branch throughput (ops/s)",
-            "Max-thread throughput (ops/s, min-max over topology)",
+            "T1 branch-create throughput (ops/s, min-max over topology)",
+            "Peak branch-create throughput (ops/s)",
+            "Max-thread branch-create throughput (ops/s, min-max over topology)",
             "Max-thread definition",
         ],
         rows,
@@ -327,13 +348,26 @@ def gen_table_3_branch_detailed(
             tmax = ix.get((b, sh, "branch", tmax_thread))
             best = pick_best(ix, b, sh, "branch", threads)
             ratio = np.nan
-            if t1 is not None and tmax is not None and t1.throughput_ops_sec > 0:
-                ratio = tmax.throughput_ops_sec / t1.throughput_ops_sec
+            if (
+                t1 is not None
+                and tmax is not None
+                and t1.branch_create_throughput_ops_sec > 0
+            ):
+                ratio = (
+                    tmax.branch_create_throughput_ops_sec
+                    / t1.branch_create_throughput_ops_sec
+                )
 
-            t1_throughput = fmt_opt(t1.throughput_ops_sec if t1 is not None else None)
-            peak = f"{fmt(best.throughput_ops_sec)} (T={best.threads})" if best is not None else "NA"
+            t1_throughput = fmt_opt(
+                t1.branch_create_throughput_ops_sec if t1 is not None else None
+            )
+            peak = (
+                f"{fmt(best.branch_create_throughput_ops_sec)} (T={best.threads})"
+                if best is not None
+                else "NA"
+            )
             tmax_label = (
-                f"{fmt(tmax.throughput_ops_sec)} (T={tmax.threads})"
+                f"{fmt(tmax.branch_create_throughput_ops_sec)} (T={tmax.threads})"
                 if tmax is not None
                 else f"NA (T={tmax_thread})"
             )
@@ -353,9 +387,9 @@ def gen_table_3_branch_detailed(
         [
             "Backend",
             "Topology",
-            "T1 throughput (ops/s)",
-            "Peak throughput",
-            "Max-thread throughput",
+            "T1 branch-create throughput (ops/s)",
+            "Peak branch-create throughput",
+            "Max-thread branch-create throughput",
             "Max/T1",
         ],
         rows,
@@ -581,8 +615,10 @@ def main() -> None:
     print("# Generated Tables (Exp3)")
     print("")
     print("Definitions used by this generator:")
-    print("- `T1 throughput`: successful ops/sec at thread count `T=1`.")
-    print("- `Max-thread throughput`: successful ops/sec at backend-specific maximum T.")
+    print("- Branch tables (RQ1): `successful BRANCH_CREATE rows / 30s`.")
+    print("- CRUD tables (RQ2/RQ3): `successful CRUD rows / 30s`.")
+    print("- `T1 throughput`: throughput at thread count `T=1`.")
+    print("- `Max-thread throughput`: throughput at backend-specific maximum T.")
     if max_thread_note:
         print(f"  (From manifest/data: {max_thread_note}).")
     print("")

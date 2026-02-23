@@ -69,29 +69,10 @@ Latency failure rule (`FAILURE_TIMEOUT`):
 
 
 **Interpretation**
-- Dolt remains non-zero at `T=1024` but below its low-thread peak.
-- file_copy throughput collapses to zero at high threads.
-- Neon branch throughput is zero at `T=16` due to branch-limit failures.
-
-**Why Dolt appears to rise again after `T=128`**
-- The current RQ1 throughput series is computed from all successful rows in branch mode.
-- In this implementation, each branch attempt records two timed ops:
-  1. `BRANCH_CREATE`
-  2. `BRANCH_CONNECT`
-- At high `T`, `BRANCH_CREATE` degrades heavily (mostly timeout-labeled failures), but
-  `BRANCH_CONNECT` remains near-100% successful and contributes many successful rows.
-- Result: aggregate "branch-mode successful ops/sec" can rebound even while true
-  branch-creation throughput keeps declining.
-
-Concrete Dolt evidence from current parquet data (sum over 3 topologies):
-- `T=128`: create success throughput `22.23 ops/s`, connect success throughput `232.93 ops/s`,
-  aggregate successful branch-mode throughput `255.17 ops/s`.
-- `T=1024`: create success throughput `8.70 ops/s`, connect success throughput `306.90 ops/s`,
-  aggregate successful branch-mode throughput `315.60 ops/s`.
-
-Implication:
-- If the research question is strictly branch-creation capacity, use `op_type = BRANCH_CREATE`
-  only for the RQ1 throughput metric.
+- Figure/Table values use strict RQ1 metric: `successful BRANCH_CREATE rows / 30s`.
+- Dolt peaks at low threads (`~T=4`) and then degrades sharply at high threads (`T=1024`: `2.47-3.50 ops/s`).
+- file_copy branch-create throughput is non-zero only at `T=1`; it is `0.00 ops/s` from `T>=2`.
+- Neon branch-create throughput is `0.00` across this run set, with branch-limit failures at high `T`.
 
 **PostgreSQL C-level path for file_copy plunge (Q1)**
 
@@ -134,22 +115,22 @@ Operational conclusion for RQ1:
 
 ### Table 2. Branch Throughput Summary by Backend
 
-| Backend | T1 branch throughput (ops/s, min-max over topology) | Peak branch throughput (ops/s) | Max-thread throughput (ops/s, min-max over topology) | Max-thread definition |
-|---------|-----------------------------------------------------|--------------------------------|------------------------------------------------------|-----------------------|
-| dolt | 116.13 - 120.53 | 159.10 (bushy, T=8) | 104.40 - 106.20 | T=1024 |
-| file_copy | 47.53 - 49.83 | 49.83 (bushy, T=1) | 0.00 - 0.00 | T=1024 |
+| Backend | T1 branch-create throughput (ops/s, min-max over topology) | Peak branch-create throughput (ops/s) | Max-thread branch-create throughput (ops/s, min-max over topology) | Max-thread definition |
+|---------|------------------------------------------------------------|---------------------------------------|--------------------------------------------------------------------|-----------------------|
+| dolt | 58.07 - 60.27 | 79.03 (bushy, T=4) | 2.47 - 3.50 | T=1024 |
+| file_copy | 23.53 - 24.73 | 24.73 (bushy, T=1) | 0.00 - 0.00 | T=1024 |
 | neon | 0.00 - 0.00 | 0.00 (spine, T=1) | 0.00 - 0.00 | T=16 |
 
 ### Table 3. Branch Throughput Detailed (Backend x Topology)
 
-| Backend | Topology | T1 throughput (ops/s) | Peak throughput | Max-thread throughput | Max/T1 |
-|---------|----------|-----------------------|-----------------|-----------------------|--------|
-| dolt | spine | 116.13 | 154.20 (T=4) | 105.00 (T=1024) | 0.904 |
-| dolt | bushy | 118.73 | 159.10 (T=8) | 104.40 (T=1024) | 0.879 |
-| dolt | fan_out | 120.53 | 156.93 (T=4) | 106.20 (T=1024) | 0.881 |
-| file_copy | spine | 48.80 | 48.80 (T=1) | 0.00 (T=1024) | 0.000 |
-| file_copy | bushy | 49.83 | 49.83 (T=1) | 0.00 (T=1024) | 0.000 |
-| file_copy | fan_out | 47.53 | 47.53 (T=1) | 0.00 (T=1024) | 0.000 |
+| Backend | Topology | T1 branch-create throughput (ops/s) | Peak branch-create throughput | Max-thread branch-create throughput | Max/T1 |
+|---------|----------|-------------------------------------|-------------------------------|-------------------------------------|--------|
+| dolt | spine | 58.07 | 77.10 (T=4) | 2.47 (T=1024) | 0.042 |
+| dolt | bushy | 59.37 | 79.03 (T=4) | 3.50 (T=1024) | 0.059 |
+| dolt | fan_out | 60.27 | 78.47 (T=4) | 2.73 (T=1024) | 0.045 |
+| file_copy | spine | 24.23 | 24.23 (T=1) | 0.00 (T=1024) | 0.000 |
+| file_copy | bushy | 24.73 | 24.73 (T=1) | 0.00 (T=1024) | 0.000 |
+| file_copy | fan_out | 23.53 | 23.53 (T=1) | 0.00 (T=1024) | 0.000 |
 | neon | spine | 0.00 | 0.00 (T=1) | 0.00 (T=16) | NA |
 | neon | bushy | 0.00 | 0.00 (T=1) | 0.00 (T=16) | NA |
 | neon | fan_out | 0.00 | 0.00 (T=1) | 0.00 (T=16) | NA |
@@ -160,8 +141,12 @@ Operational conclusion for RQ1:
 *Figure 2. Aggregate successful CRUD throughput vs threads.*
 
 
-- Dolt peaks at moderate threads, then degrades by `T=1024`.
-- file_copy drops sharply at high threads; one `T=1024` point timed out entirely.
+**Important Note**
+- For `file_copy`, the `spine/T=1024` CRUD run failed entirely (`runner_exit_code=124`, runner timeout at 900s), so no main CRUD parquet was produced for that point.
+- As a result, that cell is `NA` in Q2 tables, and the same point is also `NA` in Q3 fairness tables because Q3 uses the same CRUD run artifacts.
+
+- Dolt is mostly topology-flat at low/mid `T`, then degrades at high `T`.
+- file_copy is not topology-flat at high `T`: spine collapses earlier/harder than bushy/fan_out, and one `T=1024` spine point timed out entirely.
 - Neon reaches usable throughput at lower threads but falls to zero at `T=16` in this dataset.
 
 ### Table 4. CRUD Aggregate Throughput Detailed (Backend x Topology)
@@ -194,18 +179,20 @@ Operational conclusion for RQ1:
 
 ### 3.3 RQ3: Topology and Fairness
 
-![Figure 3: CRUD Per-thread Distribution at Max Threads](figures/fig3c_crud_per_thread_distribution_max_threads.png)
-*Figure 3. Per-thread CRUD throughput distribution at backend Tmax.*
+![Figure 3: Mean Per-thread Goodput vs Threads](figures/fig3c_rq3_mean_per_thread_goodput_vs_threads.png)
+*Figure 3. Mean per-thread successful CRUD ops/sec vs threads.*
 
-![Figure 4: Spine Per-thread Goodput vs Thread Index](figures/fig3d_spine_per_thread_goodput_vs_thread_index.png)
-*Figure 4. Spine topology per-thread throughput profile at highest available T.*
+![Figure 4: Fairness CV vs Threads](figures/fig3d_rq3_fairness_cv_vs_threads.png)
+*Figure 4. Fairness CV (`std / mean`) of per-thread CRUD goodput vs threads.*
 
+![Figure 5: Zero-throughput Threads vs Threads](figures/fig3e_rq3_zero_threads_vs_threads.png)
+*Figure 5. Zero-throughput thread count vs threads.*
 
-- Dolt shows topology-sensitive skew at `T=1024`.
-- file_copy at `T=1024` is starvation-heavy (over 1000 zero-throughput threads in bushy/fan_out).
-- Neon at `T=16` is uniformly starved (all zero-throughput threads in this run set).
+- Dolt: mean per-thread goodput declines steadily as `T` rises, with CV increasing and non-trivial zero-thread counts at `T=1024`.
+- file_copy: fairness collapses at high `T` (very high CV and `1000+` zero-throughput threads in bushy/fan_out at `T=1024`).
+- Neon: at `T=16`, mean per-thread goodput is `0`, CV is undefined (`NA`), and all threads are zero-throughput.
 
-### Table 6. Fairness at Max Thread Count (CRUD)
+### Table 6. Fairness Metrics at Max Thread Count
 
 | Backend | Topology | Tmax | Mean per-thread goodput (ops/s/thread) | CV at Tmax | Zero-throughput threads |
 |---------|----------|------|----------------------------------------|------------|-------------------------|
@@ -215,21 +202,29 @@ Operational conclusion for RQ1:
 | file_copy | spine | 1024 | NA | NA | NA |
 | file_copy | bushy | 1024 | 0.072 | 7.538 | 1004 |
 | file_copy | fan_out | 1024 | 0.059 | 7.145 | 1002 |
-| neon | spine | 16 | 0.000 | 0.000 | 16 |
-| neon | bushy | 16 | 0.000 | 0.000 | 16 |
-| neon | fan_out | 16 | 0.000 | 0.000 | 16 |
+| neon | spine | 16 | 0.000 | NA | 16 |
+| neon | bushy | 16 | 0.000 | NA | 16 |
+| neon | fan_out | 16 | 0.000 | NA | 16 |
+
+### Table 6b. Topology Spread at Max Thread Count
+
+| Backend | Tmax | Mean-goodput spread across topology (%) | CV range across topology | Zero-thread range across topology |
+|---------|------|-----------------------------------------|--------------------------|-----------------------------------|
+| dolt | 1024 | 21.0 | 1.236 - 1.345 | 90 - 155 |
+| file_copy | 1024 | 19.1 | 7.145 - 7.538 | 1002 - 1004 |
+| neon | 16 | NA | NA - NA | 16 - 16 |
 
 ### 3.4 Failure Behavior and Coverage
 
-![Figure 5: Failure Rate vs Threads](figures/fig3e_failure_rate_vs_threads.png)
-*Figure 5. Failure rate vs threads by backend/topology/mode.*
+![Figure 6: Failure Rate vs Threads](figures/fig3e_failure_rate_vs_threads.png)
+*Figure 6. Failure rate vs threads by backend/topology/mode.*
 
-![Figure 6: Failure Category Composition at Max Threads](figures/fig3f_failure_reason_stack_max_threads.png)
-*Figure 6. Failure-category composition at backend Tmax.*
+![Figure 7: Failure Category Composition at Max Threads](figures/fig3f_failure_reason_stack_max_threads.png)
+*Figure 7. Failure-category composition at backend Tmax.*
 
 
 - Dolt failures are dominated by slow/timeout-labeled operations at high thread counts.
-- file_copy failures are mixed: timeout-dominated in high-thread CRUD and backend-state conflicts in branch mode.
+- file_copy failures are timeout-dominated at high thread counts, with one missing `spine/T=1024 CRUD` point due runner timeout.
 - Neon failures are dominated by backend-state conflicts (branch limits) with additional timeout-labeled slow ops.
 
 ### Table 1. Matrix Coverage

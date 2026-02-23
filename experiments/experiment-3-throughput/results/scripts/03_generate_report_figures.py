@@ -49,6 +49,8 @@ FAILURE_CATEGORY_COLOR = {
     "FAILURE_UNKNOWN": "#d62728",
 }
 
+BRANCH_CREATE_OP_TYPE = 1
+
 
 @dataclass
 class RunRow:
@@ -145,13 +147,39 @@ def runs_to_df(runs: Iterable[RunRow]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_fig3a_branch_throughput(df: pd.DataFrame, out_dir: Path, duration: float) -> None:
+def plot_fig3a_branch_throughput(
+    df: pd.DataFrame,
+    data_dir: Path,
+    out_dir: Path,
+    duration: float,
+    *,
+    split: bool = False,
+) -> None:
     sub = df[df["mode"] == "branch"].copy()
-    sub["throughput"] = sub["successful_ops"] / duration
 
-    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
-    for i, backend in enumerate(BACKEND_ORDER):
-        ax = axes[i]
+    def _branch_create_throughput(run_id: str) -> float:
+        parquet_path = data_dir / f"{run_id}.parquet"
+        if not parquet_path.exists():
+            return np.nan
+        try:
+            cols = ["op_type", "outcome_success"]
+            run_df = pd.read_parquet(parquet_path, columns=cols)
+        except Exception:
+            return np.nan
+
+        if "op_type" not in run_df.columns:
+            return np.nan
+        if "outcome_success" not in run_df.columns:
+            run_df["outcome_success"] = True
+        run_df["outcome_success"] = run_df["outcome_success"].fillna(False).astype(bool)
+
+        success = ((run_df["op_type"] == BRANCH_CREATE_OP_TYPE) & run_df["outcome_success"]).sum()
+        return float(success) / float(duration)
+
+    sub["throughput"] = sub["run_id"].map(_branch_create_throughput)
+    sub = sub[np.isfinite(sub["throughput"])]
+
+    def _plot_one_backend(ax, backend):
         b = sub[sub["backend"] == backend]
         for topo in TOPO_ORDER:
             t = b[b["shape"] == topo].sort_values("threads")
@@ -167,10 +195,14 @@ def plot_fig3a_branch_throughput(df: pd.DataFrame, out_dir: Path, duration: floa
             )
         ax.set_xscale("log", base=2)
         ax.set_xlabel("Threads (T)")
-        ax.set_ylabel("Successful branch ops/sec")
+        ax.set_ylabel("Successful BRANCH_CREATE ops/sec")
         ax.set_title(BACKEND_LABEL.get(backend, backend))
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8)
+
+    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
+    for i, backend in enumerate(BACKEND_ORDER):
+        _plot_one_backend(axes[i], backend)
 
     fig.suptitle("Fig 3a. Branch Creation Throughput vs Threads", fontsize=14, y=1.02)
     fig.tight_layout()
@@ -179,22 +211,26 @@ def plot_fig3a_branch_throughput(df: pd.DataFrame, out_dir: Path, duration: floa
     plt.close(fig)
     print(f"Saved {path}")
 
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, sax = plt.subplots(1, 1, figsize=(7, 5))
+            _plot_one_backend(sax, backend)
+            sfig.suptitle("Fig 3a. Branch Creation Throughput vs Threads", fontsize=14, y=1.02)
+            sfig.tight_layout()
+            spath = out_dir / f"fig3a_branch_throughput_vs_threads_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
 
-def plot_fig3b_crud_goodput(df: pd.DataFrame, out_dir: Path, duration: float) -> None:
+
+def plot_fig3b_crud_goodput(
+    df: pd.DataFrame, out_dir: Path, duration: float, *, split: bool = False
+) -> None:
     sub = df[df["mode"] == "crud"].copy()
     sub["goodput"] = sub["successful_ops"] / duration
 
-    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
-    for i, backend in enumerate(BACKEND_ORDER):
-        ax = axes[i]
+    def _plot_one_backend(ax, backend):
         b = sub[sub["backend"] == backend]
-
-        t1 = b[b["threads"] == 1]["goodput"]
-        if not t1.empty:
-            ref_threads = sorted(b["threads"].unique())
-            baseline = float(t1.mean())
-            ref = [baseline * t for t in ref_threads]
-            ax.plot(ref_threads, ref, "k--", linewidth=1, alpha=0.4, label="Ideal linear")
 
         for topo in TOPO_ORDER:
             t = b[b["shape"] == topo].sort_values("threads")
@@ -212,8 +248,17 @@ def plot_fig3b_crud_goodput(df: pd.DataFrame, out_dir: Path, duration: float) ->
         ax.set_xlabel("Threads / Branches (N)")
         ax.set_ylabel("Aggregate successful CRUD ops/sec")
         ax.set_title(BACKEND_LABEL.get(backend, backend))
+        ymax = float(b["goodput"].max()) if not b.empty else 0.0
+        if np.isfinite(ymax) and ymax > 0:
+            ax.set_ylim(0, ymax * 1.08)
+        else:
+            ax.set_ylim(0, 1.0)
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8)
+
+    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
+    for i, backend in enumerate(BACKEND_ORDER):
+        _plot_one_backend(axes[i], backend)
 
     fig.suptitle("Fig 3b. Aggregate CRUD Goodput vs Branch Count", fontsize=14, y=1.02)
     fig.tight_layout()
@@ -221,6 +266,17 @@ def plot_fig3b_crud_goodput(df: pd.DataFrame, out_dir: Path, duration: float) ->
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, sax = plt.subplots(1, 1, figsize=(7, 5))
+            _plot_one_backend(sax, backend)
+            sfig.suptitle("Fig 3b. Aggregate CRUD Goodput vs Branch Count", fontsize=14, y=1.02)
+            sfig.tight_layout()
+            spath = out_dir / f"fig3b_crud_aggregate_goodput_vs_threads_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
 
 
 def _load_per_thread_goodput(parquet_path: Path, threads: int, duration: float) -> pd.DataFrame:
@@ -241,16 +297,14 @@ def _load_per_thread_goodput(parquet_path: Path, threads: int, duration: float) 
 
 
 def plot_fig3c_distribution_max_threads(
-    runs: List[RunRow], data_dir: Path, out_dir: Path, duration: float
+    runs: List[RunRow], data_dir: Path, out_dir: Path, duration: float, *, split: bool = False
 ) -> None:
-    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
-
-    for i, backend in enumerate(BACKEND_ORDER):
-        ax = axes[i]
+    def _plot_one_backend(ax, backend):
+        """Plot boxplot for *backend* onto *ax*. Returns False if nothing drawn."""
         b_runs = [r for r in runs if r.backend == backend and r.mode == "crud"]
         if not b_runs:
             ax.set_visible(False)
-            continue
+            return False
 
         max_t = max(r.threads for r in b_runs)
         values = []
@@ -269,7 +323,7 @@ def plot_fig3c_distribution_max_threads(
 
         if not values:
             ax.set_visible(False)
-            continue
+            return False
 
         bp = ax.boxplot(values, patch_artist=True, tick_labels=labels)
         for j, patch in enumerate(bp["boxes"]):
@@ -280,6 +334,11 @@ def plot_fig3c_distribution_max_threads(
         ax.set_title(f"{BACKEND_LABEL.get(backend, backend)} (Tmax={max_t})")
         ax.set_ylabel("Per-thread successful CRUD ops/sec")
         ax.grid(axis="y", alpha=0.25)
+        return True
+
+    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
+    for i, backend in enumerate(BACKEND_ORDER):
+        _plot_one_backend(axes[i], backend)
 
     fig.suptitle("Fig 3c. Per-thread CRUD Throughput Distribution at Max Thread Count", fontsize=14, y=1.02)
     fig.tight_layout()
@@ -288,14 +347,26 @@ def plot_fig3c_distribution_max_threads(
     plt.close(fig)
     print(f"Saved {path}")
 
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, sax = plt.subplots(1, 1, figsize=(7, 5))
+            _plot_one_backend(sax, backend)
+            sfig.suptitle(
+                "Fig 3c. Per-thread CRUD Throughput Distribution at Max Thread Count",
+                fontsize=14, y=1.02,
+            )
+            sfig.tight_layout()
+            spath = out_dir / f"fig3c_crud_per_thread_distribution_max_threads_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
+
 
 def plot_fig3d_spine_vs_thread_index(
-    runs: List[RunRow], data_dir: Path, out_dir: Path, duration: float
+    runs: List[RunRow], data_dir: Path, out_dir: Path, duration: float, *, split: bool = False
 ) -> None:
-    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
-
-    for i, backend in enumerate(BACKEND_ORDER):
-        ax = axes[i]
+    def _plot_one_backend(ax, backend):
+        """Plot spine per-thread goodput for *backend* onto *ax*. Returns False if nothing drawn."""
         b_runs = [
             r
             for r in runs
@@ -303,7 +374,7 @@ def plot_fig3d_spine_vs_thread_index(
         ]
         if not b_runs:
             ax.set_visible(False)
-            continue
+            return False
 
         # Prefer highest thread count that has a parquet payload.
         rr = None
@@ -316,7 +387,7 @@ def plot_fig3d_spine_vs_thread_index(
                 break
         if rr is None or p is None:
             ax.set_visible(False)
-            continue
+            return False
 
         per_thread = _load_per_thread_goodput(p, rr.threads, duration)
         x = per_thread["thread_id"].values + 1
@@ -327,6 +398,11 @@ def plot_fig3d_spine_vs_thread_index(
         ax.set_xlabel("Thread index (1-based)")
         ax.set_ylabel("Per-thread successful CRUD ops/sec")
         ax.grid(alpha=0.25)
+        return True
+
+    fig, axes = plt.subplots(1, len(BACKEND_ORDER), figsize=(18, 5), sharey=False)
+    for i, backend in enumerate(BACKEND_ORDER):
+        _plot_one_backend(axes[i], backend)
 
     fig.suptitle("Fig 3d. Spine Per-thread Goodput vs Thread Index", fontsize=14, y=1.02)
     fig.tight_layout()
@@ -335,36 +411,46 @@ def plot_fig3d_spine_vs_thread_index(
     plt.close(fig)
     print(f"Saved {path}")
 
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, sax = plt.subplots(1, 1, figsize=(7, 5))
+            _plot_one_backend(sax, backend)
+            sfig.suptitle("Fig 3d. Spine Per-thread Goodput vs Thread Index", fontsize=14, y=1.02)
+            sfig.tight_layout()
+            spath = out_dir / f"fig3d_spine_per_thread_goodput_vs_thread_index_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
 
-def plot_fig3e_failure_rate(df: pd.DataFrame, out_dir: Path) -> None:
+
+def plot_fig3e_failure_rate(df: pd.DataFrame, out_dir: Path, *, split: bool = False) -> None:
+    def _plot_one_cell(ax, mode, backend, show_ylabel=True):
+        sub = df[(df["mode"] == mode) & (df["backend"] == backend)]
+        for topo in TOPO_ORDER:
+            t = sub[sub["shape"] == topo].sort_values("threads")
+            if t.empty:
+                continue
+            ax.plot(
+                t["threads"],
+                t["failure_rate"],
+                marker="o",
+                linewidth=2,
+                color=TOPO_COLOR[topo],
+                label=TOPO_LABEL[topo],
+            )
+        ax.set_xscale("log", base=2)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_title(f"{BACKEND_LABEL.get(backend, backend)} / {mode}")
+        ax.set_xlabel("Threads")
+        if show_ylabel:
+            ax.set_ylabel("Failure rate")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7)
+
     fig, axes = plt.subplots(len(MODE_ORDER), len(BACKEND_ORDER), figsize=(18, 9), sharey=True)
-
     for r_i, mode in enumerate(MODE_ORDER):
         for c_i, backend in enumerate(BACKEND_ORDER):
-            ax = axes[r_i][c_i]
-            sub = df[(df["mode"] == mode) & (df["backend"] == backend)]
-
-            for topo in TOPO_ORDER:
-                t = sub[sub["shape"] == topo].sort_values("threads")
-                if t.empty:
-                    continue
-                ax.plot(
-                    t["threads"],
-                    t["failure_rate"],
-                    marker="o",
-                    linewidth=2,
-                    color=TOPO_COLOR[topo],
-                    label=TOPO_LABEL[topo],
-                )
-
-            ax.set_xscale("log", base=2)
-            ax.set_ylim(-0.02, 1.02)
-            ax.set_title(f"{BACKEND_LABEL.get(backend, backend)} / {mode}")
-            ax.set_xlabel("Threads")
-            if c_i == 0:
-                ax.set_ylabel("Failure rate")
-            ax.grid(alpha=0.25)
-            ax.legend(fontsize=7)
+            _plot_one_cell(axes[r_i][c_i], mode, backend, show_ylabel=(c_i == 0))
 
     fig.suptitle("Fig 3e. Failure Rate vs Threads (by mode/topology/backend)", fontsize=14, y=1.01)
     fig.tight_layout()
@@ -372,6 +458,21 @@ def plot_fig3e_failure_rate(df: pd.DataFrame, out_dir: Path) -> None:
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, saxes = plt.subplots(len(MODE_ORDER), 1, figsize=(7, 9), sharey=True)
+            for r_i, mode in enumerate(MODE_ORDER):
+                _plot_one_cell(saxes[r_i], mode, backend, show_ylabel=True)
+            sfig.suptitle(
+                "Fig 3e. Failure Rate vs Threads (by mode/topology/backend)",
+                fontsize=14, y=1.01,
+            )
+            sfig.tight_layout()
+            spath = out_dir / f"fig3e_failure_rate_vs_threads_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
 
 
 def _failure_counts_from_summary(summary: Dict) -> Dict[str, int]:
@@ -384,60 +485,64 @@ def _failure_counts_from_summary(summary: Dict) -> Dict[str, int]:
     return out
 
 
-def plot_fig3f_failure_category_stack(runs: List[RunRow], out_dir: Path) -> None:
-    fig, axes = plt.subplots(len(MODE_ORDER), len(BACKEND_ORDER), figsize=(18, 9), sharey=True)
+def plot_fig3f_failure_category_stack(runs: List[RunRow], out_dir: Path, *, split: bool = False) -> None:
+    def _plot_one_cell(ax, mode, backend, show_ylabel=True):
+        candidates = [r for r in runs if r.backend == backend and r.mode == mode]
+        if not candidates:
+            ax.set_visible(False)
+            return
 
-    for r_i, mode in enumerate(MODE_ORDER):
-        for c_i, backend in enumerate(BACKEND_ORDER):
-            ax = axes[r_i][c_i]
-            candidates = [r for r in runs if r.backend == backend and r.mode == mode]
-            if not candidates:
-                ax.set_visible(False)
+        max_t = max(r.threads for r in candidates)
+        rows = [r for r in candidates if r.threads == max_t]
+        rows.sort(key=lambda x: TOPO_ORDER.index(x.shape))
+
+        x = np.arange(len(rows))
+        bottoms = np.zeros(len(rows))
+        xlabels = [TOPO_LABEL[r.shape] for r in rows]
+
+        for cat in FAILURE_CATEGORY_ORDER:
+            vals = []
+            for rr in rows:
+                counts = _failure_counts_from_summary(rr.summary)
+                vals.append(counts.get(cat, 0))
+            if not any(vals):
                 continue
+            ax.bar(
+                x,
+                vals,
+                bottom=bottoms,
+                color=FAILURE_CATEGORY_COLOR[cat],
+                label=cat.replace("FAILURE_", ""),
+            )
+            bottoms += np.array(vals)
 
-            max_t = max(r.threads for r in candidates)
-            rows = [r for r in candidates if r.threads == max_t]
-            rows.sort(key=lambda x: TOPO_ORDER.index(x.shape))
+        ax.set_xticks(x)
+        ax.set_xticklabels(xlabels)
+        ax.set_title(f"{BACKEND_LABEL.get(backend, backend)} / {mode} (Tmax={max_t})")
+        if show_ylabel:
+            ax.set_ylabel("Failed op count")
+        ax.grid(axis="y", alpha=0.25)
 
-            x = np.arange(len(rows))
-            bottoms = np.zeros(len(rows))
-            labels = [TOPO_LABEL[r.shape] for r in rows]
-
-            for cat in FAILURE_CATEGORY_ORDER:
-                vals = []
-                for rr in rows:
-                    counts = _failure_counts_from_summary(rr.summary)
-                    vals.append(counts.get(cat, 0))
-                if not any(vals):
-                    continue
-                ax.bar(
-                    x,
-                    vals,
-                    bottom=bottoms,
-                    color=FAILURE_CATEGORY_COLOR[cat],
-                    label=cat.replace("FAILURE_", ""),
-                )
-                bottoms += np.array(vals)
-
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels)
-            ax.set_title(f"{BACKEND_LABEL.get(backend, backend)} / {mode} (Tmax={max_t})")
-            if c_i == 0:
-                ax.set_ylabel("Failed op count")
-            ax.grid(axis="y", alpha=0.25)
-
-    # Deduplicate legend entries from all axes.
-    handles, labels = [], []
-    seen = set()
-    for row_axes in axes:
-        for ax in row_axes:
+    def _dedup_legend(axes_list):
+        """Return deduplicated (handles, labels) across an iterable of axes."""
+        handles, labels = [], []
+        seen = set()
+        for ax in axes_list:
             h, l = ax.get_legend_handles_labels()
             for hh, ll in zip(h, l):
                 if ll not in seen:
                     seen.add(ll)
                     handles.append(hh)
                     labels.append(ll)
+        return handles, labels
 
+    fig, axes = plt.subplots(len(MODE_ORDER), len(BACKEND_ORDER), figsize=(18, 9), sharey=True)
+    for r_i, mode in enumerate(MODE_ORDER):
+        for c_i, backend in enumerate(BACKEND_ORDER):
+            _plot_one_cell(axes[r_i][c_i], mode, backend, show_ylabel=(c_i == 0))
+
+    # Deduplicate legend entries from all axes.
+    handles, labels = _dedup_legend(ax for row_axes in axes for ax in row_axes)
     if handles:
         fig.legend(handles, labels, loc="upper center", ncol=4, fontsize=8)
 
@@ -447,6 +552,26 @@ def plot_fig3f_failure_category_stack(runs: List[RunRow], out_dir: Path) -> None
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+
+    if split:
+        for backend in BACKEND_ORDER:
+            sfig, saxes = plt.subplots(len(MODE_ORDER), 1, figsize=(7, 9), sharey=True)
+            for r_i, mode in enumerate(MODE_ORDER):
+                _plot_one_cell(saxes[r_i], mode, backend, show_ylabel=True)
+
+            handles, labels = _dedup_legend(saxes)
+            if handles:
+                sfig.legend(handles, labels, loc="upper center", ncol=4, fontsize=8)
+
+            sfig.suptitle(
+                "Fig 3f. Failure Category Composition at Max Thread Count",
+                fontsize=14, y=1.03,
+            )
+            sfig.tight_layout()
+            spath = out_dir / f"fig3f_failure_reason_stack_max_threads_{backend}.png"
+            sfig.savefig(spath, dpi=180, bbox_inches="tight")
+            plt.close(sfig)
+            print(f"Saved {spath}")
 
 
 def main() -> None:
@@ -467,6 +592,7 @@ def main() -> None:
         default=Path("experiments/experiment-3-throughput/results/figures"),
     )
     parser.add_argument("--duration-seconds", type=float, default=30.0)
+    parser.add_argument("--split", action="store_true")
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -474,12 +600,14 @@ def main() -> None:
     runs = load_runs(args.manifest, args.data_dir)
     df = runs_to_df(runs)
 
-    plot_fig3a_branch_throughput(df, args.out_dir, args.duration_seconds)
-    plot_fig3b_crud_goodput(df, args.out_dir, args.duration_seconds)
-    plot_fig3c_distribution_max_threads(runs, args.data_dir, args.out_dir, args.duration_seconds)
-    plot_fig3d_spine_vs_thread_index(runs, args.data_dir, args.out_dir, args.duration_seconds)
-    plot_fig3e_failure_rate(df, args.out_dir)
-    plot_fig3f_failure_category_stack(runs, args.out_dir)
+    plot_fig3a_branch_throughput(
+        df, args.data_dir, args.out_dir, args.duration_seconds, split=args.split
+    )
+    plot_fig3b_crud_goodput(df, args.out_dir, args.duration_seconds, split=args.split)
+    plot_fig3c_distribution_max_threads(runs, args.data_dir, args.out_dir, args.duration_seconds, split=args.split)
+    plot_fig3d_spine_vs_thread_index(runs, args.data_dir, args.out_dir, args.duration_seconds, split=args.split)
+    plot_fig3e_failure_rate(df, args.out_dir, split=args.split)
+    plot_fig3f_failure_category_stack(runs, args.out_dir, split=args.split)
 
 
 if __name__ == "__main__":
