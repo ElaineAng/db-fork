@@ -10,6 +10,8 @@ set -e
 
 IMAGE_SIZE="50g"
 PG_PORT=5432
+PG_MAX_CONNECTIONS="${PG_MAX_CONNECTIONS:-1200}"
+PG_ULIMIT_NOFILE="${PG_ULIMIT_NOFILE:-65536}"
 VOLUME_NAME="PGBench"
 IMAGE_PATH="$HOME/pgbench.sparseimage"
 MOUNT_POINT="/Volumes/$VOLUME_NAME"
@@ -18,6 +20,8 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --size)  IMAGE_SIZE="$2"; shift 2 ;;
         --port)  PG_PORT="$2"; shift 2 ;;
+        --max-connections) PG_MAX_CONNECTIONS="$2"; shift 2 ;;
+        --nofile) PG_ULIMIT_NOFILE="$2"; shift 2 ;;
         *)       echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -46,7 +50,11 @@ if [ "$OS" = "Darwin" ]; then
             >&2 echo "ERROR: Port $PG_PORT already in use. Stop the other process or use --port <N>."
             exit 1
         fi
-        pg_ctl -D "$PG_DATA" -l "$MOUNT_POINT/pg.log" -o "-p $PG_PORT" start >&2
+        if ! ulimit -n "$PG_ULIMIT_NOFILE" 2>/dev/null; then
+            >&2 echo "Warning: unable to set ulimit -n to $PG_ULIMIT_NOFILE; continuing with current limit $(ulimit -n)."
+        fi
+        pg_ctl -D "$PG_DATA" -l "$MOUNT_POINT/pg.log" \
+            -o "-p $PG_PORT -c max_connections=$PG_MAX_CONNECTIONS" start >&2
     fi
 
     # Ensure 'postgres' superuser exists (initdb creates OS-user role only)
@@ -56,10 +64,12 @@ if [ "$OS" = "Darwin" ]; then
 
     echo "export PGSQL_DATA_DIR=$MOUNT_POINT"
     echo "export PGSQL_PORT=$PG_PORT"
+    echo "export PGSQL_MAX_CONNECTIONS=$PG_MAX_CONNECTIONS"
 
 elif [ "$OS" = "Linux" ]; then
     echo "unset PGSQL_DATA_DIR"
     echo "export PGSQL_PORT=$PG_PORT"
+    echo "export PGSQL_MAX_CONNECTIONS=$PG_MAX_CONNECTIONS"
 else
     >&2 echo "Unsupported OS: $OS"; exit 1
 fi

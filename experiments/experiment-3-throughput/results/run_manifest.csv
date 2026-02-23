@@ -1,0 +1,163 @@
+run_id,backend,shape,mode,threads,runner_exit_code,parquet_present,setup_parquet_present,summary_present,status,attempted_ops,successful_ops,failed_exception_ops,failed_slow_ops,success_rate,top_failure_category,top_failure_reason
+exp3_dolt_bushy_1t_branch_tpcc,dolt,bushy,branch,1,0,1,0,1,SUCCESS,3562,3562,0,0,1.0,,
+exp3_dolt_bushy_2t_branch_tpcc,dolt,bushy,branch,2,0,1,0,1,SUCCESS,4208,4208,0,0,1.0,,
+exp3_dolt_bushy_4t_branch_tpcc,dolt,bushy,branch,4,0,1,0,1,SUCCESS,4742,4742,0,0,1.0,,
+exp3_dolt_bushy_8t_branch_tpcc,dolt,bushy,branch,8,0,1,0,1,PARTIAL,4812,4773,0,39,0.9918952618453866,FAILURE_TIMEOUT,Slow operation: 0.163176s > 0.100000s
+exp3_dolt_bushy_16t_branch_tpcc,dolt,bushy,branch,16,0,1,0,1,PARTIAL,4736,3987,0,749,0.8418496621621622,FAILURE_TIMEOUT,Slow operation: 0.130359s > 0.100000s
+exp3_dolt_bushy_32t_branch_tpcc,dolt,bushy,branch,32,0,1,0,1,PARTIAL,4652,3133,0,1519,0.6734737747205503,FAILURE_TIMEOUT,Slow operation: 0.113686s > 0.100000s
+exp3_dolt_bushy_64t_branch_tpcc,dolt,bushy,branch,64,0,1,0,1,PARTIAL,4656,2712,0,1944,0.5824742268041238,FAILURE_TIMEOUT,Slow operation: 0.200212s > 0.100000s
+exp3_dolt_bushy_128t_branch_tpcc,dolt,bushy,branch,128,0,1,0,1,PARTIAL,4706,2567,0,2139,0.5454738631534212,FAILURE_TIMEOUT,Slow operation: 0.793995s > 0.100000s
+exp3_dolt_bushy_256t_branch_tpcc,dolt,bushy,branch,256,0,1,0,1,PARTIAL,4994,2654,0,2340,0.5314377252703244,FAILURE_TIMEOUT,Slow operation: 0.127445s > 0.100000s
+exp3_dolt_bushy_512t_branch_tpcc,dolt,bushy,branch,512,0,1,0,1,PARTIAL,5036,2644,0,2392,0.5250198570293884,FAILURE_TIMEOUT,Slow operation: 0.104660s > 0.100000s
+exp3_dolt_bushy_1024t_branch_tpcc,dolt,bushy,branch,1024,0,1,0,1,PARTIAL,6058,3132,0,2926,0.5170023109937273,FAILURE_TIMEOUT,Slow operation: 0.347716s > 0.100000s
+exp3_dolt_bushy_1t_crud_tpcc,dolt,bushy,crud,1,0,1,1,1,SUCCESS,4577,4577,0,0,1.0,,
+exp3_dolt_bushy_2t_crud_tpcc,dolt,bushy,crud,2,0,1,1,1,SUCCESS,7648,7648,0,0,1.0,,
+exp3_dolt_bushy_4t_crud_tpcc,dolt,bushy,crud,4,0,1,1,1,SUCCESS,9993,9993,0,0,1.0,,
+exp3_dolt_bushy_8t_crud_tpcc,dolt,bushy,crud,8,0,1,1,1,SUCCESS,14036,14036,0,0,1.0,,
+exp3_dolt_bushy_16t_crud_tpcc,dolt,bushy,crud,16,0,1,1,1,PARTIAL,15116,15110,0,6,0.999603069595131,FAILURE_TIMEOUT,Slow operation: 0.101490s > 0.100000s
+exp3_dolt_bushy_32t_crud_tpcc,dolt,bushy,crud,32,0,1,1,1,PARTIAL,14618,11426,0,3192,0.7816390751128746,FAILURE_TIMEOUT,Slow operation: 0.148677s > 0.100000s
+exp3_dolt_bushy_64t_crud_tpcc,dolt,bushy,crud,64,0,1,1,1,PARTIAL,14405,8241,0,6164,0.5720930232558139,FAILURE_TIMEOUT,Slow operation: 0.151881s > 0.100000s
+exp3_dolt_bushy_128t_crud_tpcc,dolt,bushy,crud,128,0,1,1,1,PARTIAL,13496,7139,0,6357,0.5289715471250741,FAILURE_TIMEOUT,Slow operation: 0.361348s > 0.100000s
+exp3_dolt_bushy_256t_crud_tpcc,dolt,bushy,crud,256,0,1,1,1,PARTIAL,11746,6051,1,5694,0.5151540950110676,FAILURE_TIMEOUT,Slow operation: 0.465886s > 0.100000s
+exp3_dolt_bushy_512t_crud_tpcc,dolt,bushy,crud,512,0,1,1,1,PARTIAL,10572,5213,0,5359,0.49309496783957624,FAILURE_TIMEOUT,Slow operation: 0.335604s > 0.100000s
+exp3_dolt_bushy_1024t_crud_tpcc,dolt,bushy,crud,1024,0,1,1,1,PARTIAL,9925,4535,122,5268,0.45692695214105794,FAILURE_TIMEOUT,"Unknown failure: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE (o_id, o_d_id"
+exp3_dolt_fan_out_1t_branch_tpcc,dolt,fan_out,branch,1,0,1,0,1,SUCCESS,3616,3616,0,0,1.0,,
+exp3_dolt_fan_out_2t_branch_tpcc,dolt,fan_out,branch,2,0,1,0,1,SUCCESS,4292,4292,0,0,1.0,,
+exp3_dolt_fan_out_4t_branch_tpcc,dolt,fan_out,branch,4,0,1,0,1,SUCCESS,4708,4708,0,0,1.0,,
+exp3_dolt_fan_out_8t_branch_tpcc,dolt,fan_out,branch,8,0,1,0,1,PARTIAL,4738,4702,0,36,0.9924018573237653,FAILURE_TIMEOUT,Slow operation: 0.123604s > 0.100000s
+exp3_dolt_fan_out_16t_branch_tpcc,dolt,fan_out,branch,16,0,1,0,1,PARTIAL,4762,3975,0,787,0.8347333053338933,FAILURE_TIMEOUT,Slow operation: 0.131592s > 0.100000s
+exp3_dolt_fan_out_32t_branch_tpcc,dolt,fan_out,branch,32,0,1,0,1,PARTIAL,4672,3123,0,1549,0.6684503424657534,FAILURE_TIMEOUT,Slow operation: 0.102136s > 0.100000s
+exp3_dolt_fan_out_64t_branch_tpcc,dolt,fan_out,branch,64,0,1,0,1,PARTIAL,4688,2747,0,1941,0.5859641638225256,FAILURE_TIMEOUT,Slow operation: 0.365328s > 0.100000s
+exp3_dolt_fan_out_128t_branch_tpcc,dolt,fan_out,branch,128,0,1,0,1,PARTIAL,4676,2560,0,2116,0.5474764756201882,FAILURE_TIMEOUT,Slow operation: 0.599043s > 0.100000s
+exp3_dolt_fan_out_256t_branch_tpcc,dolt,fan_out,branch,256,0,1,0,1,PARTIAL,5004,2625,0,2379,0.5245803357314148,FAILURE_TIMEOUT,Slow operation: 0.154295s > 0.100000s
+exp3_dolt_fan_out_512t_branch_tpcc,dolt,fan_out,branch,512,0,1,0,1,PARTIAL,5490,2822,0,2668,0.5140255009107468,FAILURE_TIMEOUT,Slow operation: 0.864678s > 0.100000s
+exp3_dolt_fan_out_1024t_branch_tpcc,dolt,fan_out,branch,1024,0,1,0,1,PARTIAL,6216,3186,0,3030,0.5125482625482626,FAILURE_TIMEOUT,Slow operation: 0.134189s > 0.100000s
+exp3_dolt_fan_out_1t_crud_tpcc,dolt,fan_out,crud,1,0,1,1,1,SUCCESS,4414,4414,0,0,1.0,,
+exp3_dolt_fan_out_2t_crud_tpcc,dolt,fan_out,crud,2,0,1,1,1,SUCCESS,7156,7156,0,0,1.0,,
+exp3_dolt_fan_out_4t_crud_tpcc,dolt,fan_out,crud,4,0,1,1,1,PARTIAL,9804,9803,0,1,0.9998980008159934,FAILURE_TIMEOUT,Slow operation: 0.100214s > 0.100000s
+exp3_dolt_fan_out_8t_crud_tpcc,dolt,fan_out,crud,8,0,1,1,1,SUCCESS,13969,13969,0,0,1.0,,
+exp3_dolt_fan_out_16t_crud_tpcc,dolt,fan_out,crud,16,0,1,1,1,PARTIAL,13717,13634,0,83,0.9939491142378071,FAILURE_TIMEOUT,Slow operation: 0.100436s > 0.100000s
+exp3_dolt_fan_out_32t_crud_tpcc,dolt,fan_out,crud,32,0,1,1,1,PARTIAL,14316,11138,0,3178,0.7780106174909193,FAILURE_TIMEOUT,Slow operation: 0.122609s > 0.100000s
+exp3_dolt_fan_out_64t_crud_tpcc,dolt,fan_out,crud,64,0,1,1,1,PARTIAL,14236,8162,0,6074,0.573335206518685,FAILURE_TIMEOUT,Slow operation: 0.202503s > 0.100000s
+exp3_dolt_fan_out_128t_crud_tpcc,dolt,fan_out,crud,128,0,1,1,1,PARTIAL,13975,7400,1,6574,0.5295169946332737,FAILURE_TIMEOUT,Slow operation: 0.373904s > 0.100000s
+exp3_dolt_fan_out_256t_crud_tpcc,dolt,fan_out,crud,256,0,1,1,1,PARTIAL,12341,6282,256,5803,0.5090349242362856,FAILURE_TIMEOUT,"Constraint or data issue: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE o_id = %(o_id"
+exp3_dolt_fan_out_512t_crud_tpcc,dolt,fan_out,crud,512,0,1,1,1,PARTIAL,11452,5722,1,5729,0.4996507160321341,FAILURE_TIMEOUT,Slow operation: 1.872730s > 0.100000s
+exp3_dolt_fan_out_1024t_crud_tpcc,dolt,fan_out,crud,1024,0,1,1,1,PARTIAL,9987,4580,247,5160,0.4585961750275358,FAILURE_TIMEOUT,"Unknown failure: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE (o_id, o_d_id"
+exp3_dolt_spine_1t_branch_tpcc,dolt,spine,branch,1,0,1,0,1,SUCCESS,3484,3484,0,0,1.0,,
+exp3_dolt_spine_2t_branch_tpcc,dolt,spine,branch,2,0,1,0,1,SUCCESS,4268,4268,0,0,1.0,,
+exp3_dolt_spine_4t_branch_tpcc,dolt,spine,branch,4,0,1,0,1,SUCCESS,4626,4626,0,0,1.0,,
+exp3_dolt_spine_8t_branch_tpcc,dolt,spine,branch,8,0,1,0,1,PARTIAL,4416,4360,0,56,0.9873188405797102,FAILURE_TIMEOUT,Slow operation: 0.123411s > 0.100000s
+exp3_dolt_spine_16t_branch_tpcc,dolt,spine,branch,16,0,1,0,1,PARTIAL,4642,3849,0,793,0.8291684618698837,FAILURE_TIMEOUT,Slow operation: 0.138953s > 0.100000s
+exp3_dolt_spine_32t_branch_tpcc,dolt,spine,branch,32,0,1,0,1,PARTIAL,4614,3099,0,1515,0.6716514954486346,FAILURE_TIMEOUT,Slow operation: 0.100803s > 0.100000s
+exp3_dolt_spine_64t_branch_tpcc,dolt,spine,branch,64,0,1,0,1,PARTIAL,4486,2621,0,1865,0.5842621489077129,FAILURE_TIMEOUT,Slow operation: 0.549810s > 0.100000s
+exp3_dolt_spine_128t_branch_tpcc,dolt,spine,branch,128,0,1,0,1,PARTIAL,4594,2528,0,2066,0.5502829777971266,FAILURE_TIMEOUT,Slow operation: 0.106433s > 0.100000s
+exp3_dolt_spine_256t_branch_tpcc,dolt,spine,branch,256,0,1,0,1,PARTIAL,4842,2575,0,2267,0.5318050392399835,FAILURE_TIMEOUT,Slow operation: 0.107902s > 0.100000s
+exp3_dolt_spine_512t_branch_tpcc,dolt,spine,branch,512,0,1,0,1,PARTIAL,5450,2817,0,2633,0.5168807339449542,FAILURE_TIMEOUT,Slow operation: 3.203093s > 0.100000s
+exp3_dolt_spine_1024t_branch_tpcc,dolt,spine,branch,1024,0,1,0,1,PARTIAL,6158,3150,0,3008,0.5115297174407275,FAILURE_TIMEOUT,Slow operation: 0.122132s > 0.100000s
+exp3_dolt_spine_1t_crud_tpcc,dolt,spine,crud,1,0,1,1,1,SUCCESS,4463,4463,0,0,1.0,,
+exp3_dolt_spine_2t_crud_tpcc,dolt,spine,crud,2,0,1,1,1,SUCCESS,7548,7548,0,0,1.0,,
+exp3_dolt_spine_4t_crud_tpcc,dolt,spine,crud,4,0,1,1,1,SUCCESS,9889,9889,0,0,1.0,,
+exp3_dolt_spine_8t_crud_tpcc,dolt,spine,crud,8,0,1,1,1,SUCCESS,14103,14103,0,0,1.0,,
+exp3_dolt_spine_16t_crud_tpcc,dolt,spine,crud,16,0,1,1,1,PARTIAL,14955,14943,0,12,0.999197592778335,FAILURE_TIMEOUT,Slow operation: 0.100050s > 0.100000s
+exp3_dolt_spine_32t_crud_tpcc,dolt,spine,crud,32,0,1,1,1,PARTIAL,14666,11472,0,3194,0.7822173735169781,FAILURE_TIMEOUT,Slow operation: 0.103297s > 0.100000s
+exp3_dolt_spine_64t_crud_tpcc,dolt,spine,crud,64,0,1,1,1,PARTIAL,14396,8229,0,6167,0.5716171158655182,FAILURE_TIMEOUT,Slow operation: 0.184499s > 0.100000s
+exp3_dolt_spine_128t_crud_tpcc,dolt,spine,crud,128,0,1,1,1,PARTIAL,14573,7685,462,6426,0.5273450902353668,FAILURE_TIMEOUT,"Constraint or data issue: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE (o_id, o_d_id"
+exp3_dolt_spine_256t_crud_tpcc,dolt,spine,crud,256,0,1,1,1,PARTIAL,11880,6080,1,5799,0.5117845117845118,FAILURE_TIMEOUT,Slow operation: 1.057190s > 0.100000s
+exp3_dolt_spine_512t_crud_tpcc,dolt,spine,crud,512,0,1,1,1,PARTIAL,9379,4529,459,4391,0.48288730141806163,FAILURE_TIMEOUT,"Unknown failure: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE (o_id, o_d_id"
+exp3_dolt_spine_1024t_crud_tpcc,dolt,spine,crud,1024,0,1,1,1,PARTIAL,8496,3683,184,4629,0.4334981167608286,FAILURE_TIMEOUT,"Unknown failure: Error executing sql query: UPDATE orders SET o_c_id = %(o_c_id)s, o_entry_d = %(o_entry_d)s, o_carrier_id = %(o_carrier_id)s, o_ol_cnt = %(o_ol_cnt)s, o_all_local = %(o_all_local)s WHERE o_id = %(o_id"
+exp3_file_copy_bushy_1t_branch_tpcc,file_copy,bushy,branch,1,0,1,0,1,PARTIAL,1506,1495,0,11,0.9926958831341302,FAILURE_TIMEOUT,Slow operation: 0.136423s > 0.100000s
+exp3_file_copy_bushy_2t_branch_tpcc,file_copy,bushy,branch,2,0,1,0,1,PARTIAL,2,0,2,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_4t_branch_tpcc,file_copy,bushy,branch,4,0,1,0,1,PARTIAL,4,0,4,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_8t_branch_tpcc,file_copy,bushy,branch,8,0,1,0,1,PARTIAL,8,0,8,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_16t_branch_tpcc,file_copy,bushy,branch,16,0,1,0,1,PARTIAL,16,0,16,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_32t_branch_tpcc,file_copy,bushy,branch,32,0,1,0,1,PARTIAL,192,0,192,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error creating branch: Error executing sql query: CREATE DATABASE branch_tid4_1 TEMPLATE main STRATEGY = FILE_COPY; None; source database ""main"" is being accessed by other users"
+exp3_file_copy_bushy_64t_branch_tpcc,file_copy,bushy,branch,64,0,1,0,1,PARTIAL,64,0,64,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_128t_branch_tpcc,file_copy,bushy,branch,128,0,1,0,1,PARTIAL,768,0,768,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error creating branch: Error executing sql query: CREATE DATABASE branch_tid115_1 TEMPLATE main STRATEGY = FILE_COPY; None; source database ""main"" is being accessed by other users"
+exp3_file_copy_bushy_256t_branch_tpcc,file_copy,bushy,branch,256,0,1,0,1,PARTIAL,256,0,256,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_512t_branch_tpcc,file_copy,bushy,branch,512,0,1,0,1,PARTIAL,512,0,512,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_1024t_branch_tpcc,file_copy,bushy,branch,1024,0,1,0,1,PARTIAL,1024,0,1024,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_bushy_1t_crud_tpcc,file_copy,bushy,crud,1,0,1,1,1,SUCCESS,81519,81519,0,0,1.0,,
+exp3_file_copy_bushy_2t_crud_tpcc,file_copy,bushy,crud,2,0,1,1,1,SUCCESS,166822,166822,0,0,1.0,,
+exp3_file_copy_bushy_4t_crud_tpcc,file_copy,bushy,crud,4,0,1,1,1,SUCCESS,210640,210640,0,0,1.0,,
+exp3_file_copy_bushy_8t_crud_tpcc,file_copy,bushy,crud,8,0,1,1,1,SUCCESS,209515,209515,0,0,1.0,,
+exp3_file_copy_bushy_16t_crud_tpcc,file_copy,bushy,crud,16,0,1,1,1,SUCCESS,210395,210395,0,0,1.0,,
+exp3_file_copy_bushy_32t_crud_tpcc,file_copy,bushy,crud,32,0,1,1,1,SUCCESS,203955,203955,0,0,1.0,,
+exp3_file_copy_bushy_64t_crud_tpcc,file_copy,bushy,crud,64,0,1,1,1,PARTIAL,194739,194738,0,1,0.999994864921767,FAILURE_TIMEOUT,Slow operation: 0.124954s > 0.100000s
+exp3_file_copy_bushy_128t_crud_tpcc,file_copy,bushy,crud,128,0,1,1,1,PARTIAL,195587,195525,0,62,0.9996830055167266,FAILURE_TIMEOUT,Slow operation: 0.100347s > 0.100000s
+exp3_file_copy_bushy_256t_crud_tpcc,file_copy,bushy,crud,256,0,1,1,1,PARTIAL,135521,132780,0,2741,0.9797743523144015,FAILURE_TIMEOUT,Slow operation: 0.122456s > 0.100000s
+exp3_file_copy_bushy_512t_crud_tpcc,file_copy,bushy,crud,512,0,1,1,1,PARTIAL,847,428,0,419,0.5053128689492326,FAILURE_TIMEOUT,Slow operation: 3.054716s > 0.100000s
+exp3_file_copy_bushy_1024t_crud_tpcc,file_copy,bushy,crud,1024,0,1,1,1,PARTIAL,3189,2201,0,988,0.6901850109752273,FAILURE_TIMEOUT,Slow operation: 0.573577s > 0.100000s
+exp3_file_copy_fan_out_1t_branch_tpcc,file_copy,fan_out,branch,1,0,1,0,1,PARTIAL,1440,1426,0,14,0.9902777777777778,FAILURE_TIMEOUT,Slow operation: 0.141375s > 0.100000s
+exp3_file_copy_fan_out_2t_branch_tpcc,file_copy,fan_out,branch,2,0,1,0,1,PARTIAL,2,0,2,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_4t_branch_tpcc,file_copy,fan_out,branch,4,0,1,0,1,PARTIAL,4,0,4,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_8t_branch_tpcc,file_copy,fan_out,branch,8,0,1,0,1,PARTIAL,8,0,8,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_16t_branch_tpcc,file_copy,fan_out,branch,16,0,1,0,1,PARTIAL,16,0,16,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_32t_branch_tpcc,file_copy,fan_out,branch,32,0,1,0,1,PARTIAL,32,0,32,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_64t_branch_tpcc,file_copy,fan_out,branch,64,0,1,0,1,PARTIAL,64,0,64,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_128t_branch_tpcc,file_copy,fan_out,branch,128,0,1,0,1,PARTIAL,128,0,128,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_256t_branch_tpcc,file_copy,fan_out,branch,256,0,1,0,1,PARTIAL,256,0,256,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_512t_branch_tpcc,file_copy,fan_out,branch,512,0,1,0,1,PARTIAL,1530,0,1530,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; database ""main"" already exists"
+exp3_file_copy_fan_out_1024t_branch_tpcc,file_copy,fan_out,branch,1024,0,1,0,1,PARTIAL,1024,0,1024,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_fan_out_1t_crud_tpcc,file_copy,fan_out,crud,1,0,1,1,1,SUCCESS,80594,80594,0,0,1.0,,
+exp3_file_copy_fan_out_2t_crud_tpcc,file_copy,fan_out,crud,2,0,1,1,1,SUCCESS,143257,143257,0,0,1.0,,
+exp3_file_copy_fan_out_4t_crud_tpcc,file_copy,fan_out,crud,4,0,1,1,1,SUCCESS,188524,188524,0,0,1.0,,
+exp3_file_copy_fan_out_8t_crud_tpcc,file_copy,fan_out,crud,8,0,1,1,1,SUCCESS,185935,185935,0,0,1.0,,
+exp3_file_copy_fan_out_16t_crud_tpcc,file_copy,fan_out,crud,16,0,1,1,1,SUCCESS,201207,201207,0,0,1.0,,
+exp3_file_copy_fan_out_32t_crud_tpcc,file_copy,fan_out,crud,32,0,1,1,1,SUCCESS,193221,193221,0,0,1.0,,
+exp3_file_copy_fan_out_64t_crud_tpcc,file_copy,fan_out,crud,64,0,1,1,1,PARTIAL,174582,174547,0,35,0.9997995211419276,FAILURE_TIMEOUT,Slow operation: 0.135721s > 0.100000s
+exp3_file_copy_fan_out_128t_crud_tpcc,file_copy,fan_out,crud,128,0,1,1,1,PARTIAL,189717,189680,0,37,0.9998049726698187,FAILURE_TIMEOUT,Slow operation: 0.100579s > 0.100000s
+exp3_file_copy_fan_out_256t_crud_tpcc,file_copy,fan_out,crud,256,0,1,1,1,PARTIAL,152346,149885,0,2461,0.9838459821721608,FAILURE_TIMEOUT,Slow operation: 0.111051s > 0.100000s
+exp3_file_copy_fan_out_512t_crud_tpcc,file_copy,fan_out,crud,512,0,1,1,1,PARTIAL,17082,9701,0,7381,0.5679077391406159,FAILURE_TIMEOUT,Slow operation: 0.236636s > 0.100000s
+exp3_file_copy_fan_out_1024t_crud_tpcc,file_copy,fan_out,crud,1024,0,1,1,1,PARTIAL,2925,1818,0,1107,0.6215384615384615,FAILURE_TIMEOUT,Slow operation: 0.310386s > 0.100000s
+exp3_file_copy_spine_1t_branch_tpcc,file_copy,spine,branch,1,0,1,0,1,PARTIAL,1474,1464,0,10,0.9932157394843962,FAILURE_TIMEOUT,Slow operation: 0.163395s > 0.100000s
+exp3_file_copy_spine_2t_branch_tpcc,file_copy,spine,branch,2,0,1,0,1,PARTIAL,2,0,2,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_4t_branch_tpcc,file_copy,spine,branch,4,0,1,0,1,PARTIAL,4,0,4,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_8t_branch_tpcc,file_copy,spine,branch,8,0,1,0,1,PARTIAL,8,0,8,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_16t_branch_tpcc,file_copy,spine,branch,16,0,1,0,1,PARTIAL,16,0,16,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_32t_branch_tpcc,file_copy,spine,branch,32,0,1,0,1,PARTIAL,32,0,32,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_64t_branch_tpcc,file_copy,spine,branch,64,0,1,0,1,PARTIAL,64,0,64,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_128t_branch_tpcc,file_copy,spine,branch,128,0,1,0,1,PARTIAL,128,0,128,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_256t_branch_tpcc,file_copy,spine,branch,256,0,1,0,1,PARTIAL,1260,0,1260,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; database ""main"" already exists"
+exp3_file_copy_spine_512t_branch_tpcc,file_copy,spine,branch,512,0,1,0,1,PARTIAL,512,0,512,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_1024t_branch_tpcc,file_copy,spine,branch,1024,0,1,0,1,PARTIAL,1024,0,1024,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error executing sql query: CREATE DATABASE main TEMPLATE microbench STRATEGY = FILE_COPY; None; source database ""microbench"" is being accessed by other users"
+exp3_file_copy_spine_1t_crud_tpcc,file_copy,spine,crud,1,0,1,1,1,SUCCESS,79512,79512,0,0,1.0,,
+exp3_file_copy_spine_2t_crud_tpcc,file_copy,spine,crud,2,0,1,1,1,SUCCESS,142526,142526,0,0,1.0,,
+exp3_file_copy_spine_4t_crud_tpcc,file_copy,spine,crud,4,0,1,1,1,SUCCESS,202353,202353,0,0,1.0,,
+exp3_file_copy_spine_8t_crud_tpcc,file_copy,spine,crud,8,0,1,1,1,SUCCESS,202136,202136,0,0,1.0,,
+exp3_file_copy_spine_16t_crud_tpcc,file_copy,spine,crud,16,0,1,1,1,SUCCESS,173006,173006,0,0,1.0,,
+exp3_file_copy_spine_32t_crud_tpcc,file_copy,spine,crud,32,0,1,1,1,PARTIAL,128924,128919,0,5,0.9999612174614502,FAILURE_TIMEOUT,Slow operation: 0.105391s > 0.100000s
+exp3_file_copy_spine_64t_crud_tpcc,file_copy,spine,crud,64,0,1,1,1,PARTIAL,92914,92910,0,4,0.9999569494371139,FAILURE_TIMEOUT,Slow operation: 0.115905s > 0.100000s
+exp3_file_copy_spine_128t_crud_tpcc,file_copy,spine,crud,128,0,1,1,1,PARTIAL,56773,54766,0,2007,0.9646486886372043,FAILURE_TIMEOUT,Slow operation: 0.104796s > 0.100000s
+exp3_file_copy_spine_256t_crud_tpcc,file_copy,spine,crud,256,0,1,1,1,PARTIAL,19317,10321,0,8996,0.5342962157684941,FAILURE_TIMEOUT,Slow operation: 0.135745s > 0.100000s
+exp3_file_copy_spine_512t_crud_tpcc,file_copy,spine,crud,512,0,1,1,1,PARTIAL,20,3,0,17,0.15,FAILURE_TIMEOUT,Slow operation: 5.781016s > 0.100000s
+exp3_file_copy_spine_1024t_crud_tpcc,file_copy,spine,crud,1024,124,0,1,1,FAILED,0,0,0,0,0.0,FAILURE_TIMEOUT,Runner timed out after 900s
+exp3_neon_bushy_1t_branch_tpcc,neon,bushy,branch,1,0,1,0,1,PARTIAL,126,0,108,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.167021s > 0.100000s
+exp3_neon_bushy_2t_branch_tpcc,neon,bushy,branch,2,0,1,0,1,PARTIAL,150,0,132,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.167068s > 0.100000s
+exp3_neon_bushy_4t_branch_tpcc,neon,bushy,branch,4,0,1,0,1,PARTIAL,152,0,134,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.160797s > 0.100000s
+exp3_neon_bushy_8t_branch_tpcc,neon,bushy,branch,8,0,1,0,1,PARTIAL,155,0,137,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.144767s > 0.100000s
+exp3_neon_bushy_16t_branch_tpcc,neon,bushy,branch,16,0,1,0,1,PARTIAL,164,0,146,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.233955s > 0.100000s
+exp3_neon_bushy_1t_crud_tpcc,neon,bushy,crud,1,0,1,1,1,PARTIAL,1049,1048,0,1,0.9990467111534795,FAILURE_TIMEOUT,Slow operation: 0.140316s > 0.100000s
+exp3_neon_bushy_2t_crud_tpcc,neon,bushy,crud,2,0,1,1,1,PARTIAL,2092,2091,0,1,0.9995219885277247,FAILURE_TIMEOUT,Slow operation: 0.140451s > 0.100000s
+exp3_neon_bushy_4t_crud_tpcc,neon,bushy,crud,4,0,1,1,1,PARTIAL,4093,4091,0,2,0.9995113608600049,FAILURE_TIMEOUT,Slow operation: 0.139000s > 0.100000s
+exp3_neon_bushy_8t_crud_tpcc,neon,bushy,crud,8,0,1,1,1,PARTIAL,7974,7970,0,4,0.9994983697015299,FAILURE_TIMEOUT,Slow operation: 0.139631s > 0.100000s
+exp3_neon_bushy_16t_crud_tpcc,neon,bushy,crud,16,0,1,0,1,PARTIAL,1,0,1,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error creating branch: {""request_id"":""128d6fb3-1acb-4082-8709-8f7d14115f75"",""code"":""BRANCHES_LIMIT_EXCEEDED"",""message"":""branches limit exceeded""}"
+exp3_neon_fan_out_1t_branch_tpcc,neon,fan_out,branch,1,0,1,0,1,PARTIAL,132,0,114,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.147670s > 0.100000s
+exp3_neon_fan_out_2t_branch_tpcc,neon,fan_out,branch,2,0,1,0,1,PARTIAL,148,0,130,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.200746s > 0.100000s
+exp3_neon_fan_out_4t_branch_tpcc,neon,fan_out,branch,4,0,1,0,1,PARTIAL,152,0,134,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.157361s > 0.100000s
+exp3_neon_fan_out_8t_branch_tpcc,neon,fan_out,branch,8,0,1,0,1,PARTIAL,155,0,137,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.148192s > 0.100000s
+exp3_neon_fan_out_16t_branch_tpcc,neon,fan_out,branch,16,0,1,0,1,PARTIAL,163,0,145,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.208541s > 0.100000s
+exp3_neon_fan_out_1t_crud_tpcc,neon,fan_out,crud,1,0,1,1,1,PARTIAL,1189,1188,0,1,0.9991589571068125,FAILURE_TIMEOUT,Slow operation: 0.146337s > 0.100000s
+exp3_neon_fan_out_2t_crud_tpcc,neon,fan_out,crud,2,0,1,1,1,PARTIAL,2170,2169,0,1,0.9995391705069124,FAILURE_TIMEOUT,Slow operation: 0.139057s > 0.100000s
+exp3_neon_fan_out_4t_crud_tpcc,neon,fan_out,crud,4,0,1,1,1,PARTIAL,4173,4170,0,3,0.9992810927390366,FAILURE_TIMEOUT,Slow operation: 0.101353s > 0.100000s
+exp3_neon_fan_out_8t_crud_tpcc,neon,fan_out,crud,8,0,1,1,1,SUCCESS,8706,8706,0,0,1.0,,
+exp3_neon_fan_out_16t_crud_tpcc,neon,fan_out,crud,16,0,1,0,1,PARTIAL,1,0,1,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error creating branch: {""request_id"":""eb4c30a2-637b-4289-ada4-75f0bd388a4d"",""code"":""BRANCHES_LIMIT_EXCEEDED"",""message"":""branches limit exceeded""}"
+exp3_neon_spine_1t_branch_tpcc,neon,spine,branch,1,0,1,0,1,PARTIAL,130,0,112,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.169821s > 0.100000s
+exp3_neon_spine_2t_branch_tpcc,neon,spine,branch,2,0,1,0,1,PARTIAL,150,0,132,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.145695s > 0.100000s
+exp3_neon_spine_4t_branch_tpcc,neon,spine,branch,4,0,1,0,1,PARTIAL,152,0,134,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.158831s > 0.100000s
+exp3_neon_spine_8t_branch_tpcc,neon,spine,branch,8,0,1,0,1,PARTIAL,155,0,137,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.196835s > 0.100000s
+exp3_neon_spine_16t_branch_tpcc,neon,spine,branch,16,0,1,0,1,PARTIAL,164,0,146,18,0.0,FAILURE_BACKEND_STATE_CONFLICT,Slow operation: 0.173022s > 0.100000s
+exp3_neon_spine_1t_crud_tpcc,neon,spine,crud,1,0,1,1,1,SUCCESS,1134,1134,0,0,1.0,,
+exp3_neon_spine_2t_crud_tpcc,neon,spine,crud,2,0,1,1,1,PARTIAL,2211,2210,0,1,0.9995477159656264,FAILURE_TIMEOUT,Slow operation: 0.138745s > 0.100000s
+exp3_neon_spine_4t_crud_tpcc,neon,spine,crud,4,0,1,1,1,PARTIAL,4499,4498,0,1,0.9997777283840854,FAILURE_TIMEOUT,Slow operation: 0.100215s > 0.100000s
+exp3_neon_spine_8t_crud_tpcc,neon,spine,crud,8,0,1,1,1,PARTIAL,8788,8785,0,3,0.9996586253982703,FAILURE_TIMEOUT,Slow operation: 0.136056s > 0.100000s
+exp3_neon_spine_16t_crud_tpcc,neon,spine,crud,16,0,1,0,1,PARTIAL,1,0,1,0,0.0,FAILURE_BACKEND_STATE_CONFLICT,"Backend state conflict: Error creating branch: {""request_id"":""1dc1fe5d-c86e-46d6-b9fb-5dc856a977f6"",""code"":""BRANCHES_LIMIT_EXCEEDED"",""message"":""branches limit exceeded""}"

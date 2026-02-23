@@ -8,7 +8,7 @@ Dolt, PostgreSQL CoW, Neon, and Xata.
 | 0 | 2026-02-01 | Branch creation storage scaling (spine topology) | Done | [README](experiment-0-2026-02-01/README.md), [report](experiment-0-2026-02-01/results/report.md) |
 | 1 | 2026-02-08 | Branch creation storage overhead (varying topology) | Done | [README](experiment-1-2026-02-08/README.md) |
 | 2 | 2026-02-08 | Update storage overhead (per-op deltas) | Done | [README](experiment-2-2026-02-08/README.md) |
-| 3 | 2026-02-18 | Operation throughput under branching | Planning | [README](experiment-3-throughput/README.md), [plan](experiment-3-throughput/PLAN.md) |
+| 3 | 2026-02-18 | Operation throughput under branching | Planning | [README](experiment-3-throughput/README.md), [plan](experiment-3-throughput/results/docs/PLAN.md) |
 
 ## Backend Branching Mechanisms
 
