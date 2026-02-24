@@ -1,7 +1,6 @@
-# Failure Reproduction workflow — Neon backend
-# Flat star with gamma=1 keeps alive count low.
+# Failure Reproduction workflow — mini scale for Neon.
 
-run_id: "macro_failure_repro_neon"
+run_id: "macro_failure_repro_mini"
 backend: NEON
 workflow: FAILURE_REPRO
 
@@ -9,16 +8,17 @@ database_setup {
     db_name: "macrobench_failrepro"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
+        sql_dump_path: "db_setup/ch-w1.sql"
     }
 }
 
 setup {
-    workers: 1              # T
-    total_steps: 10         # S
-    root_fanout: 10         # F_r
+    workers: 1              # T  (full: 1)
+    total_steps: 10          # S  (full: 10)
+    root_fanout: 10          # F_r (full: 10)
     max_depth: 1            # D
     cross_branch_queries: 0 # C
+    db_scale: 1
 }
 
 step {

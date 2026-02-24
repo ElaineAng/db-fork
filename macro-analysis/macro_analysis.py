@@ -18,6 +18,7 @@ import os
 import numpy as np
 import pyarrow.parquet as pq
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
@@ -35,7 +36,7 @@ OP_NAMES = {
     6: "COMMIT",
     7: "DDL",
     8: "BRANCH_DELETE",
-    9: "MERGE",
+    9: "API_RETRY_WAIT",
 }
 
 # Short labels for plots
@@ -48,7 +49,7 @@ OP_SHORT = {
     6: "Commit",
     7: "DDL",
     8: "Delete\nBranch",
-    9: "Merge",
+    9: "API\nRetry",
 }
 
 WORKFLOW_LABELS = {
@@ -59,22 +60,29 @@ WORKFLOW_LABELS = {
     "simulation": "Simulation",
 }
 
-WORKFLOW_ORDER = ["software_dev", "failure_repro", "data_cleaning", "mcts", "simulation"]
+WORKFLOW_ORDER = [
+    "software_dev",
+    "failure_repro",
+    "data_cleaning",
+    "mcts",
+    "simulation",
+]
 
-# Branch management ops vs data ops
-BRANCH_OPS = {1, 2, 8, 9}  # create, connect, delete, merge
-DATA_OPS = {3, 4, 5, 7}     # read, insert, update, ddl
+# Branch management ops vs data ops vs overhead
+BRANCH_OPS = {1, 2, 8}  # create, connect, delete
+DATA_OPS = {3, 4, 5, 7}  # read, insert, update, ddl
+OVERHEAD_OPS = {9}       # API retry wait
 
 COLORS = {
-    1: "#2176AE",   # branch create — blue
-    2: "#7FBBDC",   # branch connect — light blue
-    3: "#57B894",   # read — green
-    4: "#F5A623",   # insert — orange
-    5: "#E8554E",   # update — red
-    6: "#B0B0B0",   # commit — gray
-    7: "#9B59B6",   # DDL — purple
-    8: "#3498DB",   # branch delete — blue
-    9: "#E67E22",   # merge — dark orange
+    1: "#2176AE",  # branch create — blue
+    2: "#7FBBDC",  # branch connect — light blue
+    3: "#57B894",  # read — green
+    4: "#F5A623",  # insert — orange
+    5: "#E8554E",  # update — red
+    6: "#B0B0B0",  # commit — gray
+    7: "#9B59B6",  # DDL — purple
+    8: "#3498DB",  # branch delete — blue
+    9: "#E74C3C",  # API retry wait — red
 }
 
 WF_COLORS = {
@@ -88,25 +96,45 @@ WF_COLORS = {
 
 # ── Data loading ─────────────────────────────────────────────────────
 
+
 def load_all_workflows(indir, suffix=""):
     """Load all macro_*.parquet files, return dict of {workflow_name: DataFrame}.
 
     Args:
         indir: directory containing parquet files
-        suffix: optional suffix before .parquet, e.g. "_neon" for macro_*_neon.parquet
+        suffix: optional suffix before .parquet, e.g. "_neon" for macro_*_neon.parquet.
+            If empty, auto-detects by scanning for files matching macro_{workflow}*.parquet.
     """
+    import glob
+
     workflows = {}
     for wf in WORKFLOW_ORDER:
-        path = os.path.join(indir, f"macro_{wf}{suffix}.parquet")
-        if os.path.exists(path):
-            df = pq.read_table(path).to_pandas()
-            workflows[wf] = df
+        if suffix:
+            path = os.path.join(indir, f"macro_{wf}{suffix}.parquet")
+            if os.path.exists(path):
+                df = pq.read_table(path).to_pandas()
+                workflows[wf] = df
+            else:
+                print(f"  Warning: {path} not found, skipping.")
         else:
-            print(f"  Warning: {path} not found, skipping.")
+            # Auto-detect: find any file matching macro_{wf}*.parquet
+            pattern = os.path.join(indir, f"macro_{wf}*.parquet")
+            matches = sorted(glob.glob(pattern))
+            if matches:
+                path = matches[0]
+                df = pq.read_table(path).to_pandas()
+                workflows[wf] = df
+                if len(matches) > 1:
+                    print(
+                        f"  Note: multiple files for {wf}, using {os.path.basename(path)}"
+                    )
+            else:
+                print(f"  Warning: no macro_{wf}*.parquet in {indir}, skipping.")
     return workflows
 
 
 # ── Plot 1: Latency by operation type (per workflow) ─────────────────
+
 
 def plot_latency_by_op(workflows, outdir):
     """Box plots of latency by operation type, one subplot per workflow."""
@@ -142,12 +170,18 @@ def plot_latency_by_op(workflows, outdir):
             patch.set_alpha(0.7)
 
         ax.set_ylabel("Latency (ms)" if ax == axes[0] else "", fontsize=10)
-        ax.set_title(WORKFLOW_LABELS.get(wf, wf), fontsize=11, fontweight="bold")
+        ax.set_title(
+            WORKFLOW_LABELS.get(wf, wf), fontsize=11, fontweight="bold"
+        )
         ax.tick_params(axis="x", labelsize=8)
         ax.grid(True, alpha=0.3, axis="y")
 
-    fig.suptitle("Operation Latency by Workflow Category",
-                 fontsize=14, fontweight="bold", y=1.02)
+    fig.suptitle(
+        "Operation Latency by Workflow Category",
+        fontsize=14,
+        fontweight="bold",
+        y=1.02,
+    )
     fig.tight_layout()
     path = os.path.join(outdir, "latency_by_op_type.pdf")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -156,6 +190,7 @@ def plot_latency_by_op(workflows, outdir):
 
 
 # ── Plot 2: Throughput comparison ────────────────────────────────────
+
 
 def plot_throughput(workflows, outdir):
     """Bar chart: total ops/sec and branch ops/sec per workflow."""
@@ -174,30 +209,58 @@ def plot_throughput(workflows, outdir):
         branch_ops_count.append(len(df[df.op_type.isin(BRANCH_OPS)]))
         data_ops_count.append(len(df[df.op_type.isin(DATA_OPS)]))
 
-    throughputs = [n / t if t > 0 else 0 for n, t in zip(total_ops, total_times)]
-    branch_throughputs = [n / t if t > 0 else 0
-                          for n, t in zip(branch_ops_count, total_times)]
-    data_throughputs = [n / t if t > 0 else 0
-                        for n, t in zip(data_ops_count, total_times)]
+    throughputs = [
+        n / t if t > 0 else 0 for n, t in zip(total_ops, total_times)
+    ]
+    branch_throughputs = [
+        n / t if t > 0 else 0 for n, t in zip(branch_ops_count, total_times)
+    ]
+    data_throughputs = [
+        n / t if t > 0 else 0 for n, t in zip(data_ops_count, total_times)
+    ]
 
     x = np.arange(len(wf_names))
     bar_width = 0.25
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
-    ax.bar(x - bar_width, throughputs, bar_width,
-           label="Total", color="#2176AE", edgecolor="white", linewidth=0.5)
-    ax.bar(x, data_throughputs, bar_width,
-           label="Data Ops", color="#57B894", edgecolor="white", linewidth=0.5)
-    ax.bar(x + bar_width, branch_throughputs, bar_width,
-           label="Branch Ops", color="#F5A623", edgecolor="white", linewidth=0.5)
+    ax.bar(
+        x - bar_width,
+        throughputs,
+        bar_width,
+        label="Total",
+        color="#2176AE",
+        edgecolor="white",
+        linewidth=0.5,
+    )
+    ax.bar(
+        x,
+        data_throughputs,
+        bar_width,
+        label="Data Ops",
+        color="#57B894",
+        edgecolor="white",
+        linewidth=0.5,
+    )
+    ax.bar(
+        x + bar_width,
+        branch_throughputs,
+        bar_width,
+        label="Branch Ops",
+        color="#F5A623",
+        edgecolor="white",
+        linewidth=0.5,
+    )
 
     ax.set_xlabel("Workflow Category", fontsize=12)
     ax.set_ylabel("Throughput (ops/sec)", fontsize=12)
-    ax.set_title("Throughput by Workflow Category",
-                 fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Throughput by Workflow Category", fontsize=13, fontweight="bold"
+    )
     ax.set_xticks(x)
-    ax.set_xticklabels([WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names])
+    ax.set_xticklabels(
+        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names]
+    )
     ax.legend(fontsize=10, framealpha=0.9)
     ax.grid(True, alpha=0.3, axis="y")
 
@@ -210,70 +273,118 @@ def plot_throughput(workflows, outdir):
 
 # ── Plot 3: Branch vs. data cost breakdown ───────────────────────────
 
+
 def plot_cost_breakdown(workflows, outdir):
-    """Stacked bar: time spent on branch ops vs data ops per workflow."""
+    """Horizontal stacked bar: percentage of time on branch ops vs data ops vs API retry."""
     wf_names = [wf for wf in WORKFLOW_ORDER if wf in workflows]
 
     branch_times = []
     data_times = []
+    retry_times = []
 
     for wf in wf_names:
         df = workflows[wf]
         bt = df[df.op_type.isin(BRANCH_OPS)]["latency"].sum() * 1000  # ms
         dt = df[df.op_type.isin(DATA_OPS)]["latency"].sum() * 1000
+        rt = df[df.op_type.isin(OVERHEAD_OPS)]["latency"].sum() * 1000
         branch_times.append(bt)
         data_times.append(dt)
+        retry_times.append(rt)
 
     x = np.arange(len(wf_names))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    totals = [b + d + r for b, d, r in zip(branch_times, data_times, retry_times)]
+    branch_pcts = [
+        b / t * 100 if t > 0 else 0 for b, t in zip(branch_times, totals)
+    ]
+    data_pcts = [
+        d / t * 100 if t > 0 else 0 for d, t in zip(data_times, totals)
+    ]
+    retry_pcts = [
+        r / t * 100 if t > 0 else 0 for r, t in zip(retry_times, totals)
+    ]
 
-    # Absolute time
-    ax1.bar(x, data_times, label="Data Ops", color="#57B894",
-            edgecolor="white", linewidth=0.5)
-    ax1.bar(x, branch_times, bottom=data_times, label="Branch Ops",
-            color="#F5A623", edgecolor="white", linewidth=0.5)
-    ax1.set_ylabel("Total Time (ms)", fontsize=11)
-    ax1.set_title("Absolute Time", fontsize=12, fontweight="bold")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels([WORKFLOW_LABELS.get(wf, wf).replace("\n", " ")
-                          for wf in wf_names], fontsize=9)
-    ax1.legend(fontsize=9, framealpha=0.9)
-    ax1.grid(True, alpha=0.3, axis="y")
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    # Percentage breakdown
-    totals = [b + d for b, d in zip(branch_times, data_times)]
-    branch_pcts = [b / t * 100 if t > 0 else 0 for b, t in zip(branch_times, totals)]
-    data_pcts = [d / t * 100 if t > 0 else 0 for d, t in zip(data_times, totals)]
-
-    ax2.barh(x, data_pcts, label="Data Ops", color="#57B894",
-             edgecolor="white", linewidth=0.5)
-    ax2.barh(x, branch_pcts, left=data_pcts, label="Branch Ops",
-             color="#F5A623", edgecolor="white", linewidth=0.5)
+    ax.barh(
+        x,
+        data_pcts,
+        label="Data Ops",
+        color="#57B894",
+        edgecolor="white",
+        linewidth=0.5,
+    )
+    ax.barh(
+        x,
+        branch_pcts,
+        left=data_pcts,
+        label="Branch Ops",
+        color="#F5A623",
+        edgecolor="white",
+        linewidth=0.5,
+    )
+    left2 = [d + b for d, b in zip(data_pcts, branch_pcts)]
+    ax.barh(
+        x,
+        retry_pcts,
+        left=left2,
+        label="API Retry Wait",
+        color="#E74C3C",
+        edgecolor="white",
+        linewidth=0.5,
+    )
 
     # Annotate percentages
     for i in range(len(wf_names)):
         if data_pcts[i] > 8:
-            ax2.text(data_pcts[i] / 2, i, f"{data_pcts[i]:.0f}%",
-                     ha="center", va="center", fontsize=10, fontweight="bold",
-                     color="white")
+            ax.text(
+                data_pcts[i] / 2,
+                i,
+                f"{data_pcts[i]:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                color="white",
+            )
         if branch_pcts[i] > 8:
-            ax2.text(data_pcts[i] + branch_pcts[i] / 2, i,
-                     f"{branch_pcts[i]:.0f}%",
-                     ha="center", va="center", fontsize=10, fontweight="bold",
-                     color="white")
+            ax.text(
+                data_pcts[i] + branch_pcts[i] / 2,
+                i,
+                f"{branch_pcts[i]:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                color="white",
+            )
+        if retry_pcts[i] > 5:
+            ax.text(
+                left2[i] + retry_pcts[i] / 2,
+                i,
+                f"{retry_pcts[i]:.0f}%",
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                color="white",
+            )
 
-    ax2.set_xlabel("Time (%)", fontsize=11)
-    ax2.set_title("Relative Breakdown", fontsize=12, fontweight="bold")
-    ax2.set_yticks(x)
-    ax2.set_yticklabels([WORKFLOW_LABELS.get(wf, wf).replace("\n", " ")
-                          for wf in wf_names], fontsize=9)
-    ax2.set_xlim(0, 100)
-    ax2.legend(fontsize=9, framealpha=0.9, loc="lower right")
-    ax2.grid(True, alpha=0.3, axis="x")
+    ax.set_xlabel("Time (%)", fontsize=11)
+    ax.set_title(
+        "Branch Management vs. Data Operation Cost",
+        fontsize=13,
+        fontweight="bold",
+    )
+    ax.set_yticks(x)
+    ax.set_yticklabels(
+        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names],
+        fontsize=9,
+    )
+    ax.set_xlim(0, 100)
+    ax.legend(fontsize=9, framealpha=0.9, loc="lower right")
+    ax.grid(True, alpha=0.3, axis="x")
 
-    fig.suptitle("Branch Management vs. Data Operation Cost",
-                 fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     path = os.path.join(outdir, "cost_breakdown.pdf")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -282,6 +393,7 @@ def plot_cost_breakdown(workflows, outdir):
 
 
 # ── Plot 4: Latency CDF per workflow ─────────────────────────────────
+
 
 def plot_latency_cdf(workflows, outdir):
     """CDF of all operation latencies, one line per workflow."""
@@ -298,8 +410,11 @@ def plot_latency_cdf(workflows, outdir):
 
     ax.set_xlabel("Latency (ms)", fontsize=12)
     ax.set_ylabel("CDF", fontsize=12)
-    ax.set_title("Cumulative Latency Distribution by Workflow",
-                 fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Cumulative Latency Distribution by Workflow",
+        fontsize=13,
+        fontweight="bold",
+    )
     ax.set_xscale("log")
     ax.legend(fontsize=10, framealpha=0.9, loc="lower right")
     ax.grid(True, alpha=0.3)
@@ -314,11 +429,12 @@ def plot_latency_cdf(workflows, outdir):
 
 # ── Plot 5: Per-op-type median latency heatmap ───────────────────────
 
+
 def plot_latency_heatmap(workflows, outdir):
     """Heatmap: rows = workflows, columns = op types, cells = median latency."""
-    all_ops = sorted(set(
-        int(op) for df in workflows.values() for op in df.op_type.unique()
-    ))
+    all_ops = sorted(
+        set(int(op) for df in workflows.values() for op in df.op_type.unique())
+    )
     # Filter to non-trivial ops
     all_ops = [op for op in all_ops if op != 0]
     wf_names = [wf for wf in WORKFLOW_ORDER if wf in workflows]
@@ -343,11 +459,15 @@ def plot_latency_heatmap(workflows, outdir):
     im = ax.imshow(log_data, cmap="YlOrRd", aspect="auto")
 
     ax.set_xticks(range(len(all_ops)))
-    ax.set_xticklabels([OP_SHORT.get(op, str(op)).replace("\n", " ")
-                         for op in all_ops], fontsize=10)
+    ax.set_xticklabels(
+        [OP_SHORT.get(op, str(op)).replace("\n", " ") for op in all_ops],
+        fontsize=10,
+    )
     ax.set_yticks(range(len(wf_names)))
-    ax.set_yticklabels([WORKFLOW_LABELS.get(wf, wf).replace("\n", " ")
-                         for wf in wf_names], fontsize=10)
+    ax.set_yticklabels(
+        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names],
+        fontsize=10,
+    )
 
     # Annotate cells with actual latency values
     for i in range(len(wf_names)):
@@ -364,17 +484,35 @@ def plot_latency_heatmap(workflows, outdir):
                 log_val = np.log10(val) if val > 0 else 0
                 log_max = np.nanmax(log_data)
                 text_color = "white" if log_val > log_max * 0.6 else "black"
-                ax.text(j, i, text, ha="center", va="center",
-                        fontsize=8, color=text_color, fontweight="bold")
+                ax.text(
+                    j,
+                    i,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=text_color,
+                    fontweight="bold",
+                )
             else:
-                ax.text(j, i, "--", ha="center", va="center",
-                        fontsize=9, color="#cccccc")
+                ax.text(
+                    j,
+                    i,
+                    "--",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#cccccc",
+                )
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label("log10(median latency in ms)", fontsize=10)
 
-    ax.set_title("Median Latency by Operation Type and Workflow (ms)",
-                 fontsize=13, fontweight="bold")
+    ax.set_title(
+        "Median Latency by Operation Type and Workflow (ms)",
+        fontsize=13,
+        fontweight="bold",
+    )
 
     fig.tight_layout()
     path = os.path.join(outdir, "latency_heatmap.pdf")
@@ -385,9 +523,14 @@ def plot_latency_heatmap(workflows, outdir):
 
 # ── Plot 6: Per-step timeline ────────────────────────────────────────
 
+
 def plot_step_timeline(workflows, outdir):
     """Timeline: cumulative latency over iteration number, per workflow.
-    Shows how cost accumulates through the workflow steps."""
+    Shows how cost accumulates through the workflow steps.
+    Segments are colored by two groups: branching ops vs DDL/DML ops."""
+    COLOR_BRANCH = "#F5A623"  # orange — branch create/connect/delete
+    COLOR_DATA = "#2176AE"    # blue   — read/insert/update/ddl/commit
+
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
     axes_flat = axes.flatten()
 
@@ -404,32 +547,53 @@ def plot_step_timeline(workflows, outdir):
             cum_lat = sub["latency"].cumsum().values * 1000  # ms
             iters = range(len(cum_lat))
 
-            # Color segments by op type
+            # Color segments by group: branching vs data/DDL
             ops = sub["op_type"].values
-            lats = sub["latency"].values * 1000
             x_prev, y_prev = 0, 0
             for k in range(len(cum_lat)):
-                color = COLORS.get(int(ops[k]), "#999999")
-                ax.plot([k, k + 1], [y_prev, cum_lat[k]],
-                        color=color, linewidth=1.2, alpha=0.7)
+                color = COLOR_BRANCH if int(ops[k]) in BRANCH_OPS else COLOR_DATA
+                ax.plot(
+                    [k, k + 1],
+                    [y_prev, cum_lat[k]],
+                    color=color,
+                    linewidth=1.2,
+                    alpha=0.7,
+                )
                 y_prev = cum_lat[k]
 
         ax.set_xlabel("Operation #", fontsize=10)
-        ax.set_ylabel("Cumulative Latency (ms)" if idx % 3 == 0 else "", fontsize=10)
-        ax.set_title(WORKFLOW_LABELS.get(wf, wf).replace("\n", " "),
-                     fontsize=11, fontweight="bold")
+        ax.set_ylabel(
+            "Cumulative Latency (ms)" if idx % 3 == 0 else "", fontsize=10
+        )
+        ax.set_title(
+            WORKFLOW_LABELS.get(wf, wf).replace("\n", " "),
+            fontsize=11,
+            fontweight="bold",
+        )
         ax.grid(True, alpha=0.3)
 
     # Legend in the empty 6th subplot
     ax_legend = axes_flat[5]
     ax_legend.axis("off")
-    handles = [Patch(facecolor=COLORS.get(op, "#999"), label=OP_SHORT.get(op, "").replace("\n", " "))
-               for op in sorted(COLORS.keys()) if op in OP_SHORT]
-    ax_legend.legend(handles=handles, loc="center", fontsize=10, ncol=2,
-                     title="Operation Type", title_fontsize=11)
+    handles = [
+        Patch(facecolor=COLOR_BRANCH, label="Branch Ops (create/connect/delete)"),
+        Patch(facecolor=COLOR_DATA, label="Data Ops (read/insert/update/DDL/commit)"),
+    ]
+    ax_legend.legend(
+        handles=handles,
+        loc="center",
+        fontsize=11,
+        ncol=1,
+        title="Operation Group",
+        title_fontsize=12,
+    )
 
-    fig.suptitle("Cumulative Latency Timeline per Workflow",
-                 fontsize=14, fontweight="bold", y=1.01)
+    fig.suptitle(
+        "Cumulative Latency Timeline per Workflow",
+        fontsize=14,
+        fontweight="bold",
+        y=1.01,
+    )
     fig.tight_layout()
     path = os.path.join(outdir, "step_timeline.pdf")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -439,15 +603,18 @@ def plot_step_timeline(workflows, outdir):
 
 # ── Summary table ────────────────────────────────────────────────────
 
+
 def print_summary(workflows, backend_label="Dolt"):
     """Print a text summary table."""
     print("\n" + "=" * 100)
     print(f"Macrobenchmark Summary ({backend_label} Backend)")
     print("=" * 100)
 
-    header = (f"{'Workflow':>20} | {'Ops':>6} | {'Threads':>7} | "
-              f"{'Total (ms)':>10} | {'Median (ms)':>11} | {'P95 (ms)':>10} | "
-              f"{'Branch %':>8} | {'Ops/sec':>8}")
+    header = (
+        f"{'Workflow':>20} | {'Ops':>6} | {'Threads':>7} | "
+        f"{'Total (ms)':>10} | {'Median (ms)':>11} | {'P95 (ms)':>10} | "
+        f"{'Branch %':>8} | {'Retries':>7} | {'Retry (ms)':>10} | {'Ops/sec':>8}"
+    )
     print(header)
     print("-" * len(header))
 
@@ -455,25 +622,30 @@ def print_summary(workflows, backend_label="Dolt"):
         if wf not in workflows:
             continue
         df = workflows[wf]
-        n_ops = len(df)
+        n_ops = len(df[~df.op_type.isin(OVERHEAD_OPS)])
         n_threads = df.thread_id.nunique()
         total_ms = df.latency.sum() * 1000
-        median_ms = df.latency.median() * 1000
-        p95_ms = df.latency.quantile(0.95) * 1000
+        median_ms = df[~df.op_type.isin(OVERHEAD_OPS)].latency.median() * 1000
+        p95_ms = df[~df.op_type.isin(OVERHEAD_OPS)].latency.quantile(0.95) * 1000
         branch_ms = df[df.op_type.isin(BRANCH_OPS)].latency.sum() * 1000
         branch_pct = branch_ms / total_ms * 100 if total_ms > 0 else 0
+        retry_df = df[df.op_type.isin(OVERHEAD_OPS)]
+        n_retries = len(retry_df)
+        retry_ms = retry_df.latency.sum() * 1000
         ops_sec = n_ops / (total_ms / 1000) if total_ms > 0 else 0
 
         label = WORKFLOW_LABELS.get(wf, wf).replace("\n", " ")
-        print(f"{label:>20} | {n_ops:>6} | {n_threads:>7} | "
-              f"{total_ms:>10.1f} | {median_ms:>11.2f} | {p95_ms:>10.2f} | "
-              f"{branch_pct:>7.1f}% | {ops_sec:>8.1f}")
+        print(
+            f"{label:>20} | {n_ops:>6} | {n_threads:>7} | "
+            f"{total_ms:>10.1f} | {median_ms:>11.2f} | {p95_ms:>10.2f} | "
+            f"{branch_pct:>7.1f}% | {n_retries:>7} | {retry_ms:>10.1f} | {ops_sec:>8.1f}"
+        )
 
     # Per-op-type summary
     print(f"\n{'Per-Operation-Type Median Latency (ms)':^100}")
-    all_ops = sorted(set(
-        int(op) for df in workflows.values() for op in df.op_type.unique()
-    ))
+    all_ops = sorted(
+        set(int(op) for df in workflows.values() for op in df.op_type.unique())
+    )
     all_ops = [op for op in all_ops if op != 0]
 
     header2 = f"{'Workflow':>20}"
@@ -499,24 +671,33 @@ def print_summary(workflows, backend_label="Dolt"):
 
 # ── Main ─────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze macrobenchmark results across all 5 workflow categories."
     )
     parser.add_argument(
-        "--indir", type=str, default="/tmp/run_stats",
+        "--indir",
+        type=str,
+        default="/tmp/run_stats",
         help="Directory containing macro_*.parquet files.",
     )
     parser.add_argument(
-        "--outdir", type=str, default="analysis/figures_macro",
+        "--outdir",
+        type=str,
+        default="analysis/figures_macro",
         help="Directory to save figures.",
     )
     parser.add_argument(
-        "--suffix", type=str, default="",
+        "--suffix",
+        type=str,
+        default="",
         help="File suffix before .parquet, e.g. '_neon' for macro_*_neon.parquet.",
     )
     parser.add_argument(
-        "--backend-label", type=str, default=None,
+        "--backend-label",
+        type=str,
+        default=None,
         help="Backend name for titles, e.g. 'Neon' or 'Dolt'. Auto-detected from suffix if not set.",
     )
     args = parser.parse_args()

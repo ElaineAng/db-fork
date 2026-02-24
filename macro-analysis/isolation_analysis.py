@@ -28,20 +28,21 @@ from matplotlib.patches import Patch
 def _short_query_name(sql):
     """Extract a short label from the SQL query text."""
     sql_lower = sql.strip().lower()
-    if "ol_number" in sql_lower and "sum(ol_quantity)" in sql_lower:
-        return "Q1 Pricing"
-    if "ol_quantity between" in sql_lower and "ol_amount between" in sql_lower:
-        return "Q6 Revenue"
-    if "o_carrier_id" in sql_lower and "high_line" in sql_lower:
-        return "Q12 Shipping"
-    if "w.w_name" in sql_lower and "revenue" in sql_lower:
-        return "Q5 Warehouse"
-    if "low_stock" in sql_lower:
-        return "WF What-If"
-    if "stddev" in sql_lower and "total_spend" in sql_lower:
-        return "WF Curation"
-    if "stockouts" in sql_lower or "avg_stock" in sql_lower:
-        return "WF Simulation"
+    # Workflow-derived analytical queries (isolation_bench.py)
+    if "c_credit = 'bc'" in sql_lower and "count(*)" in sql_lower:
+        return "Credit Count"
+    if "c_credit" in sql_lower and "avg(c_ytd_payment)" in sql_lower:
+        return "Credit Dist"
+    if "o_ol_cnt" in sql_lower and "count(*)" in sql_lower and "ol_o_id" in sql_lower:
+        return "OL Mismatch"
+    if "c_balance < 0" in sql_lower:
+        return "Neg Balance"
+    if "c_balance is null" in sql_lower and "spread" in sql_lower:
+        return "Null+Spread"
+    if "ol_amount" in sql_lower and "warehouse" in sql_lower:
+        return "Fulfill Cost"
+    if "stockouts" in sql_lower:
+        return "Stockout+Cost"
     # Fallback: first 30 chars
     return sql.strip()[:30]
 

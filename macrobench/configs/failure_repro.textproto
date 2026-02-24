@@ -20,6 +20,7 @@ setup {
     root_fanout: 10         # F_r
     max_depth: 1            # D
     cross_branch_queries: 0 # C (no cross-branch queries)
+    db_scale: 1            # 10 warehouses, 1K items, 100 cust/district
 }
 
 step {

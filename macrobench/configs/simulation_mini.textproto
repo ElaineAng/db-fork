@@ -1,8 +1,7 @@
-# MC Simulation workflow — Neon backend
-# Reduced from T=1000 to fit 20-branch limit.
-# gamma=1 prunes every branch so alive count stays low.
+# MC Simulation workflow — mini scale for Neon.
+# Flat star shape preserved, just far fewer workers.
 
-run_id: "macro_simulation_neon"
+run_id: "macro_simulation_mini"
 backend: NEON
 workflow: SIMULATION
 
@@ -10,16 +9,17 @@ database_setup {
     db_name: "macrobench_sim"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
+        sql_dump_path: "db_setup/ch-w1.sql"
     }
 }
 
 setup {
-    workers: 18             # T (reduced from 1000; 18 + main = 19)
+    workers: 30             # T  (full: 1000)
     total_steps: 1          # S
-    root_fanout: 18         # F_r
+    root_fanout: 30         # F_r (full: 1000)
     max_depth: 1            # D
     cross_branch_queries: 1 # C
+    db_scale: 1
 }
 
 step {

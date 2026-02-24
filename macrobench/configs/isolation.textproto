@@ -1,4 +1,4 @@
-run_id: "isolation_test"
+run_id: "isolation_dolt"
 backend: DOLT
 autocommit: true
 
@@ -6,7 +6,7 @@ database_setup {
     db_name: "isolation_bench"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/ch_benchmark_schema.sql"
+        sql_dump_path: "db_setup/ch_benchmark_seed.sql"
     }
 }
 
@@ -16,6 +16,6 @@ queries_per_step: 3
 mutations_per_branch: 5
 
 # Phase B: OLTP/OLAP interference
-olap_thread_counts: [1, 2, 4]
+olap_thread_counts: [2, 8, 16]
 interference_duration_sec: 60
 warmup_sec: 5

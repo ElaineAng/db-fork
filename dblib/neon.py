@@ -88,15 +88,17 @@ class NeonToolSuite(DBToolSuite):
         project_id: str,
         branch_id: str,
         db_name: str,
-        max_retries: int = 5,
-        retry_delay: float = 2.0,
+        max_retries: int = 10,
+        retry_delay: float = 0.5,
     ) -> str:
         """
         Retrieves the connection URI for a specific Neon database branch.
 
-        Retries on HTTP 404 because newly created branches may not be
-        immediately visible via the API.
+        Retries on HTTP 404 (newly created branches not yet visible)
+        and HTTP 429 (rate limit) with jittered backoff.
         """
+        import random as _rng
+
         endpoint = (
             f"projects/{project_id}/connection_uri?branch_id={branch_id}"
             f"&database_name={db_name}&role_name=neondb_owner"
@@ -106,16 +108,20 @@ class NeonToolSuite(DBToolSuite):
                 response = cls._request("GET", endpoint)
                 return response["uri"]
             except requests.exceptions.HTTPError as e:
-                is_404 = (
-                    e.response is not None and e.response.status_code == 404
+                status = (
+                    e.response.status_code if e.response is not None else 0
                 )
-                if is_404 and attempt < max_retries - 1:
+                retryable = status in (404, 429)
+                if retryable and attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** min(attempt, 5))
+                    delay *= 0.5 + _rng.random()  # jitter
+                    reason = "not yet visible" if status == 404 else "rate limited"
                     print(
-                        f"Branch {branch_id} not yet visible (attempt "
+                        f"Branch {branch_id} {reason} (attempt "
                         f"{attempt + 1}/{max_retries}), retrying in "
-                        f"{retry_delay}s..."
+                        f"{delay:.1f}s..."
                     )
-                    time.sleep(retry_delay)
+                    time.sleep(delay)
                     continue
                 raise
         return None

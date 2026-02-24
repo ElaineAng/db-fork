@@ -13,7 +13,6 @@ import argparse
 import random
 import sys
 import time
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from google.protobuf import text_format
@@ -37,6 +36,7 @@ from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
+from dblib.file_copy import FileCopyToolSuite
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -86,6 +86,14 @@ def _create_db_tools(config, backend_info, result_collector):
             db_name,
             autocommit,
         )
+    elif backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
+            backend_info.file_copy_info.branches,
+        )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -112,19 +120,17 @@ def _do_delete_branch(db_tools, branch_node):
     )
 
 
-def _should_run_cross_branch(step_id: int, total_steps: int,
-                             cross_branch_count: int) -> bool:
-    """Determine if this step should run a cross-branch query.
+def _cross_branch_steps(total_steps: int, cross_branch_count: int) -> set[int]:
+    """Return the set of step IDs after which a cross-branch query should run.
 
     C cross-branch queries are spread evenly across S steps.
-    When C=1, the query fires on the last step.
     """
     if cross_branch_count <= 0 or total_steps <= 0:
-        return False
+        return set()
     if cross_branch_count >= total_steps:
-        return True  # run every step
+        return set(range(total_steps))
     interval = max(1, total_steps // cross_branch_count)
-    return (step_id + 1) % interval == 0
+    return {s for s in range(total_steps) if (s + 1) % interval == 0}
 
 
 def _run_cross_branch_queries(
@@ -133,6 +139,7 @@ def _run_cross_branch_queries(
     workflow_ops: WorkflowOps,
     progress,
     thread_id: int,
+    result_collector: rc.ResultCollector = None,
 ):
     """Execute cross-branch compare queries on pre-committed leaf branches."""
     compare_queries = workflow_ops.compare()
@@ -144,7 +151,11 @@ def _run_cross_branch_queries(
         if not node.alive:
             continue
         try:
-            db_tools.connect_branch(node.name, timed=False)
+            connect_fn = lambda: db_tools.connect_branch(node.name, timed=True)
+            if result_collector:
+                _retry_on_429(connect_fn, result_collector)
+            else:
+                connect_fn()
             for query in compare_queries:
                 try:
                     db_tools.execute_sql(query, timed=True)
@@ -155,9 +166,47 @@ def _run_cross_branch_queries(
                     )
         except Exception as e:
             progress.write(
-                f"[T{thread_id}] Connect failed for compare on "
-                f"{node.name}: {e}"
+                f"[T{thread_id}] Connect failed for compare on {node.name}: {e}"
             )
+
+
+def _retry_on_429(fn, result_collector, max_retries=10, base_delay=1.0):
+    """Retry a callable with exponential backoff + jitter on rate-limit errors.
+
+    Handles HTTP 429, Neon "too many running operations", and similar
+    rate-limit responses.  Each retry wait is recorded as an
+    API_RETRY_WAIT timing entry so the overhead is visible in results.
+    """
+    from dblib import result_pb2 as rslt
+
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = (
+                "429" in msg or "too many" in msg or "running operations" in msg
+            )
+            # NeonAPIError loses the HTTP status code; check the
+            # underlying response object if available.
+            if not is_rate_limit and hasattr(e, "response"):
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    code = getattr(resp, "status_code", 0)
+                    is_rate_limit = code == 429
+            if is_rate_limit and attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                # Add jitter (0.5x–1.5x) to avoid thundering herd.
+                delay *= 0.5 + random.random()
+                # Record the retry wait (including sleep) as a timed event.
+                with result_collector.maybe_time_ops(
+                    op_type=rslt.OpType.API_RETRY_WAIT, timed=True
+                ):
+                    time.sleep(delay)
+                result_collector.record_num_keys_touched(0)
+                result_collector.flush_record()
+            else:
+                raise
 
 
 def worker_fn(
@@ -172,7 +221,7 @@ def worker_fn(
     """Worker thread function implementing the per-step automaton.
 
     Each thread independently performs S steps in round-robin fashion.
-    Per-step cycle: Branch -> Mutate -> Evaluate -> mark committed -> Prune.
+    Per-step cycle: Branch -> Mutate -> Evaluate -> mark pre-committed -> (optional) Prune -> mark committed.
     Cross-branch queries are interleaved at evenly spaced steps.
 
     Args:
@@ -200,16 +249,36 @@ def worker_fn(
 
     S = config.setup.total_steps
     C = config.setup.cross_branch_queries
+    cb_steps = _cross_branch_steps(S, C)
 
     try:
-        for step_id in range(S):
-            # --- Wait for branch slot (Neon 20-branch limit) ---
+        step_id = 0
+        while step_id < S:
+            # --- Cross-branch query turn (doesn't count as a step) ---
+            if step_id in cb_steps:
+                cb_steps.discard(step_id)
+                branch_tree.begin_cross_branch()
+                try:
+                    _run_cross_branch_queries(
+                        db_tools,
+                        branch_tree,
+                        workflow_ops,
+                        progress,
+                        thread_id,
+                        result_collector=result_collector,
+                    )
+                finally:
+                    branch_tree.end_cross_branch()
+                continue
+
+            # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
             if not branch_tree.wait_for_slot(timeout=60.0):
                 progress.write(
                     f"[T{thread_id}] Timed out waiting for branch slot "
                     f"at step {step_id}, skipping."
                 )
                 progress.update(1)
+                step_id += 1
                 continue
 
             # --- Branch ---
@@ -217,24 +286,30 @@ def worker_fn(
             if parent_node is None:
                 # Tree is full (no eligible parents). Skip this step.
                 progress.update(1)
+                step_id += 1
                 continue
 
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
-                # Connect to parent first
-                db_tools.connect_branch(parent_node.name, timed=False)
-                # Create child branch
-                db_tools.create_branch(
-                    branch_name, parent_node.branch_id, timed=True
+                # Create child branch (retry on rate-limit)
+                _retry_on_429(
+                    lambda: db_tools.create_branch(
+                        branch_name, parent_node.branch_id, timed=True
+                    ),
+                    result_collector,
                 )
                 # Connect to the new branch
-                db_tools.connect_branch(branch_name, timed=False)
+                _retry_on_429(
+                    lambda: db_tools.connect_branch(branch_name, timed=True),
+                    result_collector,
+                )
             except Exception as e:
                 progress.write(
                     f"[T{thread_id}] Branch creation failed at step "
                     f"{step_id}: {e}"
                 )
                 progress.update(1)
+                step_id += 1
                 continue
 
             # Get the branch ID from the backend
@@ -248,7 +323,7 @@ def worker_fn(
             )
 
             # --- Mutate (DDL: M_s schema changes) ---
-            ddl_stmts = workflow_ops.mutate_ddl(step_id)
+            ddl_stmts = workflow_ops.mutate_ddl(step_id, thread_id=thread_id)
             for i, stmt in enumerate(ddl_stmts):
                 if i >= config.step.schema_changes:
                     break
@@ -293,38 +368,36 @@ def worker_fn(
             branch_tree.mark_pre_committed(child_node)
 
             # --- Prune (probabilistic gamma) ---
-            should_prune = (config.step.prune_prob > 0
-                            and rng.random() < config.step.prune_prob)
+            should_prune = (
+                config.step.prune_prob > 0
+                and rng.random() < config.step.prune_prob
+            )
             if should_prune:
                 # Wait until no cross-branch queries are running.
                 branch_tree.wait_prune_safe()
                 branch_tree.mark_dead(child_node)
                 try:
-                    db_tools.connect_branch(
-                        branch_tree.root.name, timed=False
+                    _retry_on_429(
+                        lambda: db_tools.connect_branch(
+                            branch_tree.root.name, timed=True
+                        ),
+                        result_collector,
                     )
-                    _do_delete_branch(db_tools, child_node)
+                    # Delete branch (retry on rate-limit)
+                    _retry_on_429(
+                        lambda: _do_delete_branch(db_tools, child_node),
+                        result_collector,
+                    )
                 except Exception as e:
                     progress.write(
-                        f"[T{thread_id}] Prune failed at step "
-                        f"{step_id}: {e}"
+                        f"[T{thread_id}] Prune failed at step {step_id}: {e}"
                     )
             else:
                 # Survived pruning — promote to committed (parent-eligible)
                 branch_tree.mark_committed(child_node)
 
-            # --- Cross-branch queries (C spread over S) ---
-            if _should_run_cross_branch(step_id, S, C):
-                branch_tree.begin_cross_branch()
-                try:
-                    _run_cross_branch_queries(
-                        db_tools, branch_tree, workflow_ops,
-                        progress, thread_id,
-                    )
-                finally:
-                    branch_tree.end_cross_branch()
-
             progress.update(1)
+            step_id += 1
 
     except Exception as e:
         progress.write(f"[T{thread_id}] Worker crashed: {e}")
@@ -418,7 +491,7 @@ def main():
         f"Per-step: M_s={config.step.schema_changes}, "
         f"M_d={config.step.data_mutations}, "
         f"Q_v={config.step.eval_queries}, "
-        f"gamma={config.step.prune_prob}"
+        f"gamma={config.step.prune_prob:.2f}"
     )
     print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
 
@@ -427,7 +500,9 @@ def main():
     backend_info = create_backend_project(micro_config)
 
     # Initialize components
-    workflow_ops = get_workflow_ops(config.workflow)
+    workflow_ops = get_workflow_ops(
+        config.workflow, scale=config.setup.db_scale
+    )
 
     # Neon limits active branches to 20 (including the default branch).
     max_active = 20 if config.backend == tp.Backend.NEON else 0
@@ -437,8 +512,7 @@ def main():
     branch_tree = BranchTree(
         root_name=backend_info.default_branch_name,
         root_id=(
-            backend_info.default_branch_id
-            or backend_info.default_branch_name
+            backend_info.default_branch_id or backend_info.default_branch_name
         ),
         root_fanout=config.setup.root_fanout,
         inner_fanout=config.setup.inner_fanout,

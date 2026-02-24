@@ -8,6 +8,7 @@ enum Backend {
     DOLT = 1;
     KPG = 2;
     XATA = 3;
+    FILE_COPY = 4;
 }
 
 // The five representative workflow categories from Section 3.1
@@ -50,6 +51,7 @@ message SetupParams {
     int32 max_depth = 5;            // D: max nesting level
     int32 inner_fanout = 6;         // F_i: max children of inner nodes
     int32 cross_branch_queries = 7; // C: cross-branch queries spread over S steps
+    int32 db_scale = 8;             // Scale factor = num warehouses (10: 10 WH, 1K items, 100 cust/district)
 }
 
 // Per-step parameters (Section 3.3, Table 1 "Per-step" group)
