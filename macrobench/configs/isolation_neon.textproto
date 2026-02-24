@@ -1,5 +1,5 @@
-run_id: "isolation_dolt"
-backend: DOLT
+run_id: "isolation_neon"
+backend: NEON
 autocommit: true
 
 database_setup {
@@ -10,8 +10,8 @@ database_setup {
     }
 }
 
-# Phase A: branch-count scaling
-branch_counts: [0, 10, 25, 50, 100, 200]
+# Phase A: branch-count scaling (lower counts to avoid Neon rate limits)
+branch_counts: [0, 5, 10, 16]
 queries_per_step: 3
 mutations_per_branch: 5
 

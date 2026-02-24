@@ -47,140 +47,96 @@ from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
+from dblib.file_copy import FileCopyToolSuite
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Analytical queries (Phase A + Phase B OLAP)
+# OLAP query (Phase A + Phase B)
 # ─────────────────────────────────────────────────────────────────────
 
-ANALYTICAL_QUERIES = [
-    # Q1 — Pricing summary (full scan of order_line with aggregation)
-    (
-        "tpch_q1_pricing_summary",
-        """SELECT ol_number, SUM(ol_quantity) AS sum_qty,
-                  SUM(ol_amount) AS sum_amount, AVG(ol_amount) AS avg_amount,
-                  COUNT(*) AS count_order
-           FROM order_line GROUP BY ol_number ORDER BY ol_number;""",
-    ),
-    # Q6 — Revenue forecast (filtered scan + aggregation)
-    (
-        "tpch_q6_revenue_forecast",
-        """SELECT SUM(ol_amount) AS revenue
-           FROM order_line
-           WHERE ol_quantity BETWEEN 1 AND 50
-             AND ol_amount BETWEEN 1.00 AND 500.00;""",
-    ),
-    # Q12 — Shipping modes (join orders + order_line, group by)
-    (
-        "tpch_q12_shipping_modes",
-        """SELECT o_ol_cnt,
-                  SUM(CASE WHEN o_carrier_id BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS high_line,
-                  SUM(CASE WHEN o_carrier_id NOT BETWEEN 1 AND 2 THEN 1 ELSE 0 END) AS low_line
-           FROM orders JOIN order_line
-             ON o_w_id = ol_w_id AND o_d_id = ol_d_id AND o_id = ol_o_id
-           GROUP BY o_ol_cnt ORDER BY o_ol_cnt;""",
-    ),
-    # Q5 — Revenue by warehouse (multi-table join)
-    (
-        "tpch_q5_revenue_by_warehouse",
-        """SELECT w.w_name, SUM(ol.ol_amount) AS revenue
-           FROM warehouse w
-           JOIN district d ON w.w_id = d.d_w_id
-           JOIN customer c ON d.d_w_id = c.c_w_id AND d.d_id = c.c_d_id
-           JOIN orders o ON c.c_w_id = o.o_w_id AND c.c_d_id = o.o_d_id AND c.c_id = o.o_c_id
-           JOIN order_line ol ON o.o_w_id = ol.ol_w_id AND o.o_d_id = ol.ol_d_id AND o.o_id = ol.ol_o_id
-           GROUP BY w.w_name ORDER BY revenue DESC;""",
-    ),
-    # Workflow: What-if reward (revenue + low-stock, CASE instead of FILTER)
-    (
-        "workflow_whatif_reward",
-        """SELECT SUM(ol.ol_amount) AS total_revenue,
-                  COUNT(DISTINCT CASE WHEN s.s_quantity < 10
-                        THEN s.s_i_id END) AS low_stock
-           FROM order_line ol
-           JOIN stock s ON ol.ol_i_id = s.s_i_id
-                       AND ol.ol_supply_w_id = s.s_w_id;""",
-    ),
-    # Workflow: Data curation stats (simple aggregates, no percentile_cont)
-    (
-        "workflow_curation_stats",
-        """SELECT STDDEV(total_spend),
-                  AVG(total_spend),
-                  MIN(total_spend),
-                  MAX(total_spend)
-           FROM (
-               SELECT c.c_id,
-                      COALESCE(SUM(ol.ol_amount), 0) AS total_spend
-               FROM customer c
-               LEFT JOIN orders o
-                   ON c.c_w_id = o.o_w_id AND c.c_d_id = o.o_d_id
-                      AND c.c_id = o.o_c_id
-               LEFT JOIN order_line ol
-                   ON o.o_id = ol.ol_o_id AND o.o_d_id = ol.ol_d_id
-                      AND o.o_w_id = ol.ol_w_id
-               WHERE c.c_w_id = 1
-               GROUP BY c.c_id
-           ) AS customer_agg;""",
-    ),
-    # Workflow: Simulation stockout (CASE instead of FILTER)
-    (
-        "workflow_simulation_stockout",
-        """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
-                  AVG(s_quantity) AS avg_stock,
-                  SUM(ol_amount) AS total_fulfillment_cost
-           FROM stock
-           JOIN order_line ON ol_supply_w_id = s_w_id
-                          AND ol_i_id = s_i_id;""",
-    ),
-]
+def _get_olap_query(oltp_table, olap_contended):
+    """Return a single OLAP query based on table and contention settings.
+
+    When contended, the OLAP query hits the same table as OLTP updates.
+    When uncontended, it hits a different table (order_line x warehouse).
+    """
+    if oltp_table == "customer":
+        if olap_contended:
+            return (
+                "olap_customer_agg",
+                "SELECT c_credit, COUNT(*), AVG(c_balance) FROM customer GROUP BY c_credit;",
+            )
+        else:
+            return (
+                "olap_orderline_warehouse",
+                "SELECT SUM(ol_amount) FROM order_line ol JOIN warehouse w ON ol.ol_supply_w_id = w.w_id;",
+            )
+    else:  # district
+        if olap_contended:
+            return (
+                "olap_district_agg",
+                "SELECT d_w_id, SUM(d_ytd), AVG(d_next_o_id) FROM district GROUP BY d_w_id;",
+            )
+        else:
+            return (
+                "olap_orderline_warehouse",
+                "SELECT SUM(ol_amount) FROM order_line ol JOIN warehouse w ON ol.ol_supply_w_id = w.w_id;",
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Transactional queries (Phase B OLTP)
+# OLTP updates (Phase B)
 # ─────────────────────────────────────────────────────────────────────
 
-def _oltp_queries(rng):
-    """Generate a single OLTP operation (matching TPC-C New-Order/Payment mix).
+def _oltp_update(oltp_table, rng, seq):
+    """Generate a deterministic OLTP UPDATE, picked round-robin via seq % 4.
+
+    Args:
+        oltp_table: "customer" or "district".
+        rng: random.Random instance (for randomizing the update amount).
+        seq: monotonically increasing sequence number.
 
     Returns (query_name, sql_string).
     """
-    w_id = rng.randint(1, 10)
-    d_id = rng.randint(1, 10)
-    c_id = rng.randint(1, 3000)
-    o_id = rng.randint(1, 3000)
+    variant = seq % 4
 
-    ops = [
-        # Point read
-        (
-            "oltp_point_read",
-            f"""SELECT * FROM customer
-                WHERE c_w_id = {w_id} AND c_d_id = {d_id} AND c_id = {c_id};""",
-        ),
-        # Point update
-        (
-            "oltp_point_update",
-            f"""UPDATE district SET d_ytd = d_ytd + {round(rng.uniform(1, 100), 2)}
-                WHERE d_w_id = {w_id} AND d_id = {d_id};""",
-        ),
-        # Insert order
-        (
-            "oltp_insert_order",
-            f"""INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id,
-                    o_carrier_id, o_ol_cnt, o_all_local, o_entry_d)
-                VALUES ({10000 + rng.randint(0, 90000)}, {d_id}, {w_id}, {c_id},
-                        NULL, {rng.randint(1, 15)}, 1,
-                        CURRENT_TIMESTAMP)
-                ON CONFLICT DO NOTHING;""",
-        ),
-        # Range read (order lines for an order)
-        (
-            "oltp_range_read",
-            f"""SELECT * FROM order_line
-                WHERE ol_w_id = {w_id} AND ol_d_id = {d_id} AND ol_o_id = {o_id}
-                ORDER BY ol_number;""",
-        ),
-    ]
-    return rng.choice(ops)
+    if oltp_table == "customer":
+        w_id = (seq % 10) + 1
+        d_id = ((seq * 3 + 7) % 10) + 1
+        c_id = (seq % 3000) + 1
+        where = f"WHERE c_w_id = {w_id} AND c_d_id = {d_id} AND c_id = {c_id}"
+        amount = round(rng.uniform(1, 100), 2)
+
+        if variant == 0:
+            return ("oltp_update_balance",
+                    f"UPDATE customer SET c_balance = c_balance - {amount} {where};")
+        elif variant == 1:
+            return ("oltp_update_ytd_payment",
+                    f"UPDATE customer SET c_ytd_payment = c_ytd_payment + {amount} {where};")
+        elif variant == 2:
+            return ("oltp_update_payment_cnt",
+                    f"UPDATE customer SET c_payment_cnt = c_payment_cnt + 1 {where};")
+        else:
+            return ("oltp_update_delivery_cnt",
+                    f"UPDATE customer SET c_delivery_cnt = c_delivery_cnt + 1 {where};")
+    else:  # district
+        w_id = (seq % 10) + 1
+        d_id = ((seq * 3 + 7) % 10) + 1
+        where = f"WHERE d_w_id = {w_id} AND d_id = {d_id}"
+        amount = round(rng.uniform(1, 100), 2)
+
+        if variant == 0:
+            return ("oltp_update_d_ytd_plus",
+                    f"UPDATE district SET d_ytd = d_ytd + {amount} {where};")
+        elif variant == 1:
+            return ("oltp_update_d_next_oid_plus",
+                    f"UPDATE district SET d_next_o_id = d_next_o_id + 1 {where};")
+        elif variant == 2:
+            return ("oltp_update_d_ytd_minus",
+                    f"UPDATE district SET d_ytd = d_ytd - {amount} {where};")
+        else:
+            return ("oltp_update_d_next_oid_minus",
+                    f"UPDATE district SET d_next_o_id = d_next_o_id - 1 {where};")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -254,6 +210,14 @@ def _create_db_tools(config, backend_info, result_collector):
             db_name,
             autocommit,
         )
+    elif backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
+            backend_info.file_copy_info.branches,
+        )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -262,7 +226,8 @@ def _create_db_tools(config, backend_info, result_collector):
 # Phase A: Branch-count scaling
 # ─────────────────────────────────────────────────────────────────────
 
-def run_phase_a(config, backend_info, result_collector):
+def run_phase_a(config, backend_info, result_collector,
+                oltp_table, olap_contended):
     """Phase A: measure analytical query latency as branch count grows.
 
     Single-threaded, no concurrent workload. Only variable is branch count.
@@ -272,11 +237,14 @@ def run_phase_a(config, backend_info, result_collector):
     mutations_per_branch = config.mutations_per_branch or 5
     rng = random.Random(42)
 
+    olap_name, olap_sql = _get_olap_query(oltp_table, olap_contended)
+
     print(f"\n{'='*60}")
     print("Phase A: Branch-count scaling")
     print(f"  Branch counts: {list(branch_counts)}")
     print(f"  Queries per step: {k}")
     print(f"  Mutations per branch: {mutations_per_branch}")
+    print(f"  OLAP query: {olap_name}")
     print(f"{'='*60}")
 
     rc.set_current_thread_id(0)
@@ -336,22 +304,21 @@ def run_phase_a(config, backend_info, result_collector):
 
             print(
                 f"  Measuring at branch_count={current_branch_count} "
-                f"({len(ANALYTICAL_QUERIES)} queries x {k} reps)..."
+                f"(1 query x {k} reps)..."
             )
 
-            # Record branch count and run analytical queries
+            # Record branch count and run the single OLAP query
             result_collector.record_branch_count(current_branch_count)
-            for query_name, query_sql in ANALYTICAL_QUERIES:
-                for rep in range(k):
-                    try:
-                        result_collector.record_branch_count(
-                            current_branch_count
-                        )
-                        db_tools.execute_sql(query_sql, timed=True)
-                    except Exception as e:
-                        print(
-                            f"    Query {query_name} rep {rep} failed: {e}"
-                        )
+            for rep in range(k):
+                try:
+                    result_collector.record_branch_count(
+                        current_branch_count
+                    )
+                    db_tools.execute_sql(olap_sql, timed=True)
+                except Exception as e:
+                    print(
+                        f"    Query {olap_name} rep {rep} failed: {e}"
+                    )
 
     finally:
         db_tools.close_connection()
@@ -366,9 +333,9 @@ def run_phase_a(config, backend_info, result_collector):
 def _oltp_worker(
     config, backend_info, result_collector, branch_name,
     duration_sec, warmup_sec, stop_event, phase_label,
-    branch_count,
+    branch_count, oltp_table,
 ):
-    """OLTP worker thread: runs transactional queries on a branch.
+    """OLTP worker thread: runs UPDATE queries on a branch.
 
     Args:
         config: IsolationBenchConfig.
@@ -380,10 +347,12 @@ def _oltp_worker(
         stop_event: Threading event signaling stop.
         phase_label: Tag for table_name (e.g. "phase_b_oltp_baseline").
         branch_count: Current branch count for metadata.
+        oltp_table: "customer" or "district".
     """
     thread_id = 100  # Reserved ID for OLTP thread
     rc.set_current_thread_id(thread_id)
-    rng = random.Random(42)
+    # Unique seed per config so baseline doesn't warm cache for concurrent.
+    rng = random.Random(hash(phase_label))
 
     db_tools = _create_db_tools(config, backend_info, result_collector)
 
@@ -393,12 +362,14 @@ def _oltp_worker(
         start_time = time.monotonic()
         warmup_end = start_time + warmup_sec
         measure_end = start_time + warmup_sec + duration_sec
+        seq = 0
 
         while not stop_event.is_set() and time.monotonic() < measure_end:
             now = time.monotonic()
             in_measurement = now >= warmup_end
 
-            query_name, query_sql = _oltp_queries(rng)
+            query_name, query_sql = _oltp_update(oltp_table, rng, seq)
+            seq += 1
 
             if in_measurement:
                 result_collector.set_context(
@@ -425,9 +396,9 @@ def _oltp_worker(
 def _olap_worker(
     config, backend_info, result_collector, branch_name,
     duration_sec, warmup_sec, stop_event, phase_label,
-    branch_count, thread_id,
+    branch_count, thread_id, oltp_table, olap_contended,
 ):
-    """OLAP worker thread: runs analytical queries on a branch.
+    """OLAP worker thread: runs a single analytical query in a loop.
 
     Args:
         config: IsolationBenchConfig.
@@ -440,9 +411,12 @@ def _olap_worker(
         phase_label: Tag for table_name.
         branch_count: Current branch count for metadata.
         thread_id: Unique thread ID for this OLAP worker.
+        oltp_table: "customer" or "district".
+        olap_contended: Whether OLAP hits the same table as OLTP.
     """
     rc.set_current_thread_id(thread_id)
 
+    _, olap_sql = _get_olap_query(oltp_table, olap_contended)
     db_tools = _create_db_tools(config, backend_info, result_collector)
 
     try:
@@ -451,17 +425,10 @@ def _olap_worker(
         start_time = time.monotonic()
         warmup_end = start_time + warmup_sec
         measure_end = start_time + warmup_sec + duration_sec
-        query_idx = 0
 
         while not stop_event.is_set() and time.monotonic() < measure_end:
             now = time.monotonic()
             in_measurement = now >= warmup_end
-
-            # Cycle through analytical queries
-            _, query_sql = ANALYTICAL_QUERIES[
-                query_idx % len(ANALYTICAL_QUERIES)
-            ]
-            query_idx += 1
 
             if in_measurement:
                 result_collector.set_context(
@@ -472,12 +439,12 @@ def _olap_worker(
                 )
                 result_collector.record_branch_count(branch_count)
                 try:
-                    db_tools.execute_sql(query_sql, timed=True)
+                    db_tools.execute_sql(olap_sql, timed=True)
                 except Exception:
                     pass
             else:
                 try:
-                    db_tools.execute_sql(query_sql, timed=False)
+                    db_tools.execute_sql(olap_sql, timed=False)
                 except Exception:
                     pass
     finally:
@@ -553,6 +520,8 @@ def _cleanup_phase_b_branches(
                 db_tools.delete_branch(name, timed=False)
             except Exception as e:
                 print(f"    Warning: failed to delete branch {name}: {e}")
+    except Exception as e:
+        print(f"    Warning: cleanup connection failed: {e}")
     finally:
         db_tools.close_connection()
 
@@ -561,6 +530,8 @@ def _run_timed_config(
     config, backend_info, result_collector, branch_count,
     duration_sec, warmup_sec,
     run_oltp, run_olap, olap_threads, phase_label_prefix,
+    oltp_table, olap_contended,
+    olap_branches=None,
 ):
     """Run a timed configuration (baseline or concurrent).
 
@@ -569,7 +540,15 @@ def _run_timed_config(
         run_olap: Whether to run OLAP threads.
         olap_threads: Number of OLAP threads (only if run_olap).
         phase_label_prefix: Base label (e.g. "phase_b_concurrent_2t").
+        oltp_table: "customer" or "district".
+        olap_contended: Whether OLAP hits the same table as OLTP.
+        olap_branches: List of branch names for OLAP threads. Each thread
+            is assigned a different branch (round-robin). Defaults to
+            ["olap_branch"] if not provided.
     """
+    if not olap_branches:
+        olap_branches = ["olap_branch"]
+
     stop_event = threading.Event()
     futures = []
 
@@ -583,20 +562,22 @@ def _run_timed_config(
                     config, backend_info, result_collector,
                     "oltp_branch", duration_sec, warmup_sec,
                     stop_event, f"{phase_label_prefix}_oltp",
-                    branch_count,
+                    branch_count, oltp_table,
                 )
             )
 
         if run_olap:
             for t in range(olap_threads):
+                branch = olap_branches[t % len(olap_branches)]
                 futures.append(
                     executor.submit(
                         _olap_worker,
                         config, backend_info, result_collector,
-                        "olap_branch", duration_sec, warmup_sec,
+                        branch, duration_sec, warmup_sec,
                         stop_event, f"{phase_label_prefix}_olap",
                         branch_count,
                         200 + t,  # thread IDs: 200, 201, 202, ...
+                        oltp_table, olap_contended,
                     )
                 )
 
@@ -608,7 +589,8 @@ def _run_timed_config(
                 print(f"  Thread failed: {e}")
 
 
-def run_phase_b(config, backend_info, result_collector):
+def run_phase_b(config, backend_info, result_collector,
+                oltp_table, olap_contended):
     """Phase B: measure OLTP/OLAP interference across branches.
 
     For each configured branch count:
@@ -625,11 +607,15 @@ def run_phase_b(config, backend_info, result_collector):
     warmup_sec = config.warmup_sec or 5
     rng = random.Random(99)
 
+    olap_name, _ = _get_olap_query(oltp_table, olap_contended)
+
     print(f"\n{'='*60}")
     print("Phase B: OLTP/OLAP interference")
     print(f"  Branch counts: {list(branch_counts)}")
     print(f"  OLAP thread counts: {olap_thread_counts}")
     print(f"  Duration: {duration_sec}s + {warmup_sec}s warmup")
+    print(f"  OLTP table: {oltp_table}")
+    print(f"  OLAP contended: {olap_contended} ({olap_name})")
     print(f"{'='*60}")
 
     for target_count in branch_counts:
@@ -643,6 +629,11 @@ def run_phase_b(config, backend_info, result_collector):
         actual_count = len(bg_branches) + 2  # +oltp_branch +olap_branch
 
         try:
+            # Use background branches for OLAP threads so each runs on a
+            # separate branch, testing true cross-branch interference.
+            # Fall back to olap_branch when no background branches exist.
+            olap_branches = bg_branches if bg_branches else ["olap_branch"]
+
             # Config 1: OLTP baseline
             print(f"  Running OLTP baseline ({duration_sec}s)...")
             _run_timed_config(
@@ -654,13 +645,16 @@ def run_phase_b(config, backend_info, result_collector):
                 run_olap=False,
                 olap_threads=0,
                 phase_label_prefix="phase_b_oltp_baseline",
+                oltp_table=oltp_table,
+                olap_contended=olap_contended,
             )
 
             for n_olap in olap_thread_counts:
                 # Config 2: OLAP baseline
                 print(
                     f"  Running OLAP baseline "
-                    f"({n_olap} threads, {duration_sec}s)..."
+                    f"({n_olap} threads on {min(n_olap, len(olap_branches))} "
+                    f"branches, {duration_sec}s)..."
                 )
                 _run_timed_config(
                     config, backend_info, result_collector,
@@ -671,12 +665,16 @@ def run_phase_b(config, backend_info, result_collector):
                     run_olap=True,
                     olap_threads=n_olap,
                     phase_label_prefix=f"phase_b_olap_baseline_{n_olap}t",
+                    oltp_table=oltp_table,
+                    olap_contended=olap_contended,
+                    olap_branches=olap_branches,
                 )
 
                 # Config 3: Concurrent OLTP + OLAP
                 print(
                     f"  Running concurrent OLTP + OLAP "
-                    f"({n_olap} OLAP threads, {duration_sec}s)..."
+                    f"({n_olap} OLAP threads on {min(n_olap, len(olap_branches))} "
+                    f"branches, {duration_sec}s)..."
                 )
                 _run_timed_config(
                     config, backend_info, result_collector,
@@ -687,6 +685,9 @@ def run_phase_b(config, backend_info, result_collector):
                     run_olap=True,
                     olap_threads=n_olap,
                     phase_label_prefix=f"phase_b_concurrent_{n_olap}t",
+                    oltp_table=oltp_table,
+                    olap_contended=olap_contended,
+                    olap_branches=olap_branches,
                 )
 
         finally:
@@ -718,6 +719,25 @@ def main():
         choices=["a", "b", "both"],
         help="Which phase to run (default: both).",
     )
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        default="run_stats/",
+        help="Directory for output parquet files (default: run_stats/).",
+    )
+    parser.add_argument(
+        "--oltp-table",
+        type=str,
+        default="customer",
+        choices=["customer", "district"],
+        help="Table targeted by OLTP updates (default: customer).",
+    )
+    parser.add_argument(
+        "--olap-contended",
+        action="store_true",
+        default=False,
+        help="OLAP query hits the same table as OLTP (contention).",
+    )
 
     args = parser.parse_args()
 
@@ -737,20 +757,26 @@ def main():
     print(f"Backend: {tp.Backend.Name(config.backend)}")
     print(f"Branch counts: {list(config.branch_counts)}")
     print(f"OLAP thread counts: {list(config.olap_thread_counts)}")
+    print(f"OLTP table: {args.oltp_table}")
+    print(f"OLAP contended: {args.olap_contended}")
 
     # Set up backend and database
     micro_config = _build_microbench_config(config)
     backend_info = create_backend_project(micro_config)
-    result_collector = rc.ResultCollector(run_id=config.run_id)
+    result_collector = rc.ResultCollector(
+        run_id=config.run_id, output_dir=args.outdir,
+    )
 
     start_time = time.time()
 
     try:
         if args.phase in ("a", "both"):
-            run_phase_a(config, backend_info, result_collector)
+            run_phase_a(config, backend_info, result_collector,
+                        args.oltp_table, args.olap_contended)
 
         if args.phase in ("b", "both"):
-            run_phase_b(config, backend_info, result_collector)
+            run_phase_b(config, backend_info, result_collector,
+                        args.oltp_table, args.olap_contended)
 
     finally:
         elapsed = time.time() - start_time

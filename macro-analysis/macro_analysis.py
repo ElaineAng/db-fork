@@ -102,16 +102,34 @@ def load_all_workflows(indir, suffix=""):
 
     Args:
         indir: directory containing parquet files
-        suffix: optional suffix before .parquet, e.g. "_neon" for macro_*_neon.parquet
+        suffix: optional suffix before .parquet, e.g. "_neon" for macro_*_neon.parquet.
+            If empty, auto-detects by scanning for files matching macro_{workflow}*.parquet.
     """
+    import glob
+
     workflows = {}
     for wf in WORKFLOW_ORDER:
-        path = os.path.join(indir, f"macro_{wf}{suffix}.parquet")
-        if os.path.exists(path):
-            df = pq.read_table(path).to_pandas()
-            workflows[wf] = df
+        if suffix:
+            path = os.path.join(indir, f"macro_{wf}{suffix}.parquet")
+            if os.path.exists(path):
+                df = pq.read_table(path).to_pandas()
+                workflows[wf] = df
+            else:
+                print(f"  Warning: {path} not found, skipping.")
         else:
-            print(f"  Warning: {path} not found, skipping.")
+            # Auto-detect: find any file matching macro_{wf}*.parquet
+            pattern = os.path.join(indir, f"macro_{wf}*.parquet")
+            matches = sorted(glob.glob(pattern))
+            if matches:
+                path = matches[0]
+                df = pq.read_table(path).to_pandas()
+                workflows[wf] = df
+                if len(matches) > 1:
+                    print(
+                        f"  Note: multiple files for {wf}, using {os.path.basename(path)}"
+                    )
+            else:
+                print(f"  Warning: no macro_{wf}*.parquet in {indir}, skipping.")
     return workflows
 
 
@@ -257,7 +275,7 @@ def plot_throughput(workflows, outdir):
 
 
 def plot_cost_breakdown(workflows, outdir):
-    """Stacked bar: time spent on branch ops vs data ops vs API retry per workflow."""
+    """Horizontal stacked bar: percentage of time on branch ops vs data ops vs API retry."""
     wf_names = [wf for wf in WORKFLOW_ORDER if wf in workflows]
 
     branch_times = []
@@ -275,47 +293,6 @@ def plot_cost_breakdown(workflows, outdir):
 
     x = np.arange(len(wf_names))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
-
-    # Absolute time
-    ax1.bar(
-        x,
-        data_times,
-        label="Data Ops",
-        color="#57B894",
-        edgecolor="white",
-        linewidth=0.5,
-    )
-    ax1.bar(
-        x,
-        branch_times,
-        bottom=data_times,
-        label="Branch Ops",
-        color="#F5A623",
-        edgecolor="white",
-        linewidth=0.5,
-    )
-    bottom2 = [d + b for d, b in zip(data_times, branch_times)]
-    ax1.bar(
-        x,
-        retry_times,
-        bottom=bottom2,
-        label="API Retry Wait",
-        color="#E74C3C",
-        edgecolor="white",
-        linewidth=0.5,
-    )
-    ax1.set_ylabel("Total Time (ms)", fontsize=11)
-    ax1.set_title("Absolute Time", fontsize=12, fontweight="bold")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(
-        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names],
-        fontsize=9,
-    )
-    ax1.legend(fontsize=9, framealpha=0.9)
-    ax1.grid(True, alpha=0.3, axis="y")
-
-    # Percentage breakdown
     totals = [b + d + r for b, d, r in zip(branch_times, data_times, retry_times)]
     branch_pcts = [
         b / t * 100 if t > 0 else 0 for b, t in zip(branch_times, totals)
@@ -327,7 +304,9 @@ def plot_cost_breakdown(workflows, outdir):
         r / t * 100 if t > 0 else 0 for r, t in zip(retry_times, totals)
     ]
 
-    ax2.barh(
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    ax.barh(
         x,
         data_pcts,
         label="Data Ops",
@@ -335,7 +314,7 @@ def plot_cost_breakdown(workflows, outdir):
         edgecolor="white",
         linewidth=0.5,
     )
-    ax2.barh(
+    ax.barh(
         x,
         branch_pcts,
         left=data_pcts,
@@ -345,7 +324,7 @@ def plot_cost_breakdown(workflows, outdir):
         linewidth=0.5,
     )
     left2 = [d + b for d, b in zip(data_pcts, branch_pcts)]
-    ax2.barh(
+    ax.barh(
         x,
         retry_pcts,
         left=left2,
@@ -358,7 +337,7 @@ def plot_cost_breakdown(workflows, outdir):
     # Annotate percentages
     for i in range(len(wf_names)):
         if data_pcts[i] > 8:
-            ax2.text(
+            ax.text(
                 data_pcts[i] / 2,
                 i,
                 f"{data_pcts[i]:.0f}%",
@@ -369,7 +348,7 @@ def plot_cost_breakdown(workflows, outdir):
                 color="white",
             )
         if branch_pcts[i] > 8:
-            ax2.text(
+            ax.text(
                 data_pcts[i] + branch_pcts[i] / 2,
                 i,
                 f"{branch_pcts[i]:.0f}%",
@@ -380,7 +359,7 @@ def plot_cost_breakdown(workflows, outdir):
                 color="white",
             )
         if retry_pcts[i] > 5:
-            ax2.text(
+            ax.text(
                 left2[i] + retry_pcts[i] / 2,
                 i,
                 f"{retry_pcts[i]:.0f}%",
@@ -391,23 +370,21 @@ def plot_cost_breakdown(workflows, outdir):
                 color="white",
             )
 
-    ax2.set_xlabel("Time (%)", fontsize=11)
-    ax2.set_title("Relative Breakdown", fontsize=12, fontweight="bold")
-    ax2.set_yticks(x)
-    ax2.set_yticklabels(
-        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names],
-        fontsize=9,
-    )
-    ax2.set_xlim(0, 100)
-    ax2.legend(fontsize=9, framealpha=0.9, loc="lower right")
-    ax2.grid(True, alpha=0.3, axis="x")
-
-    fig.suptitle(
+    ax.set_xlabel("Time (%)", fontsize=11)
+    ax.set_title(
         "Branch Management vs. Data Operation Cost",
         fontsize=13,
         fontweight="bold",
-        y=1.02,
     )
+    ax.set_yticks(x)
+    ax.set_yticklabels(
+        [WORKFLOW_LABELS.get(wf, wf).replace("\n", " ") for wf in wf_names],
+        fontsize=9,
+    )
+    ax.set_xlim(0, 100)
+    ax.legend(fontsize=9, framealpha=0.9, loc="lower right")
+    ax.grid(True, alpha=0.3, axis="x")
+
     fig.tight_layout()
     path = os.path.join(outdir, "cost_breakdown.pdf")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -549,7 +526,11 @@ def plot_latency_heatmap(workflows, outdir):
 
 def plot_step_timeline(workflows, outdir):
     """Timeline: cumulative latency over iteration number, per workflow.
-    Shows how cost accumulates through the workflow steps."""
+    Shows how cost accumulates through the workflow steps.
+    Segments are colored by two groups: branching ops vs DDL/DML ops."""
+    COLOR_BRANCH = "#F5A623"  # orange — branch create/connect/delete
+    COLOR_DATA = "#2176AE"    # blue   — read/insert/update/ddl/commit
+
     fig, axes = plt.subplots(2, 3, figsize=(15, 9))
     axes_flat = axes.flatten()
 
@@ -566,12 +547,11 @@ def plot_step_timeline(workflows, outdir):
             cum_lat = sub["latency"].cumsum().values * 1000  # ms
             iters = range(len(cum_lat))
 
-            # Color segments by op type
+            # Color segments by group: branching vs data/DDL
             ops = sub["op_type"].values
-            lats = sub["latency"].values * 1000
             x_prev, y_prev = 0, 0
             for k in range(len(cum_lat)):
-                color = COLORS.get(int(ops[k]), "#999999")
+                color = COLOR_BRANCH if int(ops[k]) in BRANCH_OPS else COLOR_DATA
                 ax.plot(
                     [k, k + 1],
                     [y_prev, cum_lat[k]],
@@ -596,20 +576,16 @@ def plot_step_timeline(workflows, outdir):
     ax_legend = axes_flat[5]
     ax_legend.axis("off")
     handles = [
-        Patch(
-            facecolor=COLORS.get(op, "#999"),
-            label=OP_SHORT.get(op, "").replace("\n", " "),
-        )
-        for op in sorted(COLORS.keys())
-        if op in OP_SHORT
+        Patch(facecolor=COLOR_BRANCH, label="Branch Ops (create/connect/delete)"),
+        Patch(facecolor=COLOR_DATA, label="Data Ops (read/insert/update/DDL/commit)"),
     ]
     ax_legend.legend(
         handles=handles,
         loc="center",
-        fontsize=10,
-        ncol=2,
-        title="Operation Type",
-        title_fontsize=11,
+        fontsize=11,
+        ncol=1,
+        title="Operation Group",
+        title_fontsize=12,
     )
 
     fig.suptitle(
