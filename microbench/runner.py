@@ -684,6 +684,8 @@ class BenchmarkSuite:
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
         self.db_tools.close_connection()
+        if self._config.database_setup.cleanup and self._backend_info.tiger:
+            self._backend_info.tiger['all_service_ids'] = db_tools.get_all_service_ids()
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
@@ -1175,6 +1177,10 @@ class BenchmarkSuite:
         branch_ids = [(self._root_branch_name, root_branch_id)]
 
         # Perform setup operations on root branch.
+        with db_tools.get_current_connection().cursor() as cur:
+            cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+            tables = cur.fetchall()
+            print(f"Tables visible on current connection: {tables}")
         print(
             f"Performing setup ops on root branch: "
             f"{inserts_per_branch} inserts, {updates_per_branch} updates, "
@@ -1525,8 +1531,6 @@ class BenchmarkSuite:
                 "No benchmark mode configured. Set either "
                 "randomized_benchmark or nth_op_benchmark."
             )
-        if self._config.database_setup.cleanup and self._backend_info.tiger:
-            self._backend_info.tiger['all_service_ids'] = db_tools.get_all_service_ids()
 
 
 if __name__ == "__main__":
