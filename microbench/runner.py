@@ -24,7 +24,6 @@ from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
-from dblib.storage import StorageMeasurer
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -572,7 +571,8 @@ class BenchmarkSuite:
 
             self._add_branch(self._root_branch_name)
             self.db_tools = db_tools
-            self._storage = StorageMeasurer(db_tools, self._measure_storage)
+            if self._measure_storage:
+                db_tools.result_collector.set_storage_fn(db_tools.get_total_storage_bytes)
 
             # If this thread has assigned branches (FAN_OUT mode), connect to the first one
             if self._assigned_branches:
@@ -618,12 +618,10 @@ class BenchmarkSuite:
         )
         if not branch_limit_reached:
             next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
-            with self._storage.measure():
-                self.db_tools.create_branch(
-                    branch_name=next_branch_name, parent_id=cur_id
-                )
-            self.db_tools.result_collector.record_num_keys_touched(0)
-            self.db_tools.result_collector.flush_record()
+            self.db_tools.create_branch(
+                branch_name=next_branch_name, parent_id=cur_id,
+                timed=True, storage=self._measure_storage,
+            )
             self._add_branch(next_branch_name)
 
             # Toss a fair coin to connect to the new branch, or stay on the
@@ -656,12 +654,10 @@ class BenchmarkSuite:
         next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
 
         # Create branch (timed, with optional storage measurement)
-        with self._storage.measure():
-            self.db_tools.create_branch(
-                branch_name=next_branch_name, parent_id=cur_id, timed=True
-            )
-        self.db_tools.result_collector.record_num_keys_touched(0)
-        self.db_tools.result_collector.flush_record()
+        self.db_tools.create_branch(
+            branch_name=next_branch_name, parent_id=cur_id,
+            timed=True, storage=self._measure_storage,
+        )
         self._add_branch(next_branch_name)
 
         # Connect to the new branch (timed)
@@ -783,21 +779,15 @@ class BenchmarkSuite:
                 continue
 
     def _execute_timed_op(self, sql, row_data, commit_message):
-        """Execute SQL with timing and optional storage measurement.
-
-        Bypasses execute_sql(timed=True) auto-flush so disk_size_before and
-        disk_size_after land on the same record.
-        """
-
+        """Execute SQL with timing and optional storage measurement."""
         result_collector = self.db_tools.result_collector
-        db_tools = self.db_tools
-
-        with self._storage.measure():
-            op_type = rc.GetOpTypeFromSQL(sql)
-            with result_collector.maybe_time_ops(timed=True, op_type=op_type):
-                db_tools.execute_sql(sql, row_data, timed=False)
-                if not db_tools.autocommit:
-                    db_tools.commit_changes(timed=False, message=commit_message)
+        op_type = rc.GetOpTypeFromSQL(sql)
+        with result_collector.maybe_measure_ops(
+            timed=True, op_type=op_type, storage=self._measure_storage
+        ):
+            self.db_tools.execute_sql(sql, row_data, timed=False)
+            if not self.db_tools.autocommit:
+                self.db_tools.commit_changes(timed=False, message=commit_message)
         result_collector.record_sql_query(f"{sql} -- args: {row_data}")
         result_collector.flush_record()
 
@@ -861,7 +851,7 @@ class BenchmarkSuite:
             self._execute_timed_op(update_sql, row_data, "update")
         else:
             # NOTE: Never call execute_sql(timed=True) directly — its auto-flush
-            # conflicts with StorageMeasurer. Use _execute_timed_op for timed ops.
+            # conflicts with storage measurement. Use _execute_timed_op for timed ops.
             self.db_tools.execute_sql(update_sql, row_data, timed=False)
 
         # Track the modified key.
@@ -1115,33 +1105,29 @@ class BenchmarkSuite:
 
             if shape == tp.BranchShape.SPINE:
                 # Linear: branch from current
-                with self._storage.measure():
-                    db_tools.create_branch(
-                        branch_name, current_parent_id, timed=True
-                    )
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name, current_parent_id,
+                    timed=True, storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, current_parent_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, current_parent_id))
             elif shape == tp.BranchShape.FAN_OUT:
                 # Fan-out: always branch from root
-                with self._storage.measure():
-                    db_tools.create_branch(
-                        branch_name, root_branch_id, timed=True
-                    )
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name, root_branch_id,
+                    timed=True, storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
             else:  # BUSHY
                 # Bushy: branch from a random existing branch
                 parent_name, parent_id = rnd.choice(branch_ids)
-                with self._storage.measure():
-                    db_tools.create_branch(branch_name, parent_id, timed=True)
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name, parent_id,
+                    timed=True, storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))

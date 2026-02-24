@@ -399,9 +399,13 @@ class SimulationOps(WorkflowOps):
 
     def compare(self) -> list[str]:
         # C=1: cross-branch aggregation (per-branch portion)
+        # Different from evaluate: computes distributional metrics
+        # (avg cost, p5 cost) rather than raw sums, so cross-branch
+        # comparison reveals variance across simulation branches.
         return [
             """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
-                      SUM(ol.ol_amount) AS total_cost
+                      AVG(ol.ol_amount) AS avg_order_cost,
+                      MIN(ol.ol_amount) AS min_cost
                FROM stock s
                JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
         ]

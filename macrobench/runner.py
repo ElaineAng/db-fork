@@ -10,8 +10,11 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import random
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -98,7 +101,7 @@ def _create_db_tools(config, backend_info, result_collector):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
-def _do_delete_branch(db_tools, branch_node):
+def _do_delete_branch(db_tools, branch_node, storage=False):
     """Delete a branch via the DBToolSuite API.
 
     Dispatches to the backend-specific implementation:
@@ -112,25 +115,69 @@ def _do_delete_branch(db_tools, branch_node):
     Args:
         db_tools: The DBToolSuite instance.
         branch_node: The BranchNode to delete.
+        storage: Whether to measure storage before/after.
     """
     db_tools.delete_branch(
         branch_name=branch_node.name,
         branch_id=branch_node.branch_id,
         timed=True,
+        storage=storage,
     )
 
 
-def _cross_branch_steps(total_steps: int, cross_branch_count: int) -> set[int]:
-    """Return the set of step IDs after which a cross-branch query should run.
+class CrossBranchSync:
+    """Thread-safe synchronization for cross-branch queries.
 
-    C cross-branch queries are spread evenly across S steps.
+    Ensures that when a cross-branch query fires, all worker threads have
+    completed (and pre-committed) at least up to that step, so
+    ``get_pre_committed_leaves()`` sees every thread's latest branch.
+
+    At most ``budget`` cross-branch queries fire across all threads combined.
     """
-    if cross_branch_count <= 0 or total_steps <= 0:
-        return set()
-    if cross_branch_count >= total_steps:
-        return set(range(total_steps))
-    interval = max(1, total_steps // cross_branch_count)
-    return {s for s in range(total_steps) if (s + 1) % interval == 0}
+
+    def __init__(self, total_steps: int, budget: int, num_workers: int):
+        self._lock = threading.Lock()
+        self._remaining = budget
+        if budget <= 0 or total_steps <= 0:
+            self._eligible: set[int] = set()
+        elif budget >= total_steps:
+            self._eligible = set(range(total_steps))
+        else:
+            interval = max(1, total_steps // budget)
+            self._eligible = {
+                s for s in range(total_steps) if (s + 1) % interval == 0
+            }
+
+        # Per-thread progress: step_id of the last completed (or skipped) step.
+        self._progress = [-1] * num_workers
+        self._progress_cond = threading.Condition()
+
+    def report_progress(self, thread_id: int, step_id: int) -> None:
+        """Record that *thread_id* has finished (or skipped) *step_id*."""
+        with self._progress_cond:
+            self._progress[thread_id] = step_id
+            if step_id in self._eligible:
+                self._progress_cond.notify_all()
+
+    def try_claim_and_wait(self, step_id: int, timeout: float = 120.0) -> bool:
+        """Claim this step for a cross-branch query if eligible.
+
+        If claimed, blocks until every thread has reported progress >= step_id
+        so the subsequent ``get_pre_committed_leaves()`` sees all branches.
+        """
+        if step_id not in self._eligible:
+            return False
+        with self._lock:
+            if self._remaining <= 0:
+                return False
+            self._remaining -= 1
+        # Wait for all threads to reach at least this step.
+        with self._progress_cond:
+            self._progress_cond.wait_for(
+                lambda: all(p >= step_id for p in self._progress),
+                timeout=timeout,
+            )
+        return True
 
 
 def _run_cross_branch_queries(
@@ -140,6 +187,7 @@ def _run_cross_branch_queries(
     progress,
     thread_id: int,
     result_collector: rc.ResultCollector = None,
+    measure_storage: bool = False,
 ):
     """Execute cross-branch compare queries on pre-committed leaf branches."""
     compare_queries = workflow_ops.compare()
@@ -151,14 +199,16 @@ def _run_cross_branch_queries(
         if not node.alive:
             continue
         try:
-            connect_fn = lambda: db_tools.connect_branch(node.name, timed=True)
+            connect_fn = lambda: db_tools.connect_branch(
+                node.name, timed=True, storage=measure_storage,
+            )
             if result_collector:
                 _retry_on_429(connect_fn, result_collector)
             else:
                 connect_fn()
             for query in compare_queries:
                 try:
-                    db_tools.execute_sql(query, timed=True)
+                    db_tools.execute_sql(query, timed=True, storage=measure_storage)
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Compare query failed on "
@@ -199,7 +249,7 @@ def _retry_on_429(fn, result_collector, max_retries=10, base_delay=1.0):
                 # Add jitter (0.5x–1.5x) to avoid thundering herd.
                 delay *= 0.5 + random.random()
                 # Record the retry wait (including sleep) as a timed event.
-                with result_collector.maybe_time_ops(
+                with result_collector.maybe_measure_ops(
                     op_type=rslt.OpType.API_RETRY_WAIT, timed=True
                 ):
                     time.sleep(delay)
@@ -217,6 +267,7 @@ def worker_fn(
     result_collector: rc.ResultCollector,
     workflow_ops: WorkflowOps,
     progress: SharedProgress,
+    cb_sync: CrossBranchSync,
 ):
     """Worker thread function implementing the per-step automaton.
 
@@ -235,9 +286,14 @@ def worker_fn(
     """
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
+    measure_storage = config.measure_storage
 
     # Create per-thread DB connection
     db_tools = _create_db_tools(config, backend_info, result_collector)
+
+    # Set up storage measurement if enabled
+    if measure_storage:
+        result_collector.set_storage_fn(db_tools.get_total_storage_bytes)
 
     # Set result context
     result_collector.set_context(
@@ -248,35 +304,17 @@ def worker_fn(
     )
 
     S = config.setup.total_steps
-    C = config.setup.cross_branch_queries
-    cb_steps = _cross_branch_steps(S, C)
 
     try:
         step_id = 0
         while step_id < S:
-            # --- Cross-branch query turn (doesn't count as a step) ---
-            if step_id in cb_steps:
-                cb_steps.discard(step_id)
-                branch_tree.begin_cross_branch()
-                try:
-                    _run_cross_branch_queries(
-                        db_tools,
-                        branch_tree,
-                        workflow_ops,
-                        progress,
-                        thread_id,
-                        result_collector=result_collector,
-                    )
-                finally:
-                    branch_tree.end_cross_branch()
-                continue
-
             # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
             if not branch_tree.wait_for_slot(timeout=60.0):
                 progress.write(
                     f"[T{thread_id}] Timed out waiting for branch slot "
                     f"at step {step_id}, skipping."
                 )
+                cb_sync.report_progress(thread_id, step_id)
                 progress.update(1)
                 step_id += 1
                 continue
@@ -285,6 +323,7 @@ def worker_fn(
             parent_node = branch_tree.assign_parent(rng)
             if parent_node is None:
                 # Tree is full (no eligible parents). Skip this step.
+                cb_sync.report_progress(thread_id, step_id)
                 progress.update(1)
                 step_id += 1
                 continue
@@ -294,13 +333,16 @@ def worker_fn(
                 # Create child branch (retry on rate-limit)
                 _retry_on_429(
                     lambda: db_tools.create_branch(
-                        branch_name, parent_node.branch_id, timed=True
+                        branch_name, parent_node.branch_id,
+                        timed=True, storage=measure_storage,
                     ),
                     result_collector,
                 )
                 # Connect to the new branch
                 _retry_on_429(
-                    lambda: db_tools.connect_branch(branch_name, timed=True),
+                    lambda: db_tools.connect_branch(
+                        branch_name, timed=True, storage=measure_storage,
+                    ),
                     result_collector,
                 )
             except Exception as e:
@@ -308,6 +350,7 @@ def worker_fn(
                     f"[T{thread_id}] Branch creation failed at step "
                     f"{step_id}: {e}"
                 )
+                cb_sync.report_progress(thread_id, step_id)
                 progress.update(1)
                 step_id += 1
                 continue
@@ -328,7 +371,7 @@ def worker_fn(
                 if i >= config.step.schema_changes:
                     break
                 try:
-                    db_tools.execute_sql(stmt, timed=True)
+                    db_tools.execute_sql(stmt, timed=True, storage=measure_storage)
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="ddl")
                 except Exception as e:
@@ -344,7 +387,7 @@ def worker_fn(
                 if i >= config.step.data_mutations:
                     break
                 try:
-                    db_tools.execute_sql(stmt, timed=True)
+                    db_tools.execute_sql(stmt, timed=True, storage=measure_storage)
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="dml")
                 except Exception as e:
@@ -358,7 +401,7 @@ def worker_fn(
                 if i >= config.step.eval_queries:
                     break
                 try:
-                    db_tools.execute_sql(query, timed=True)
+                    db_tools.execute_sql(query, timed=True, storage=measure_storage)
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Eval failed at step {step_id}: {e}"
@@ -366,6 +409,23 @@ def worker_fn(
 
             # --- Mark pre-committed (eligible for cross-branch reads) ---
             branch_tree.mark_pre_committed(child_node)
+            cb_sync.report_progress(thread_id, step_id)
+
+            # --- Cross-branch query (after work, before potential deletion) ---
+            if cb_sync.try_claim_and_wait(step_id):
+                branch_tree.begin_cross_branch()
+                try:
+                    _run_cross_branch_queries(
+                        db_tools,
+                        branch_tree,
+                        workflow_ops,
+                        progress,
+                        thread_id,
+                        result_collector=result_collector,
+                        measure_storage=measure_storage,
+                    )
+                finally:
+                    branch_tree.end_cross_branch()
 
             # --- Prune (probabilistic gamma) ---
             should_prune = (
@@ -379,13 +439,16 @@ def worker_fn(
                 try:
                     _retry_on_429(
                         lambda: db_tools.connect_branch(
-                            branch_tree.root.name, timed=True
+                            branch_tree.root.name, timed=True,
+                            storage=measure_storage,
                         ),
                         result_collector,
                     )
                     # Delete branch (retry on rate-limit)
                     _retry_on_429(
-                        lambda: _do_delete_branch(db_tools, child_node),
+                        lambda: _do_delete_branch(
+                            db_tools, child_node, storage=measure_storage,
+                        ),
                         result_collector,
                     )
                 except Exception as e:
@@ -460,6 +523,11 @@ def main():
         default="/tmp/run_stats",
         help="Directory to save parquet results (default: /tmp/run_stats).",
     )
+    parser.add_argument(
+        "--measure-storage",
+        action="store_true",
+        help="Measure disk_size_before/after around each timed operation.",
+    )
 
     args = parser.parse_args()
 
@@ -474,6 +542,10 @@ def main():
     except Exception as e:
         print(f"Error parsing config: {e}")
         sys.exit(1)
+
+    # Apply CLI overrides
+    if args.measure_storage:
+        config.measure_storage = True
 
     print(f"Run ID: {config.run_id}")
     print(f"Backend: {tp.Backend.Name(config.backend)}")
@@ -494,6 +566,8 @@ def main():
         f"gamma={config.step.prune_prob:.2f}"
     )
     print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
+    if config.measure_storage:
+        print("Storage measurement: enabled")
 
     # Set up backend and database
     micro_config = _build_microbench_config(config)
@@ -531,6 +605,23 @@ def main():
         disable=args.no_progress,
     )
 
+    cb_sync = CrossBranchSync(
+        config.setup.total_steps, config.setup.cross_branch_queries, num_workers
+    )
+
+    # Measure total storage before the workflow
+    storage_before = 0
+    storage_db_tools = None
+    if config.measure_storage:
+        try:
+            storage_db_tools = _create_db_tools(
+                config, backend_info, result_collector
+            )
+            storage_before = storage_db_tools.get_total_storage_bytes()
+            print(f"Storage before workflow: {storage_before} bytes")
+        except Exception as e:
+            print(f"Warning: could not measure storage before workflow: {e}")
+
     print(f"\nStarting macrobenchmark with {num_workers} worker(s)...")
     start_time = time.time()
 
@@ -546,6 +637,7 @@ def main():
                     result_collector=result_collector,
                     workflow_ops=workflow_ops,
                     progress=progress,
+                    cb_sync=cb_sync,
                 )
                 for i in range(num_workers)
             ]
@@ -565,6 +657,43 @@ def main():
             f"Branch tree: {branch_tree.size()} total nodes, "
             f"{branch_tree.alive_count()} alive"
         )
+
+        # Measure total storage after the workflow
+        storage_after = 0
+        if config.measure_storage:
+            try:
+                if storage_db_tools:
+                    storage_after = storage_db_tools.get_total_storage_bytes()
+                    print(f"Storage after workflow: {storage_after} bytes")
+                    print(
+                        f"Storage delta: {storage_after - storage_before} bytes"
+                    )
+            except Exception as e:
+                print(f"Warning: could not measure storage after workflow: {e}")
+            finally:
+                if storage_db_tools:
+                    storage_db_tools.close_connection()
+
+        # Write storage summary to a separate log file
+        if config.measure_storage:
+            storage_log = {
+                "run_id": config.run_id,
+                "backend": tp.Backend.Name(config.backend),
+                "workflow": tp.WorkflowType.Name(config.workflow),
+                "workers": num_workers,
+                "total_steps": config.setup.total_steps,
+                "elapsed_sec": round(elapsed, 2),
+                "storage_before_bytes": storage_before,
+                "storage_after_bytes": storage_after,
+                "storage_delta_bytes": storage_after - storage_before,
+            }
+            storage_log_path = os.path.join(
+                args.outdir, f"{config.run_id}_storage.json"
+            )
+            os.makedirs(args.outdir, exist_ok=True)
+            with open(storage_log_path, "w") as f:
+                json.dump(storage_log, f, indent=2)
+            print(f"Storage log written to {storage_log_path}")
 
         # Write results
         result_collector.write_to_parquet()

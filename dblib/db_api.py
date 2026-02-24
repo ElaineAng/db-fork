@@ -204,7 +204,7 @@ class DBToolSuite(ABC):
 
     @_require_connection
     def create_branch(
-        self, branch_name: str, parent_id: str = None, timed: bool = True
+        self, branch_name: str, parent_id: str = None, timed: bool = True, storage: bool = False
     ) -> None:
         """
         Creates a new branch.
@@ -213,10 +213,11 @@ class DBToolSuite(ABC):
             branch_name: Name of the new branch.
             parent_id: ID of the parent branch to branch from.
             timed: Whether to time and record this operation (default True).
+            storage: Whether to measure storage before/after this operation.
         """
         try:
-            with self.result_collector.maybe_time_ops(
-                op_type=rslt.OpType.BRANCH_CREATE, timed=timed
+            with self.result_collector.maybe_measure_ops(
+                op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
             ):
                 self._create_branch_impl(branch_name, parent_id)
         except Exception as e:
@@ -226,14 +227,14 @@ class DBToolSuite(ABC):
             self.result_collector.flush_record()
 
     @_require_connection
-    def connect_branch(self, branch_name: str, timed: bool = False) -> None:
+    def connect_branch(self, branch_name: str, timed: bool = False, storage: bool = False) -> None:
         """
         Connects to an existing branch to allow reading and writing data to that
         branch. Return a bool indicating whether the operation was successful.
         """
         try:
-            with self.result_collector.maybe_time_ops(
-                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed
+            with self.result_collector.maybe_measure_ops(
+                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
             ):
                 self._connect_branch_impl(branch_name)
         except Exception as e:
@@ -253,11 +254,11 @@ class DBToolSuite(ABC):
         return self._get_current_branch_impl()
 
     @_require_connection
-    def commit_changes(self, timed: bool = False, message: str = "") -> None:
+    def commit_changes(self, timed: bool = False, storage: bool = False, message: str = "") -> None:
         """
         Commits any pending changes to the database with an optional message.
         """
-        with self.result_collector.maybe_time_ops(timed, rslt.OpType.COMMIT):
+        with self.result_collector.maybe_measure_ops(timed, rslt.OpType.COMMIT, storage=storage):
             self._prepare_commit(message)
             self.conn.commit()
         if timed:
@@ -268,6 +269,7 @@ class DBToolSuite(ABC):
         self,
         source_branch: str,
         timed: bool = True,
+        storage: bool = False,
         message: str = "",
     ) -> dict:
         """
@@ -279,6 +281,7 @@ class DBToolSuite(ABC):
         Args:
             source_branch: Name of the branch to merge from.
             timed: Whether to time and record this operation.
+            storage: Whether to measure storage before/after this operation.
             message: Optional merge commit message.
 
         Returns:
@@ -286,8 +289,8 @@ class DBToolSuite(ABC):
         """
         result = {}
         try:
-            with self.result_collector.maybe_time_ops(
-                op_type=rslt.OpType.MERGE, timed=timed
+            with self.result_collector.maybe_measure_ops(
+                op_type=rslt.OpType.MERGE, timed=timed, storage=storage
             ):
                 result = self._merge_branch_impl(source_branch, message)
         except Exception as e:
@@ -303,6 +306,7 @@ class DBToolSuite(ABC):
         branch_name: str,
         branch_id: str = "",
         timed: bool = True,
+        storage: bool = False,
     ) -> None:
         """
         Deletes a branch. The caller must NOT be connected to the branch
@@ -312,10 +316,11 @@ class DBToolSuite(ABC):
             branch_name: Name of the branch to delete.
             branch_id: Backend-specific branch ID (needed for API-based backends).
             timed: Whether to time and record this operation.
+            storage: Whether to measure storage before/after this operation.
         """
         try:
-            with self.result_collector.maybe_time_ops(
-                op_type=rslt.OpType.BRANCH_DELETE, timed=timed
+            with self.result_collector.maybe_measure_ops(
+                op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
             ):
                 self._delete_branch_impl(branch_name, branch_id)
         except Exception as e:
@@ -330,6 +335,7 @@ class DBToolSuite(ABC):
         query: str,
         vars=None,
         timed: bool = False,
+        storage: bool = False,
     ) -> list[tuple]:
         """
         Runs an SQL query in the postgres database on the current branch. The
@@ -343,7 +349,7 @@ class DBToolSuite(ABC):
             with self.conn.cursor() as cur:
                 # Timing both the execute and fetchall together
                 op_type = rc.GetOpTypeFromSQL(query)
-                with self.result_collector.maybe_time_ops(timed, op_type):
+                with self.result_collector.maybe_measure_ops(timed, op_type, storage=storage):
                     cur.execute(query, vars)
                     # cur.description is None for INSERT/UPDATE (no results to fetch)
                     if cur.description is not None:

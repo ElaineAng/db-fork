@@ -72,6 +72,9 @@ message MacroBenchConfig {
     StepParams step = 6;
     // field 7 removed (was BackgroundParams background)
     bool autocommit = 8;
+
+    // Whether to measure storage (disk_size_before/after) around each timed operation.
+    bool measure_storage = 9;
 }
 
 // Isolation overhead benchmark configuration
