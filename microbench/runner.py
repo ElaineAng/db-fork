@@ -222,9 +222,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         # Load the database contents from a SQL dump file into the benchmark
         # database.
         db_uri = get_initial_connection_uri(config, info)
-        print("loading sql file")
         load_sql_file(db_uri, config.database_setup.sql_dump.sql_dump_path)
-        print("sql file loaded")
 
         # Commit to ensure schema changes are visible for certain backends.
         if backend == tp.Backend.DOLT:
@@ -331,11 +329,11 @@ def cleanup_backend(
     if backend_info.file_copy_info:
         FileCopyToolSuite.cleanup(backend_info.file_copy_info)
     elif backend_info.tiger:
-        all_ids = backend_info.tiger.get('all_service_ids', [])
+        all_ids = backend_info.tiger.get('services', [])
         root_id = backend_info.tiger['service_id']
         project_id = backend_info.tiger['project_id']
         # Delete forks first, root last (Tiger won't delete a parent with live children)
-        for sid in all_ids:
+        for sname, (sid, pw)  in all_ids:
             if sid != root_id:
                 try:
                     TigerToolSuite.delete_tiger_service(project_id, sid)
