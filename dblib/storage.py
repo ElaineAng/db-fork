@@ -1,3 +1,4 @@
+import time
 from contextlib import contextmanager
 
 
@@ -19,5 +20,6 @@ class StorageMeasurer:
             self._db_tools.result_collector.record_disk_size_before(size)
         yield
         if self._enabled:
+            time.sleep(0.01)  # 10ms: test APFS delayed st_blocks hypothesis
             size = self._db_tools.get_total_storage_bytes()
             self._db_tools.result_collector.record_disk_size_after(size)
