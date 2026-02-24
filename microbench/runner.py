@@ -166,6 +166,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
             info.tiger['project_id'] = tiger_service["project_id"]
             info.tiger['service_name'] = tiger_service["name"]
             info.tiger['region'] = tiger_service["region_code"]
+            info.tiger['services'] = dict()
             tiger_service = TigerToolSuite.wait_for_service(info.tiger['project_id'], info.tiger['service_id'])
             info.default_uri = (
                 f"postgresql://tsdbadmin:{info.tiger['password']}"
@@ -414,10 +415,7 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
             deletes_per_branch,
         )
         if config.backend == tp.Backend.TIGER:
-            backend_info.tiger['services'] = {
-                sid: {'service_id': sid, 'service_name': name, 'password': pwd}
-                for name, (sid, pwd) in setup_bench.db_tools._services.items()
-            }
+            backend_info.tiger['services'] = setup_bench.db_tools._services
 
     # Store the last branch info in BackendInfo for measurement phase.
     backend_info.default_branch_name = last_branch_name
@@ -625,17 +623,17 @@ class BenchmarkSuite:
                     f"Default Tiger branch name: {self._root_branch_name}, "
                     f"ID: {default_branch_id}"
                 )
-                tiger_creds = self._backend_info.tiger.get(
-                    'services', {}
-                ).get(default_branch_id, {})
+                if not self._backend_info.tiger:
+                    raise Exception("Tiger backend info empty")
                 db_tools = TigerToolSuite.init_for_bench(
                     result_collector,
                     self._backend_info.tiger['project_id'],
-                    tiger_creds.get('service_id', self._backend_info.tiger['service_id']),
-                    tiger_creds.get('service_name', self._backend_info.tiger['service_name']),
-                    tiger_creds.get('password', self._backend_info.tiger['password']),
+                    self._backend_info.tiger['service_id'],
+                    self._backend_info.tiger['service_name'],
+                    self._backend_info.tiger['password'],
                     self._backend_info.tiger['region'],
                     self._config.autocommit,
+                    self._backend_info.tiger['services']
                 )
             elif self._config.backend == tp.Backend.XATA:
                 db_tools = XataToolSuite.init_for_bench(
@@ -685,7 +683,7 @@ class BenchmarkSuite:
         # thread after all worker threads have finished.
         self.db_tools.close_connection()
         if self._config.database_setup.cleanup and self._backend_info.tiger:
-            self._backend_info.tiger['all_service_ids'] = db_tools.get_all_service_ids()
+            self._backend_info.tiger['services'] = self.db_tools.get_all_services()
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
@@ -1177,10 +1175,6 @@ class BenchmarkSuite:
         branch_ids = [(self._root_branch_name, root_branch_id)]
 
         # Perform setup operations on root branch.
-        with db_tools.get_current_connection().cursor() as cur:
-            cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
-            tables = cur.fetchall()
-            print(f"Tables visible on current connection: {tables}")
         print(
             f"Performing setup ops on root branch: "
             f"{inserts_per_branch} inserts, {updates_per_branch} updates, "

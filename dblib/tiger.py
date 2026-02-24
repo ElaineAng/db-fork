@@ -35,6 +35,7 @@ class TigerToolSuite(DBToolSuite):
             password: str,
             region_code: str,
             autocommit: bool,
+            services: dict = None,
             ):
         super().__init__(connection, result_collector)
 
@@ -52,9 +53,12 @@ class TigerToolSuite(DBToolSuite):
             raise ValueError("Tiger credentials not set in environment.")
 
         # Cache: branch_name -> service_id
-        self._services: Dict[str, str] = {
-                service_name: (service_id, password)
-                }
+        if services:
+            self._services = services
+        else:
+            self._services: Dict[str, str] = {
+                    service_name: (service_id, password)
+                    }
 
     @classmethod
     def init_for_bench(
@@ -66,6 +70,7 @@ class TigerToolSuite(DBToolSuite):
             password: str,
             region_code: str,
             autocommit: bool,
+            services: dict,
             ):
         """
         Mirrors NeonToolSuite.init_for_bench. Fetches the service info,
@@ -110,6 +115,7 @@ class TigerToolSuite(DBToolSuite):
                 password=password,
                 region_code=region_code,
                 autocommit=autocommit,
+                services=services
                 )
 
     ###########################################################################
@@ -290,6 +296,7 @@ class TigerToolSuite(DBToolSuite):
                 "cpu_millis": 1000,
                 "fork_strategy": "NOW",
                 "memory_gbs": 4,
+                "password": self.password,
                 }
 
         response = self._request(
@@ -300,13 +307,13 @@ class TigerToolSuite(DBToolSuite):
                 )
 
         new_service_id = response["service_id"]
-        new_password = response["initial_password"]
 
         # Wait for fork to be ready before returning so that callers can
         # immediately connect. Note: this wait time is included in the
         # BRANCH_CREATE timing recorded by the base class.
         self._wait_until_ready(new_service_id)
 
+        new_password = response.get("initial_password", self.password)
         self._services[branch_name] = (new_service_id, new_password)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
@@ -331,9 +338,9 @@ class TigerToolSuite(DBToolSuite):
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_service_name, self.current_service_id)
 
-    def get_all_service_ids(self) -> list[str]:
+    def get_all_services(self) -> dict:
         """Returns all service IDs known to this instance, including forks."""
-        return [service_id for service_id, _ in self._services.values()]
+        return self._services
 
     def _delete_branch_impl(
             self, branch_name: str, branch_id: str
@@ -385,6 +392,8 @@ class TigerToolSuite(DBToolSuite):
                         "GET",
                         f"/projects/{self.project_id}/services/{service_id}",
                         )
+                host = service_info["endpoint"]["host"]
+                port = service_info["endpoint"]["port"]
                 uri = f"postgresql://tsdbadmin:{password}@{host}:{port}/tsdb"
                 tmp_conn = psycopg2.connect(uri)
                 try:
