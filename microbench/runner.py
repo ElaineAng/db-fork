@@ -221,7 +221,9 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         # Load the database contents from a SQL dump file into the benchmark
         # database.
         db_uri = get_initial_connection_uri(config, info)
+        print("loading sql file")
         load_sql_file(db_uri, config.database_setup.sql_dump.sql_dump_path)
+        print("sql file loaded")
 
         # Commit to ensure schema changes are visible for certain backends.
         if backend == tp.Backend.DOLT:
@@ -411,6 +413,11 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
             updates_per_branch,
             deletes_per_branch,
         )
+        if config.backend == tp.Backend.TIGER:
+            backend_info.tiger['services'] = {
+                sid: {'service_id': sid, 'service_name': name, 'password': pwd}
+                for name, (sid, pwd) in setup_bench.db_tools._services.items()
+            }
 
     # Store the last branch info in BackendInfo for measurement phase.
     backend_info.default_branch_name = last_branch_name
@@ -618,12 +625,15 @@ class BenchmarkSuite:
                     f"Default Tiger branch name: {self._root_branch_name}, "
                     f"ID: {default_branch_id}"
                 )
+                tiger_creds = self._backend_info.tiger.get(
+                    'services', {}
+                ).get(default_branch_id, {})
                 db_tools = TigerToolSuite.init_for_bench(
                     result_collector,
                     self._backend_info.tiger['project_id'],
-                    self._backend_info.tiger['service_id'],
-                    self._backend_info.tiger['service_name'],
-                    self._backend_info.tiger['password'],
+                    tiger_creds.get('service_id', self._backend_info.tiger['service_id']),
+                    tiger_creds.get('service_name', self._backend_info.tiger['service_name']),
+                    tiger_creds.get('password', self._backend_info.tiger['password']),
                     self._backend_info.tiger['region'],
                     self._config.autocommit,
                 )

@@ -85,7 +85,8 @@ fi
 if [ -n "$OPS_STRING" ]; then
     IFS=',' read -ra OPERATIONS <<< "$OPS_STRING"
 else
-    OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
+    #OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
+    OPERATIONS=(READ UPDATE RANGE_READ RANGE_UPDATE)
 fi
 
 echo "==================================================="
