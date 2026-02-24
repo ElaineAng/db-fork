@@ -53,7 +53,7 @@ class TigerToolSuite(DBToolSuite):
 
         # Cache: branch_name -> service_id
         self._services: Dict[str, str] = {
-                service_name: service_id
+                service_name: (service_id, password)
                 }
 
     @classmethod
@@ -141,7 +141,7 @@ class TigerToolSuite(DBToolSuite):
 
         return r.json()
 
-    def _wait_until_ready(self, service_id: str, timeout: int = 300):
+    def _wait_until_ready(self, service_id: str, timeout: int = 1200):
         start = time.time()
 
         while True:
@@ -261,6 +261,19 @@ class TigerToolSuite(DBToolSuite):
 
         return r.json()
 
+    @classmethod
+    def delete_tiger_service(cls, project_id: str, service_id: str) -> None:
+        access_key = os.environ.get("TIGER_ACCESS_KEY")
+        secret_key = os.environ.get("TIGER_SECRET_KEY")
+        token = base64.b64encode(f"{access_key}:{secret_key}".encode()).decode()
+        headers = {"Authorization": f"Basic {token}", "Accept": "application/json"}
+        r = requests.delete(
+            f"{TIGER_API_BASE}/projects/{project_id}/services/{service_id}",
+            headers=headers,
+        )
+        if not r.ok:
+            raise Exception(f"Tiger delete failed {r.status_code}: {r.text}")
+
     ###########################################################################
     # Branching = Service Forking
     ###########################################################################
@@ -275,6 +288,7 @@ class TigerToolSuite(DBToolSuite):
                 "name": branch_name,
                 "region_code": self.region_code,
                 "cpu_millis": 1000,
+                "fork_strategy": "NOW",
                 "memory_gbs": 4,
                 }
 
@@ -286,47 +300,46 @@ class TigerToolSuite(DBToolSuite):
                 )
 
         new_service_id = response["service_id"]
+        new_password = response["initial_password"]
 
         # Wait for fork to be ready before returning so that callers can
         # immediately connect. Note: this wait time is included in the
         # BRANCH_CREATE timing recorded by the base class.
         self._wait_until_ready(new_service_id)
 
-        self._services[branch_name] = new_service_id
+        self._services[branch_name] = (new_service_id, new_password)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
-
         if branch_name not in self._services:
             raise ValueError(f"Unknown Tiger branch: {branch_name}")
-
-        service_id = self._services[branch_name]
-
+        service_id, password = self._services[branch_name]
         service_info = self._request(
-                "GET",
-                f"/projects/{self.project_id}/services/{service_id}",
-                )
-
-        uri = self._build_pg_uri(service_info)
-
+            "GET",
+            f"/projects/{self.project_id}/services/{service_id}",
+        )
+        host = service_info["endpoint"]["host"]
+        port = service_info["endpoint"]["port"]
+        uri = f"postgresql://tsdbadmin:{password}@{host}:{port}/tsdb"
         self.conn.close()
         self.conn = psycopg2.connect(uri)
-
         if self.autocommit:
-            self.conn.set_isolation_level(
-                    ISOLATION_LEVEL_AUTOCOMMIT
-                    )
-
+            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         self.current_service_id = service_id
         self.current_service_name = branch_name
 
+
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_service_name, self.current_service_id)
+
+    def get_all_service_ids(self) -> list[str]:
+        """Returns all service IDs known to this instance, including forks."""
+        return [service_id for service_id, _ in self._services.values()]
 
     def _delete_branch_impl(
             self, branch_name: str, branch_id: str
             ) -> None:
 
-        service_id = branch_id or self._services.get(branch_name)
+        service_id = branch_id or (self._services[branch_name][0] if branch_name in self._services else None)
 
         if not service_id:
             raise ValueError(f"Unknown service: {branch_name}")
@@ -350,7 +363,7 @@ class TigerToolSuite(DBToolSuite):
         total = 0
         db_name = "tsdb"
 
-        for service_name, service_id in self._services.items():
+        for service_name, (service_id, password) in self._services.items():
             if service_id == self.current_service_id:
                 # Reuse the live connection for the current service.
                 try:
@@ -372,7 +385,7 @@ class TigerToolSuite(DBToolSuite):
                         "GET",
                         f"/projects/{self.project_id}/services/{service_id}",
                         )
-                uri = self._build_pg_uri(service_info)
+                uri = f"postgresql://tsdbadmin:{password}@{host}:{port}/tsdb"
                 tmp_conn = psycopg2.connect(uri)
                 try:
                     with tmp_conn.cursor() as cur:

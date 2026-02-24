@@ -85,8 +85,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
-    tiger_project_id: Optional[str] = None
-    tiger_service_id: Optional[str] = None
+    tiger: Optional[dict] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
@@ -161,20 +160,22 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
             tiger_service = TigerToolSuite.create_tiger_service(
                 name = f"service_{db_name}"
             )
-            print(tiger_service)
-
-            info.tiger_service_id = tiger_service["service_id"]
-            info.tiger_project_id = tiger_service["project_id"]
-            tiger_service = TigerToolSuite.wait_for_service(info.tiger_project_id, info.tiger_service_id)
+            info.tiger = dict()
+            info.tiger['password'] = tiger_service['initial_password']
+            info.tiger['service_id'] = tiger_service["service_id"]
+            info.tiger['project_id'] = tiger_service["project_id"]
+            info.tiger['service_name'] = tiger_service["name"]
+            info.tiger['region'] = tiger_service["region_code"]
+            tiger_service = TigerToolSuite.wait_for_service(info.tiger['project_id'], info.tiger['service_id'])
             info.default_uri = (
-                f"postgresql://tsdbadmin:{tiger_service['initial_password']}"
+                f"postgresql://tsdbadmin:{info.tiger['password']}"
                 f"@{tiger_service['endpoint']['host']}"
                 f":{tiger_service['endpoint']['port']}/tsdb"
             )
             info.default_branch_id = tiger_service["service_id"]
             info.default_branch_name = tiger_service["name"]
 
-            print(f"Tiger service ID: {info.tiger_service_id}")
+            print(f"Tiger service ID: {info.tiger['service_id']}")
             print(f"Default Tiger connection URI: {info.default_uri}")
 
         else:
@@ -210,12 +211,13 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         else:
             raise NotImplementedError("Xata requires database setup")
 
-    #else:
-     #   raise ValueError(f"Unsupported backend: {backend}")
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
 
     # Create the benchmark database and load contents from a SQL dump file if required.
     if require_db_setup:
-        create_benchmark_database(info.default_uri, db_name)
+        if not info.tiger:
+            create_benchmark_database(info.default_uri, db_name)
         # Load the database contents from a SQL dump file into the benchmark
         # database.
         db_uri = get_initial_connection_uri(config, info)
@@ -265,6 +267,9 @@ def get_initial_connection_uri(
             backend_info.default_branch_id,
             db_name,
         )
+
+    elif backend == tp.Backend.TIGER:
+        return backend_info.default_uri
 
     elif backend == tp.Backend.XATA:
         return XataToolSuite._get_xata_connection_uri(
@@ -322,6 +327,18 @@ def cleanup_backend(
     # Delete the database using a direct connection through default_uri.
     if backend_info.file_copy_info:
         FileCopyToolSuite.cleanup(backend_info.file_copy_info)
+    elif backend_info.tiger:
+        all_ids = backend_info.tiger.get('all_service_ids', [])
+        root_id = backend_info.tiger['service_id']
+        project_id = backend_info.tiger['project_id']
+        # Delete forks first, root last (Tiger won't delete a parent with live children)
+        for sid in all_ids:
+            if sid != root_id:
+                try:
+                    TigerToolSuite.delete_tiger_service(project_id, sid)
+                except Exception as e:
+                    print(f"Warning: failed to delete Tiger service {sid}: {e}")
+        TigerToolSuite.delete_tiger_service(project_id, root_id)
     elif backend_info.default_uri and db_name:
         conn = None
         cur = None
@@ -594,6 +611,20 @@ class BenchmarkSuite:
                     default_branch_id,
                     self._root_branch_name,
                     self._db_name,
+                    self._config.autocommit,
+                )
+            elif self._config.backend == tp.Backend.TIGER:
+                print(
+                    f"Default Tiger branch name: {self._root_branch_name}, "
+                    f"ID: {default_branch_id}"
+                )
+                db_tools = TigerToolSuite.init_for_bench(
+                    result_collector,
+                    self._backend_info.tiger['project_id'],
+                    self._backend_info.tiger['service_id'],
+                    self._backend_info.tiger['service_name'],
+                    self._backend_info.tiger['password'],
+                    self._backend_info.tiger['region'],
                     self._config.autocommit,
                 )
             elif self._config.backend == tp.Backend.XATA:
@@ -1484,6 +1515,8 @@ class BenchmarkSuite:
                 "No benchmark mode configured. Set either "
                 "randomized_benchmark or nth_op_benchmark."
             )
+        if self._config.database_setup.cleanup and self._backend_info.tiger:
+            self._backend_info.tiger['all_service_ids'] = db_tools.get_all_service_ids()
 
 
 if __name__ == "__main__":
