@@ -31,18 +31,18 @@ The dominant file in the data directory is the Dolt journal
 (`.dolt/noms/vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv`), an append-only file
 where all chunk writes go [1][2].
 
-## 3. The Gap
+## 3. The Gap (diagnostic, not measured by experiment)
 
 **gap** := `st_blocks * 512 - st_size` on the journal file
 
-- `st_blocks * 512` = physical bytes allocated on disk (what the
-  experiment measures)
+- `st_blocks * 512` = physical bytes allocated on disk
 - `st_size` = logical bytes written (actual file size)
 - `gap` = allocated-but-unused bytes beyond the logical end
 
-When gap > bytes appended during a Phase 3 UPDATE, `st_blocks` does
-not change, so `disk_size_after == disk_size_before` and the experiment
-reports `storage_delta = 0`.
+On macOS/APFS with N>0, the journal file exhibits a large gap
+(26 KB–1 MB). On Linux/ext4, the gap stays 5–7 KB regardless of N.
+The gap correlates with the zero `storage_delta` observations, but
+the mechanism by which it accumulates on APFS is unknown.
 
 ## 4. Empirical Results (`demo_apfs_storage_delta.py`)
 
@@ -102,17 +102,13 @@ Phase 2 before measurement.
 
 ## 6. Conclusion
 
-On macOS/APFS, DoltgreSQL's journal file accumulates an allocation
-gap during Phase 2 (branch setup). Phase 3 writes land within this
-gap without changing `st_blocks`, so `st_blocks * 512` reports zero
-storage delta. The exact APFS mechanism is unknown (APFS is
-closed-source), but the effect is reproducible and macOS-specific.
-
-On Linux/ext4, no gap accumulates. `st_blocks * 512` correctly
-tracks every write.
-
-`st_size` is the reliable cross-platform metric for detecting
-per-UPDATE storage changes.
+On macOS/APFS with branching history (N>0), Experiment 2's
+`storage_delta` (`st_blocks * 512` before/after) reports zero for
+nearly all UPDATEs. On Linux/ext4, `storage_delta` correctly detects
+writes at any DB size. The effect is specific to how DoltgreSQL
+interacts with APFS — pure filesystem tests with the same write
+sizes and patterns show no discrepancy. The exact APFS-side mechanism
+is unknown (APFS is closed-source), but the effect is reproducible.
 
 ## References
 
