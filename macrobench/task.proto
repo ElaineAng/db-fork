@@ -8,6 +8,8 @@ enum Backend {
     DOLT = 1;
     KPG = 2;
     XATA = 3;
+    FILE_COPY = 4;
+    TIGER = 5;
 }
 
 // The five representative workflow categories from Section 3.1

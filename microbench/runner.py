@@ -24,6 +24,7 @@ from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
+from dblib.tiger import TigerToolSuite
 from dblib.storage import StorageMeasurer
 
 
@@ -84,6 +85,8 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    tiger_project_id: Optional[str] = None
+    tiger_service_id: Optional[str] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
@@ -152,6 +155,41 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
                     info.default_branch_name = branch["name"]
                     info.default_branch_id = branch["id"]
                     break
+    elif backend == tp.Backend.TIGER:
+        if require_db_setup:
+            # Create a new Tiger base service for the benchmark.
+            tiger_service = TigerToolSuite.create_tiger_service(
+                name = f"service_{db_name}"
+            )
+            print(tiger_service)
+
+            info.tiger_service_id = tiger_service["service_id"]
+            info.tiger_project_id = tiger_service["project_id"]
+            tiger_service = TigerToolSuite.wait_for_service(info.tiger_project_id, info.tiger_service_id)
+            info.default_uri = (
+                f"postgresql://tsdbadmin:{tiger_service['initial_password']}"
+                f"@{tiger_service['endpoint']['host']}"
+                f":{tiger_service['endpoint']['port']}/tsdb"
+            )
+            info.default_branch_id = tiger_service["service_id"]
+            info.default_branch_name = tiger_service["name"]
+
+            print(f"Tiger service ID: {info.tiger_service_id}")
+            print(f"Default Tiger connection URI: {info.default_uri}")
+
+        else:
+            # Reuse existing Tiger service from config.
+            info.tiger_service_id = (
+                config.database_setup.existing_db.tiger_service_id
+            )
+
+            service_info = TigerToolSuite.get_service(
+                info.tiger_service_id
+            )
+
+            info.default_branch_name = service_info["name"]
+            info.default_branch_id = service_info["id"]
+            info.default_uri = service_info["connection_uri"]
 
     elif backend == tp.Backend.XATA:
         if require_db_setup:
@@ -172,8 +210,8 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         else:
             raise NotImplementedError("Xata requires database setup")
 
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
+    #else:
+     #   raise ValueError(f"Unsupported backend: {backend}")
 
     # Create the benchmark database and load contents from a SQL dump file if required.
     if require_db_setup:
