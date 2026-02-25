@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
@@ -132,6 +133,17 @@ class XataToolSuite(DBToolSuite):
             method, XATA_API_BASE_URL + endpoint, headers=headers, **kwargs
         )
 
+        if r.status_code == 429:
+            retry_after = r.headers.get("Retry-After", "unknown")
+            print(
+                f"\nFATAL: Xata API rate limit hit (HTTP 429).\n"
+                f"  Endpoint: {method} {endpoint}\n"
+                f"  Retry-After: {retry_after}\n"
+                f"  Response: {r.text}\n"
+                f"Reduce concurrency or add delays between API calls."
+            )
+            sys.exit(1)
+
         r.raise_for_status()
 
         if r.status_code == 204 or not r.content:
@@ -181,17 +193,34 @@ class XataToolSuite(DBToolSuite):
 
     @classmethod
     def _get_xata_connection_uri(
-        cls, project_id: str, branch_id: str, db_name: str
-    ) -> str:
+        cls, project_id: str, branch_id: str, db_name: str,
+        max_retries: int = 5, retry_delay: float = 2.0,
+    ) -> str | None:
         """
-        Retrieves the connection URI for a specific Xata databasse branch.
+        Retrieves the connection URI for a specific Xata database branch.
+
+        Retries on HTTP 404 because newly created branches may not be
+        immediately visible via the API.
         """
         endpoint = f"projects/{project_id}/branches/{branch_id}"
-        response = cls._request("GET", endpoint)
-        print(response["status"]["statusType"])
-        return cls.add_db_name_to_connection_string(
-            response["connectionString"], db_name
-        )
+        for attempt in range(max_retries):
+            try:
+                response = cls._request("GET", endpoint)
+                return cls.add_db_name_to_connection_string(
+                    response["connectionString"], db_name
+                )
+            except requests.exceptions.HTTPError as e:
+                is_404 = e.response is not None and e.response.status_code == 404
+                if is_404 and attempt < max_retries - 1:
+                    print(
+                        f"Branch {branch_id} not yet visible (attempt "
+                        f"{attempt + 1}/{max_retries}), retrying in "
+                        f"{retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                    continue
+                raise
+        return None
 
     def __init__(
         self,
@@ -208,9 +237,11 @@ class XataToolSuite(DBToolSuite):
         self.current_branch_name = branch_name or "production"
         self.current_branch_id = branch_id
         self.autocommit = autocommit
-        self._all_branches = {branch_name: (branch_id, None)}
+        self._all_branches: dict[str, tuple[str, str | None]] = {
+            branch_name: (branch_id, None)
+        }
 
-    def _get_xata_branches(self) -> list[dict]:
+    def _get_xata_branches(self) -> dict:
         """
         Lists all branches in the current Xata project.
         """
@@ -277,8 +308,9 @@ class XataToolSuite(DBToolSuite):
         # Note that the first time we connect to a branch, we need to make an API
         # call to get the connection string, which may be add slight additional
         # overhead.
-        branch_id = self._all_branches[branch_name][0]
-        uri = self._all_branches[branch_name][1]
+        branch_info = self._all_branches.get(branch_name)
+        branch_id = branch_info[0] if branch_info else None
+        uri = branch_info[1] if branch_info else None
         if not branch_id:
             all_branches = self._get_xata_branches()
             if branch_name not in all_branches:
@@ -293,16 +325,17 @@ class XataToolSuite(DBToolSuite):
             # Cache the URI - replace tuple since tuples are immutable
             self._all_branches[branch_name] = (branch_id, uri)
 
-        self.conn.close()
-        self.conn = psycopg2.connect(uri)
+        new_conn = psycopg2.connect(uri)
         if self.autocommit:
-            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+            new_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        self.conn.close()
+        self.conn = new_conn
 
         self.current_branch_name = branch_name
         self.current_branch_id = branch_id
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
-        return (self.current_branch_name, self.current_branch_id)
+        return self.current_branch_name, self.current_branch_id
 
     def _get_branch_instance_ids(self, branch_id: str) -> list[str]:
         """Get instance IDs for a branch from its detail endpoint."""
@@ -338,6 +371,9 @@ class XataToolSuite(DBToolSuite):
                     max_bytes = val
         return int(max_bytes)
 
+    _BRANCH_METRICS_MAX_RETRIES = 3
+    _BRANCH_METRICS_RETRY_DELAY = 3.0
+
     def get_total_storage_bytes(self) -> int:
         """Get total disk usage across all branches in the Xata project.
 
@@ -350,15 +386,37 @@ class XataToolSuite(DBToolSuite):
         full logical footprint.  The sum therefore overcounts actual physical
         storage — shared data is counted once per branch.
 
+        Per-branch failures are retried and, if still unsuccessful, skipped
+        so that measurements from other branches are not discarded.
+
         Returns:
             Total storage in bytes, or 0 if unavailable.
         """
         try:
             branches = self._get_xata_branches()
-            total = 0
-            for _, (branch_id, _) in branches.items():
-                total += self._get_branch_disk_bytes(branch_id)
-            return total
         except Exception as e:
-            print(f"Warning: Could not get Xata storage metrics: {e}")
+            print(f"Warning: Could not list Xata branches: {e}")
             return 0
+
+        total = 0
+        for name, (branch_id, _) in branches.items():
+            for attempt in range(self._BRANCH_METRICS_MAX_RETRIES):
+                try:
+                    total += self._get_branch_disk_bytes(branch_id)
+                    break
+                except Exception as e:
+                    if attempt < self._BRANCH_METRICS_MAX_RETRIES - 1:
+                        print(
+                            f"Warning: branch '{name}' metrics attempt "
+                            f"{attempt + 1}/{self._BRANCH_METRICS_MAX_RETRIES}"
+                            f" failed ({e}), retrying in "
+                            f"{self._BRANCH_METRICS_RETRY_DELAY}s..."
+                        )
+                        time.sleep(self._BRANCH_METRICS_RETRY_DELAY)
+                    else:
+                        print(
+                            f"Warning: Could not get storage for branch "
+                            f"'{name}' after "
+                            f"{self._BRANCH_METRICS_MAX_RETRIES} attempts: {e}"
+                        )
+        return total
