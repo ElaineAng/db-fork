@@ -173,7 +173,6 @@ launch_exp2_worker() {
         export XATA_ORGANIZATION_ID="$org_id"
         export RUN_STATS_DIR="$run_stats_dir"
         export RUN_XATA=1
-        export EXP2_SMOKE_ONE_POINT=0
         export EXP2_ENABLE_2A="$enable_2a"
         export EXP2_ENABLE_2B="$enable_2b"
         export EXP2_SHAPES_CSV="$shapes_csv"
