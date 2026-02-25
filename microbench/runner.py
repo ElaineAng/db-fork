@@ -148,12 +148,15 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
 
     elif backend == tp.Backend.XATA:
         if require_db_setup:
+            # Xata project names must be unique within an organization.
+            # Use pid + time_ns to avoid collisions across reruns/concurrent jobs.
+            xata_project_name = f"project_{db_name}_{os.getpid()}_{time.time_ns()}"
             (
                 xata_project_id,
                 default_branch_id,
                 default_branch_name,
                 default_uri,
-            ) = XataToolSuite.create_xata_project(f"project_{db_name}")
+            ) = XataToolSuite.create_xata_project(xata_project_name)
             info.xata_project_id = xata_project_id
             info.default_uri = default_uri
             info.default_branch_id = default_branch_id
@@ -332,8 +335,15 @@ def perform_branch_setup(
 
     # Create a temporary BenchmarkSuite for setup operations.
     # Branch creation is timed and saved to a separate _setup.parquet file.
+    setup_slow_latency_multiplier = None
+    if config.WhichOneof("benchmark_mode") == "throughput_benchmark":
+        setup_slow_latency_multiplier = (
+            config.throughput_benchmark.slow_latency_multiplier
+        )
+
     setup_result_collector = rc.ResultCollector(
         run_id=f"{config.run_id}_setup",
+        slow_latency_multiplier=setup_slow_latency_multiplier,
     )
     setup_result_collector.set_outcome_phase(rf.PHASE_SETUP)
     setup_branch_manager = SharedBranchManager()
@@ -1506,6 +1516,11 @@ if __name__ == "__main__":
 
     benchmark_mode = config.WhichOneof("benchmark_mode")
     is_throughput = benchmark_mode == "throughput_benchmark"
+    slow_latency_multiplier = None
+    if is_throughput:
+        slow_latency_multiplier = (
+            config.throughput_benchmark.slow_latency_multiplier
+        )
     num_iterations = get_num_iterations(config, NTH_OP_NUM_RUNS)
 
     if num_iterations > 1:
@@ -1518,6 +1533,7 @@ if __name__ == "__main__":
     shared_result_collector = rc.ResultCollector(
         run_id=config.run_id,
         output_dir=run_stats_dir,
+        slow_latency_multiplier=slow_latency_multiplier,
     )
 
     # Generate a fixed seed once to use across all iterations for reproducibility.

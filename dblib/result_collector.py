@@ -55,6 +55,7 @@ class ResultCollector:
         self,
         run_id: str = None,
         output_dir: str = None,
+        slow_latency_multiplier: float | None = None,
     ):
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir or os.environ.get(
@@ -71,7 +72,12 @@ class ResultCollector:
         self.results = []
         self.iteration_counter = 0
 
-        self._outcome_policy = OutcomePolicy()
+        if slow_latency_multiplier is None:
+            self._outcome_policy = OutcomePolicy()
+        else:
+            self._outcome_policy = OutcomePolicy(
+                multiplier=slow_latency_multiplier
+            )
         self._summary = SummaryCounters()
 
         os.makedirs(self.output_dir, exist_ok=True)
