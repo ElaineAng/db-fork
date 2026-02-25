@@ -106,4 +106,9 @@ echo "  Output:    $OUTDIR"
 echo "  Config:    $TMP_CONFIG (patched from $BASE_CONFIG)"
 echo "======================"
 
-python -m macrobench.runner --config "$TMP_CONFIG" --outdir "$OUTDIR"
+python -m macrobench.runner \
+    --config "$TMP_CONFIG" \
+    --outdir "$OUTDIR" \
+    --measure-storage \
+    --measure-interference \
+    --monitor-queries olap

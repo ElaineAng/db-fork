@@ -8,7 +8,7 @@ database_setup {
     db_name: "macrobench_mcts"
     cleanup: true
     sql_dump {
-        sql_dump_path: "db_setup/ch-w1.sql"
+        sql_dump_path: "db_setup/ch_benchmark_seed.sql"
     }
 }
 

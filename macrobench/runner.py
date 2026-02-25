@@ -101,6 +101,20 @@ def _create_db_tools(config, backend_info, result_collector):
         raise ValueError(f"Unsupported backend: {backend}")
 
 
+def _flush_to_disk(db_tools):
+    """Flush database and OS buffers so on-disk storage measurements are accurate.
+
+    Tries CHECKPOINT (PostgreSQL) to flush shared_buffers, then os.sync()
+    to flush OS page cache.  CHECKPOINT is silently skipped for backends
+    that don't support it (e.g. Dolt).
+    """
+    try:
+        db_tools.execute_sql("CHECKPOINT")
+    except Exception:
+        pass  # Dolt / non-PG backends
+    os.sync()
+
+
 def _do_delete_branch(db_tools, branch_node, storage=False):
     """Delete a branch via the DBToolSuite API.
 
@@ -200,7 +214,9 @@ def _run_cross_branch_queries(
             continue
         try:
             connect_fn = lambda: db_tools.connect_branch(
-                node.name, timed=True, storage=measure_storage,
+                node.name,
+                timed=True,
+                storage=measure_storage,
             )
             if result_collector:
                 _retry_on_429(connect_fn, result_collector)
@@ -208,7 +224,9 @@ def _run_cross_branch_queries(
                 connect_fn()
             for query in compare_queries:
                 try:
-                    db_tools.execute_sql(query, timed=True, storage=measure_storage)
+                    db_tools.execute_sql(
+                        query, timed=True, storage=measure_storage
+                    )
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Compare query failed on "
@@ -333,15 +351,19 @@ def worker_fn(
                 # Create child branch (retry on rate-limit)
                 _retry_on_429(
                     lambda: db_tools.create_branch(
-                        branch_name, parent_node.branch_id,
-                        timed=True, storage=measure_storage,
+                        branch_name,
+                        parent_node.branch_id,
+                        timed=True,
+                        storage=measure_storage,
                     ),
                     result_collector,
                 )
                 # Connect to the new branch
                 _retry_on_429(
                     lambda: db_tools.connect_branch(
-                        branch_name, timed=True, storage=measure_storage,
+                        branch_name,
+                        timed=True,
+                        storage=measure_storage,
                     ),
                     result_collector,
                 )
@@ -371,7 +393,9 @@ def worker_fn(
                 if i >= config.step.schema_changes:
                     break
                 try:
-                    db_tools.execute_sql(stmt, timed=True, storage=measure_storage)
+                    db_tools.execute_sql(
+                        stmt, timed=True, storage=measure_storage
+                    )
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="ddl")
                 except Exception as e:
@@ -387,7 +411,9 @@ def worker_fn(
                 if i >= config.step.data_mutations:
                     break
                 try:
-                    db_tools.execute_sql(stmt, timed=True, storage=measure_storage)
+                    db_tools.execute_sql(
+                        stmt, timed=True, storage=measure_storage
+                    )
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="dml")
                 except Exception as e:
@@ -401,7 +427,9 @@ def worker_fn(
                 if i >= config.step.eval_queries:
                     break
                 try:
-                    db_tools.execute_sql(query, timed=True, storage=measure_storage)
+                    db_tools.execute_sql(
+                        query, timed=True, storage=measure_storage
+                    )
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Eval failed at step {step_id}: {e}"
@@ -439,7 +467,8 @@ def worker_fn(
                 try:
                     _retry_on_429(
                         lambda: db_tools.connect_branch(
-                            branch_tree.root.name, timed=True,
+                            branch_tree.root.name,
+                            timed=True,
                             storage=measure_storage,
                         ),
                         result_collector,
@@ -447,7 +476,9 @@ def worker_fn(
                     # Delete branch (retry on rate-limit)
                     _retry_on_429(
                         lambda: _do_delete_branch(
-                            db_tools, child_node, storage=measure_storage,
+                            db_tools,
+                            child_node,
+                            storage=measure_storage,
                         ),
                         result_collector,
                     )
@@ -528,6 +559,42 @@ def main():
         action="store_true",
         help="Measure disk_size_before/after around each timed operation.",
     )
+    parser.add_argument(
+        "--measure-interference",
+        action="store_true",
+        help="Enable background interference measurement (3-phase: warmup/baseline/measurement).",
+    )
+    parser.add_argument(
+        "--warmup-sec",
+        type=int,
+        default=5,
+        help="Seconds for interference warmup phase (default: 5).",
+    )
+    parser.add_argument(
+        "--baseline-sec",
+        type=int,
+        default=30,
+        help="Seconds for interference baseline phase (default: 15).",
+    )
+    parser.add_argument(
+        "--monitor-threads",
+        type=int,
+        default=1,
+        help="Number of background interference monitor threads (default: 2).",
+    )
+    parser.add_argument(
+        "--monitor-queries",
+        type=str,
+        default="oltp_read,oltp_write,olap",
+        help="Comma-separated query types for interference monitor "
+        "(default: oltp_read,oltp_write,olap).",
+    )
+    parser.add_argument(
+        "--monitor-interval-ms",
+        type=int,
+        default=100,
+        help="Sleep between monitor queries in ms (default: 0, no delay).",
+    )
 
     args = parser.parse_args()
 
@@ -568,6 +635,12 @@ def main():
     print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
     if config.measure_storage:
         print("Storage measurement: enabled")
+    if args.measure_interference:
+        print(
+            f"Interference measurement: enabled "
+            f"(threads={args.monitor_threads}, "
+            f"warmup={args.warmup_sec}s, baseline={args.baseline_sec}s)"
+        )
 
     # Set up backend and database
     micro_config = _build_microbench_config(config)
@@ -617,10 +690,48 @@ def main():
             storage_db_tools = _create_db_tools(
                 config, backend_info, result_collector
             )
+            _flush_to_disk(storage_db_tools)
             storage_before = storage_db_tools.get_total_storage_bytes()
             print(f"Storage before workflow: {storage_before} bytes")
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
+
+    # --- Interference monitor setup (3-phase: warmup → baseline → measurement) ---
+    monitor = None
+    if args.measure_interference:
+        from macrobench.interference_monitor import (
+            InterferenceMonitor,
+            _make_connection_factory,
+            BASELINE,
+            MEASUREMENT,
+        )
+
+        conn_factory = _make_connection_factory(config, backend_info)
+        # evaluate_queries = workflow_ops.evaluate()
+        evaluate_queries = None  # Don't run workflow queries in monitor; use separate interference queries instead.
+        query_types = [
+            q.strip() for q in args.monitor_queries.split(",") if q.strip()
+        ]
+        monitor = InterferenceMonitor(
+            num_threads=args.monitor_threads,
+            connection_factory=conn_factory,
+            num_warehouses=workflow_ops.num_warehouses,
+            evaluate_queries=evaluate_queries,
+            query_types=query_types,
+            interval_sec=args.monitor_interval_ms / 1000.0,
+            run_id=config.run_id,
+            output_dir=args.outdir,
+        )
+        monitor.start()
+        print(f"Interference monitor: WARMUP ({args.warmup_sec}s)...")
+        time.sleep(args.warmup_sec)
+
+        monitor.set_phase(BASELINE)
+        print(f"Interference monitor: BASELINE ({args.baseline_sec}s)...")
+        time.sleep(args.baseline_sec)
+
+        monitor.set_phase(MEASUREMENT)
+        print("Interference monitor: MEASUREMENT (workers starting)...")
 
     print(f"\nStarting macrobenchmark with {num_workers} worker(s)...")
     start_time = time.time()
@@ -651,6 +762,10 @@ def main():
         progress.close()
 
     finally:
+        # Stop interference monitor before any cleanup
+        if monitor:
+            monitor.stop()
+
         elapsed = time.time() - start_time
         print(f"\nCompleted in {elapsed:.1f}s")
         print(
@@ -658,11 +773,16 @@ def main():
             f"{branch_tree.alive_count()} alive"
         )
 
+        # Write interference results
+        if monitor:
+            monitor.write_parquet()
+
         # Measure total storage after the workflow
         storage_after = 0
         if config.measure_storage:
             try:
                 if storage_db_tools:
+                    _flush_to_disk(storage_db_tools)
                     storage_after = storage_db_tools.get_total_storage_bytes()
                     print(f"Storage after workflow: {storage_after} bytes")
                     print(
