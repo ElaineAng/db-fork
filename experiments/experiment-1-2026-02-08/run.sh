@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$REPO_ROOT/bench_lib.sh"
 
-load_env
+# load_env
 # eval "$("$REPO_ROOT/db_setup/setup_pg_volume.sh")"
 
 SEED=42

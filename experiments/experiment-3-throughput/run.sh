@@ -381,7 +381,7 @@ run_backend_matrix() {
     done
 }
 
-load_env
+# load_env
 # PG volume setup — not needed for Xata-only runs.
 # if [ "$FRESH_PG_VOLUME" = "1" ]; then
 #     echo "Preparing fresh PostgreSQL volume state (--delete)."

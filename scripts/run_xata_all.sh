@@ -33,9 +33,9 @@ RUN_STATS_DIR_EXP2="/tmp/run_stats_xata_exp2"
 RUN_STATS_DIR_EXP3="/tmp/run_stats_xata_exp3"
 
 # Standard result dirs (where other backends' data already lives)
-DATA_DIR_EXP1="$REPO_ROOT/experiments/experiment-1-2026-02-08/results/data"
-DATA_DIR_EXP2="$REPO_ROOT/experiments/experiment-2-2026-02-08/results/data"
-DATA_DIR_EXP3="$REPO_ROOT/experiments/experiment-3-throughput/results/data"
+DATA_DIR_EXP1="$REPO_ROOT/experiments/experiment-1-2026-02-08/results/data/xata"
+DATA_DIR_EXP2="$REPO_ROOT/experiments/experiment-2-2026-02-08/results/data/xata"
+DATA_DIR_EXP3="$REPO_ROOT/experiments/experiment-3-throughput/results/data/xata"
 
 # Which experiments to run (default: all)
 if [ "$#" -eq 0 ]; then
