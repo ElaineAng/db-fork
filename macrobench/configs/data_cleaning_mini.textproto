@@ -1,0 +1,32 @@
+# Data Cleaning workflow — mini scale for Neon.
+
+run_id: "macro_data_cleaning_mini"
+backend: NEON
+workflow: DATA_CLEANING
+
+database_setup {
+    db_name: "macrobench_dataclean"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/ch-w1.sql"
+    }
+}
+
+setup {
+    workers: 5              # T  (full: 10)
+    total_steps: 8          # S  (full: 20)
+    root_fanout: 5          # F_r (full: 10)
+    inner_fanout: 2         # F_i (full: 3)
+    max_depth: 2            # D  (full: 3)
+    cross_branch_queries: 1 # C  (full: 2)
+    db_scale: 1
+}
+
+step {
+    schema_changes: 1   # M_s
+    data_mutations: 1   # M_d
+    eval_queries: 1     # Q_v
+    prune_prob: 0.0     # gamma
+}
+
+autocommit: true

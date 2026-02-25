@@ -157,22 +157,21 @@ class FailureReproOps(WorkflowOps):
             "ALTER TABLE order_line ADD COLUMN "
             f"ol_discount_{suffix} DECIMAL(5,2);",
         ]
-        # Additional DDL ops to fill M_s=5
+        # Additional DDL ops to fill M_s=5.
+        # Avoid ADD/DROP CONSTRAINT — DoltgreSQL panics on CHECK constraints.
         if step_id % 2 == 0:
             stmts.append(
                 f"ALTER TABLE order_line DROP COLUMN ol_discount_{suffix};"
             )
         stmts.append(
-            f"ALTER TABLE order_line ADD CONSTRAINT "
-            f"ol_amount_check_{suffix} CHECK (ol_amount >= 0);"
-        )
-        stmts.append(
-            f"ALTER TABLE order_line DROP CONSTRAINT IF EXISTS "
-            f"ol_amount_check_{suffix};"
-        )
-        stmts.append(
             f"ALTER TABLE orders ADD COLUMN "
             f"o_flag_{suffix} BOOLEAN DEFAULT false;"
+        )
+        stmts.append(
+            f"ALTER TABLE customer ADD COLUMN c_note_{suffix} VARCHAR(64);"
+        )
+        stmts.append(
+            f"ALTER TABLE stock ADD COLUMN s_tag_{suffix} VARCHAR(16);"
         )
         return stmts
 

@@ -22,7 +22,6 @@ from macrobench.branch_tree import BranchTree
 from macrobench.workflows import get_workflow_ops, WorkflowOps
 
 from dblib import result_collector as rc
-from util.import_db import load_sql_file
 
 # Reuse infrastructure from microbench
 from microbench.runner import (
@@ -37,6 +36,7 @@ from dblib.dolt import DoltToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
+from dblib.file_copy import FileCopyToolSuite
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -85,6 +85,14 @@ def _create_db_tools(config, backend_info, result_collector):
             backend_info.default_branch_name,
             db_name,
             autocommit,
+        )
+    elif backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
+            backend_info.file_copy_info.branches,
         )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -490,23 +498,6 @@ def main():
     # Set up backend and database
     micro_config = _build_microbench_config(config)
     backend_info = create_backend_project(micro_config)
-
-    # Load seed data if a seed file exists alongside the schema.
-    if config.database_setup.WhichOneof("source") == "sql_dump":
-        schema_path = config.database_setup.sql_dump.sql_dump_path
-        seed_path = schema_path.replace("_schema.sql", "_seed.sql")
-        from pathlib import Path
-
-        if seed_path != schema_path and Path(seed_path).exists():
-            from microbench.runner import get_initial_connection_uri
-
-            db_uri = get_initial_connection_uri(micro_config, backend_info)
-            print(f"Loading seed data: {seed_path}")
-            load_sql_file(db_uri, seed_path)
-            if config.backend == tp.Backend.DOLT:
-                from dblib.dolt import commit_dolt_schema
-
-                commit_dolt_schema(db_uri, message="Load seed data")
 
     # Initialize components
     workflow_ops = get_workflow_ops(

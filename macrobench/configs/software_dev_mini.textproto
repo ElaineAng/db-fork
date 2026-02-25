@@ -1,0 +1,34 @@
+# Software Development workflow — mini scale for Neon.
+# Same shape as full config but fewer workers/steps to stay within
+# Neon's 20 active branch and API rate limits.
+
+run_id: "macro_software_dev_mini"
+backend: NEON
+workflow: SOFTWARE_DEV
+
+database_setup {
+    db_name: "macrobench_softdev"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/ch-w1.sql"
+    }
+}
+
+setup {
+    workers: 2              # T  (full: 5)
+    total_steps: 5          # S  (full: 20)
+    root_fanout: 3          # F_r (full: 5)
+    inner_fanout: 2         # F_i (full: 3)
+    max_depth: 3            # D  (full: 4)
+    cross_branch_queries: 1 # C
+    db_scale: 1
+}
+
+step {
+    schema_changes: 1   # M_s
+    data_mutations: 1   # M_d
+    eval_queries: 2     # Q_v
+    prune_prob: 0.1     # gamma
+}
+
+autocommit: true
