@@ -126,7 +126,7 @@ run_one_benchmark() {
     echo ""
 
     echo "Starting benchmark..."
-    python -m microbench.runner --config "$config_file" --seed "$seed"
+    python3 -m microbench.runner --config "$config_file" --seed "$seed"
 
     # Clean up dropped databases to prevent disk space explosion
     rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/*
@@ -160,7 +160,7 @@ run_branch_sweep() {
 
     # Create temporary config file
     local temp_config
-    temp_config=$(mktemp /tmp/${backend}_bench_config.XXXXXX.textproto)
+    temp_config=$(mktemp /tmp/${backend}_bench_config.XXXXXX)
 
     local shape_lower
     shape_lower=$(echo "$shape" | tr '[:upper:]' '[:lower:]')
@@ -319,7 +319,7 @@ run_throughput_sweep() {
     local sql_prefix="${sql_basename:0:4}"
 
     local temp_config
-    temp_config=$(mktemp /tmp/${backend}_throughput_config.XXXXXX.textproto)
+    temp_config=$(mktemp /tmp/${backend}_throughput_config.XXXXXX)
 
     local shape_lower
     shape_lower=$(echo "$shape" | tr '[:upper:]' '[:lower:]')
