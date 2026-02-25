@@ -24,7 +24,6 @@ SQL_DUMP="$REPO_ROOT/db_setup/tpcc_schema.sql"
 RUN_XATA="${RUN_XATA:-1}"
 # NEON_MAX_BRANCHES="${NEON_MAX_BRANCHES:-8}"
 XATA_MAX_BRANCHES="${XATA_MAX_BRANCHES:-16}"
-EXP2_SMOKE_ONE_POINT="${EXP2_SMOKE_ONE_POINT:-0}"
 NUM_BRANCHES_CSV="${NUM_BRANCHES_CSV:-}"
 EXP2_ENABLE_2A="${EXP2_ENABLE_2A:-1}"
 EXP2_ENABLE_2B="${EXP2_ENABLE_2B:-1}"
@@ -125,26 +124,6 @@ fi
 echo "============================================="
 echo "Experiment 2: Per-Operation Storage Overhead"
 echo "============================================="
-
-if [ "$EXP2_SMOKE_ONE_POINT" = "1" ]; then
-    if [ -n "$NUM_BRANCHES_CSV" ]; then
-        parse_num_branches_csv "$NUM_BRANCHES_CSV"
-    else
-        NUM_BRANCHES_LIST=(1)
-    fi
-
-    echo ""
-    echo "--- Exp 2 smoke: single-point UPDATE (spine) ---"
-    if [ "$RUN_XATA" = "1" ]; then
-        run_branch_sweep xata "$SQL_DUMP" spine "$SEED" "$XATA_MAX_BRANCHES" true UPDATE
-    else
-        echo "Xata skipped (set RUN_XATA=1 to run Xata)."
-    fi
-    echo ""
-    echo "Experiment 2 smoke complete."
-    echo "Results in ${RUN_STATS_DIR:-/tmp/run_stats}/"
-    exit 0
-fi
 
 if [ "$EXP2_ENABLE_2A" != "0" ] && [ "$EXP2_ENABLE_2A" != "1" ]; then
     echo "Error: EXP2_ENABLE_2A must be 0 or 1."

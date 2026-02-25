@@ -2,23 +2,18 @@
 # run_xata_all.sh — Single consolidated 11-worker Xata orchestrator.
 #
 # Default behavior:
-#   PROFILE=full bash scripts/run_xata_all.sh
-#
-# Smoke:
-#   PROFILE=smoke bash scripts/run_xata_all.sh
+#   bash scripts/run_xata_all.sh
 #
 # Optional subset via positional args:
 #   bash scripts/run_xata_all.sh p01_exp1_spine p09_exp3_spine
 #
 # Optional env:
-#   PROFILE=smoke|full (default: full)
 #   RUN_TAG=<custom-tag>
 #   WORKERS_CSV=<csv-worker-ids>  # overridden by positional args if present
 
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROFILE="${PROFILE:-full}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 WORKERS_CSV="${WORKERS_CSV:-}"
 RUN_ROOT="${REPO_ROOT}/experiments/xata_11proc_runs/${RUN_TAG}"
@@ -33,11 +28,6 @@ if [ "$#" -gt 0 ]; then
         fi
     done
     WORKERS_CSV="$workers_csv"
-fi
-
-if [ "$PROFILE" != "smoke" ] && [ "$PROFILE" != "full" ]; then
-    echo "Error: PROFILE must be either 'smoke' or 'full'."
-    exit 1
 fi
 
 if [ -d "$REPO_ROOT/.venv/bin" ]; then
@@ -151,13 +141,8 @@ launch_exp1_worker() {
         export RUN_STATS_DIR="$run_stats_dir"
         export RUN_XATA=1
         export SHAPES_CSV="$shape"
-        if [ "$PROFILE" = "smoke" ]; then
-            export NUM_BRANCHES_CSV=1
-            export XATA_MAX_BRANCHES=1
-        else
-            export NUM_BRANCHES_CSV="1,2,4,8,16,32,64,128,256,512,1024"
-            export XATA_MAX_BRANCHES=16
-        fi
+        export NUM_BRANCHES_CSV="1,2,4,8,16,32,64,128,256,512,1024"
+        export XATA_MAX_BRANCHES=16
         bash "$REPO_ROOT/experiments/experiment-1-2026-02-08/run.sh"
         cp -v "$RUN_STATS_DIR"/xata_*.parquet "$data_dir/" 2>/dev/null || true
         cp -v "$RUN_STATS_DIR"/xata_*_summary.json "$data_dir/" 2>/dev/null || true
@@ -194,13 +179,8 @@ launch_exp2_worker() {
         export EXP2_SHAPES_CSV="$shapes_csv"
         export EXP2A_OPS_CSV="$ops_csv"
         export EXP2B_RANGES_CSV="$ranges_csv"
-        if [ "$PROFILE" = "smoke" ]; then
-            export NUM_BRANCHES_CSV=1
-            export XATA_MAX_BRANCHES=1
-        else
-            export NUM_BRANCHES_CSV="1,2,4,8,16,32,64,128,256,512,1024"
-            export XATA_MAX_BRANCHES=16
-        fi
+        export NUM_BRANCHES_CSV="1,2,4,8,16,32,64,128,256,512,1024"
+        export XATA_MAX_BRANCHES=16
         bash "$REPO_ROOT/experiments/experiment-2-2026-02-08/run.sh"
         cp -v "$RUN_STATS_DIR"/xata_*.parquet "$data_dir/" 2>/dev/null || true
         cp -v "$RUN_STATS_DIR"/xata_*_summary.json "$data_dir/" 2>/dev/null || true
@@ -234,16 +214,9 @@ launch_exp3_worker() {
         export LOG_DIR="$log_dir"
         export MANIFEST_PATH="$manifest_path"
         export SHAPES_CSV="$shape"
-        if [ "$PROFILE" = "smoke" ]; then
-            export MODES_CSV=branch
-            export THREAD_LIST_XATA_CSV=1
-            export DURATION_SECONDS=10
-            export RUNNER_TIMEOUT_SECONDS=600
-        else
-            export MODES_CSV=branch,crud
-            export THREAD_LIST_XATA_CSV=1,2,4,8,16
-            export DURATION_SECONDS=30
-        fi
+        export MODES_CSV=branch,crud
+        export THREAD_LIST_XATA_CSV=1,2,4,8,16
+        export DURATION_SECONDS=30
         bash "$REPO_ROOT/experiments/experiment-3-throughput/run.sh"
     ) >"$log_file" 2>&1 &
     register_worker "$!" "$worker" "$log_file"
@@ -256,39 +229,19 @@ launch_worker() {
         p02_exp1_bushy) launch_exp1_worker "$worker" 2 bushy ;;
         p03_exp1_fan_out) launch_exp1_worker "$worker" 3 fan_out ;;
         p04_exp2a_spine)
-            if [ "$PROFILE" = "smoke" ]; then
-                launch_exp2_worker "$worker" 4 1 0 spine UPDATE 1
-            else
-                launch_exp2_worker "$worker" 4 1 0 spine UPDATE,RANGE_UPDATE 1,10,50,100
-            fi
+            launch_exp2_worker "$worker" 4 1 0 spine UPDATE,RANGE_UPDATE 1,10,50,100
             ;;
         p05_exp2a_bushy)
-            if [ "$PROFILE" = "smoke" ]; then
-                launch_exp2_worker "$worker" 5 1 0 bushy UPDATE 1
-            else
-                launch_exp2_worker "$worker" 5 1 0 bushy UPDATE,RANGE_UPDATE 1,10,50,100
-            fi
+            launch_exp2_worker "$worker" 5 1 0 bushy UPDATE,RANGE_UPDATE 1,10,50,100
             ;;
         p06_exp2a_fan_out)
-            if [ "$PROFILE" = "smoke" ]; then
-                launch_exp2_worker "$worker" 6 1 0 fan_out UPDATE 1
-            else
-                launch_exp2_worker "$worker" 6 1 0 fan_out UPDATE,RANGE_UPDATE 1,10,50,100
-            fi
+            launch_exp2_worker "$worker" 6 1 0 fan_out UPDATE,RANGE_UPDATE 1,10,50,100
             ;;
         p07_exp2b_r1_10)
-            if [ "$PROFILE" = "smoke" ]; then
-                launch_exp2_worker "$worker" 7 0 1 spine UPDATE,RANGE_UPDATE 1
-            else
-                launch_exp2_worker "$worker" 7 0 1 spine UPDATE,RANGE_UPDATE 1,10
-            fi
+            launch_exp2_worker "$worker" 7 0 1 spine UPDATE,RANGE_UPDATE 1,10
             ;;
         p08_exp2b_r50_100)
-            if [ "$PROFILE" = "smoke" ]; then
-                launch_exp2_worker "$worker" 8 0 1 spine UPDATE,RANGE_UPDATE 1
-            else
-                launch_exp2_worker "$worker" 8 0 1 spine UPDATE,RANGE_UPDATE 50,100
-            fi
+            launch_exp2_worker "$worker" 8 0 1 spine UPDATE,RANGE_UPDATE 50,100
             ;;
         p09_exp3_spine) launch_exp3_worker "$worker" 9 spine ;;
         p10_exp3_bushy) launch_exp3_worker "$worker" 10 bushy ;;
@@ -301,7 +254,6 @@ launch_worker() {
 }
 
 log "Launching Xata 11-worker run"
-log "PROFILE=$PROFILE"
 log "RUN_ROOT=$RUN_ROOT"
 log "WORKERS=${SELECTED_WORKERS[*]}"
 
