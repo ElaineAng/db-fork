@@ -10,13 +10,19 @@ source "$REPO_ROOT/bench_lib.sh"
 SEED="${SEED:-42}"
 DURATION_SECONDS="${DURATION_SECONDS:-30}"
 SQL_DUMP="${SQL_DUMP:-$REPO_ROOT/db_setup/tpcc_schema.sql}"
-ENABLE_NEON="${ENABLE_NEON:-0}"
+# ENABLE_NEON="${ENABLE_NEON:-0}"
+# ENABLE_XATA="${ENABLE_XATA:-0}"
 RUN_STATS_DIR="${RUN_STATS_DIR:-/tmp/run_stats}"
-FRESH_PG_VOLUME="${FRESH_PG_VOLUME:-1}"
-PG_VOLUME_PORT="${PG_VOLUME_PORT:-5432}"
-RUN_DOLT="${RUN_DOLT:-1}"
-RUN_FILE_COPY="${RUN_FILE_COPY:-1}"
-RUN_NEON="${RUN_NEON:-$ENABLE_NEON}"
+# FRESH_PG_VOLUME="${FRESH_PG_VOLUME:-1}"
+# PG_VOLUME_PORT="${PG_VOLUME_PORT:-5432}"
+# RUN_DOLT="${RUN_DOLT:-1}"
+# RUN_FILE_COPY="${RUN_FILE_COPY:-1}"
+# RUN_NEON="${RUN_NEON:-$ENABLE_NEON}"
+# RUN_XATA="${RUN_XATA:-$ENABLE_XATA}"
+RUN_DOLT=0
+RUN_FILE_COPY=0
+RUN_NEON=0
+RUN_XATA=1
 RESULTS_ROOT="$SCRIPT_DIR/results"
 DATA_DIR="$RESULTS_ROOT/data"
 LOG_DIR="$RESULTS_ROOT/logs"
@@ -28,6 +34,7 @@ THREAD_LIST_DEFAULT_CSV="${THREAD_LIST_DEFAULT_CSV:-1,2,4,8,16,32,64,128,256,512
 THREAD_LIST_DOLT_CSV="${THREAD_LIST_DOLT_CSV:-$THREAD_LIST_DEFAULT_CSV}"
 THREAD_LIST_FILE_COPY_CSV="${THREAD_LIST_FILE_COPY_CSV:-$THREAD_LIST_DEFAULT_CSV}"
 THREAD_LIST_NEON_CSV="${THREAD_LIST_NEON_CSV:-1,2,4,8,16}"
+THREAD_LIST_XATA_CSV="${THREAD_LIST_XATA_CSV:-1,2,4,8,16}"
 SHAPES_CSV="${SHAPES_CSV:-spine,bushy,fan_out}"
 MODES_CSV="${MODES_CSV:-branch,crud}"
 CRUD_OPS_CSV="READ,UPDATE,RANGE_READ,RANGE_UPDATE"
@@ -107,6 +114,7 @@ parse_enum_list() {
 THREAD_LIST_DOLT=($(parse_thread_list "$THREAD_LIST_DOLT_CSV"))
 THREAD_LIST_FILE_COPY=($(parse_thread_list "$THREAD_LIST_FILE_COPY_CSV"))
 THREAD_LIST_NEON=($(parse_thread_list "$THREAD_LIST_NEON_CSV"))
+THREAD_LIST_XATA=($(parse_thread_list "$THREAD_LIST_XATA_CSV"))
 SHAPE_LIST=($(parse_enum_list "$SHAPES_CSV" "^(spine|bushy|fan_out)$"))
 MODE_LIST=($(parse_enum_list "$MODES_CSV" "^(branch|crud)$"))
 
@@ -374,19 +382,20 @@ run_backend_matrix() {
 }
 
 load_env
-if [ "$FRESH_PG_VOLUME" = "1" ]; then
-    echo "Preparing fresh PostgreSQL volume state (--delete)."
-    "$REPO_ROOT/db_setup/teardown_pg_volume.sh" --delete >/dev/null 2>&1 || true
-fi
-SETUP_ENV_FILE="$(mktemp)"
-if ! "$REPO_ROOT/db_setup/setup_pg_volume.sh" --port "$PG_VOLUME_PORT" >"$SETUP_ENV_FILE"; then
-    rm -f "$SETUP_ENV_FILE"
-    echo "Error: failed to set up pg volume."
-    exit 1
-fi
-eval "$(<"$SETUP_ENV_FILE")"
-rm -f "$SETUP_ENV_FILE"
-trap "$REPO_ROOT/db_setup/teardown_pg_volume.sh" EXIT
+# PG volume setup — not needed for Xata-only runs.
+# if [ "$FRESH_PG_VOLUME" = "1" ]; then
+#     echo "Preparing fresh PostgreSQL volume state (--delete)."
+#     "$REPO_ROOT/db_setup/teardown_pg_volume.sh" --delete >/dev/null 2>&1 || true
+# fi
+# SETUP_ENV_FILE="$(mktemp)"
+# if ! "$REPO_ROOT/db_setup/setup_pg_volume.sh" --port "$PG_VOLUME_PORT" >"$SETUP_ENV_FILE"; then
+#     rm -f "$SETUP_ENV_FILE"
+#     echo "Error: failed to set up pg volume."
+#     exit 1
+# fi
+# eval "$(<"$SETUP_ENV_FILE")"
+# rm -f "$SETUP_ENV_FILE"
+# trap "$REPO_ROOT/db_setup/teardown_pg_volume.sh" EXIT
 
 write_manifest_header
 
@@ -396,30 +405,37 @@ echo "============================================="
 echo "seed=$SEED duration=${DURATION_SECONDS}s"
 echo "sql_dump=$SQL_DUMP"
 echo "run_stats_dir=$RUN_STATS_DIR"
-echo "fresh_pg_volume=$FRESH_PG_VOLUME"
-echo "pg_volume_port=$PG_VOLUME_PORT"
-echo "run_dolt=$RUN_DOLT run_file_copy=$RUN_FILE_COPY run_neon=$RUN_NEON"
+# echo "fresh_pg_volume=$FRESH_PG_VOLUME"
+# echo "pg_volume_port=$PG_VOLUME_PORT"
+echo "run_dolt=$RUN_DOLT run_file_copy=$RUN_FILE_COPY run_neon=$RUN_NEON run_xata=$RUN_XATA"
 echo "manifest_mode=$MANIFEST_MODE"
 echo "runner_timeout_seconds=$RUNNER_TIMEOUT_SECONDS"
-echo "threads_dolt=${THREAD_LIST_DOLT[*]}"
-echo "threads_file_copy=${THREAD_LIST_FILE_COPY[*]}"
-echo "threads_neon=${THREAD_LIST_NEON[*]}"
+# echo "threads_dolt=${THREAD_LIST_DOLT[*]}"
+# echo "threads_file_copy=${THREAD_LIST_FILE_COPY[*]}"
+# echo "threads_neon=${THREAD_LIST_NEON[*]}"
+echo "threads_xata=${THREAD_LIST_XATA[*]}"
 echo "shapes=${SHAPE_LIST[*]}"
 echo "modes=${MODE_LIST[*]}"
 echo "results_dir=$DATA_DIR"
 
-if [ "$RUN_DOLT" = "1" ]; then
-    run_backend_matrix "dolt" "${THREAD_LIST_DOLT[@]}"
-fi
+# if [ "$RUN_DOLT" = "1" ]; then
+#     run_backend_matrix "dolt" "${THREAD_LIST_DOLT[@]}"
+# fi
 
-if [ "$RUN_FILE_COPY" = "1" ]; then
-    run_backend_matrix "file_copy" "${THREAD_LIST_FILE_COPY[@]}"
-fi
+# if [ "$RUN_FILE_COPY" = "1" ]; then
+#     run_backend_matrix "file_copy" "${THREAD_LIST_FILE_COPY[@]}"
+# fi
 
-if [ "$RUN_NEON" = "1" ]; then
-    run_backend_matrix "neon" "${THREAD_LIST_NEON[@]}"
+# if [ "$RUN_NEON" = "1" ]; then
+#     run_backend_matrix "neon" "${THREAD_LIST_NEON[@]}"
+# else
+#     echo "Neon skipped (set RUN_NEON=1 or ENABLE_NEON=1 to run Neon)."
+# fi
+
+if [ "$RUN_XATA" = "1" ]; then
+    run_backend_matrix "xata" "${THREAD_LIST_XATA[@]}"
 else
-    echo "Neon skipped (set RUN_NEON=1 or ENABLE_NEON=1 to run Neon)."
+    echo "Xata skipped (set RUN_XATA=1 or ENABLE_XATA=1 to run Xata)."
 fi
 
 echo "============================================="
