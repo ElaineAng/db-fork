@@ -1014,8 +1014,18 @@ def main():
         # Write results
         result_collector.write_to_parquet()
 
-        # Cleanup
-        cleanup_backend(micro_config, backend_info)
+        # Cleanup (retry once on transient network errors)
+        for attempt in range(2):
+            try:
+                cleanup_backend(micro_config, backend_info)
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print(f"Cleanup failed ({type(e).__name__}), retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"Cleanup failed after retry: {e}")
+                    print("You may need to delete the Neon project manually.")
 
 
 if __name__ == "__main__":
