@@ -25,6 +25,8 @@ from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
+from dblib.tiger import TigerToolSuite
+from dblib.storage import StorageMeasurer
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -84,6 +86,7 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
+    tiger: Optional[dict] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
     txn_conn:        Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
@@ -157,6 +160,44 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
                     info.default_branch_name = branch["name"]
                     info.default_branch_id = branch["id"]
                     break
+    elif backend == tp.Backend.TIGER:
+        if require_db_setup:
+            # Create a new Tiger base service for the benchmark.
+            tiger_service = TigerToolSuite.create_tiger_service(
+                name = f"service_{db_name}"
+            )
+            info.tiger = dict()
+            info.tiger['password'] = tiger_service['initial_password']
+            info.tiger['service_id'] = tiger_service["service_id"]
+            info.tiger['project_id'] = tiger_service["project_id"]
+            info.tiger['service_name'] = tiger_service["name"]
+            info.tiger['region'] = tiger_service["region_code"]
+            info.tiger['services'] = dict()
+            tiger_service = TigerToolSuite.wait_for_service(info.tiger['project_id'], info.tiger['service_id'])
+            info.default_uri = (
+                f"postgresql://tsdbadmin:{info.tiger['password']}"
+                f"@{tiger_service['endpoint']['host']}"
+                f":{tiger_service['endpoint']['port']}/tsdb"
+            )
+            info.default_branch_id = tiger_service["service_id"]
+            info.default_branch_name = tiger_service["name"]
+
+            print(f"Tiger service ID: {info.tiger['service_id']}")
+            print(f"Default Tiger connection URI: {info.default_uri}")
+
+        else:
+            # Reuse existing Tiger service from config.
+            info.tiger_service_id = (
+                config.database_setup.existing_db.tiger_service_id
+            )
+
+            service_info = TigerToolSuite.get_service(
+                info.tiger_service_id
+            )
+
+            info.default_branch_name = service_info["name"]
+            info.default_branch_id = service_info["id"]
+            info.default_uri = service_info["connection_uri"]
 
     elif backend == tp.Backend.XATA:
         if require_db_setup:
@@ -182,7 +223,8 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
 
     # Create the benchmark database and load contents from a SQL dump file if required.
     if require_db_setup:
-        create_benchmark_database(info.default_uri, db_name)
+        if not info.tiger:
+            create_benchmark_database(info.default_uri, db_name)
         # Load the database contents from a SQL dump file into the benchmark
         # database.
         db_uri = get_initial_connection_uri(config, info)
@@ -235,6 +277,9 @@ def get_initial_connection_uri(
             backend_info.default_branch_id,
             db_name,
         )
+
+    elif backend == tp.Backend.TIGER:
+        return backend_info.default_uri
 
     elif backend == tp.Backend.XATA:
         return XataToolSuite._get_xata_connection_uri(
@@ -292,6 +337,18 @@ def cleanup_backend(
     # Delete the database using a direct connection through default_uri.
     if backend_info.file_copy_info:
         FileCopyToolSuite.cleanup(backend_info.file_copy_info)
+    elif backend_info.tiger:
+        all_ids = backend_info.tiger.get('services', [])
+        root_id = backend_info.tiger['service_id']
+        project_id = backend_info.tiger['project_id']
+        # Delete forks first, root last (Tiger won't delete a parent with live children)
+        for sname, (sid, pw)  in all_ids:
+            if sid != root_id:
+                try:
+                    TigerToolSuite.delete_tiger_service(project_id, sid)
+                except Exception as e:
+                    print(f"Warning: failed to delete Tiger service {sid}: {e}")
+        TigerToolSuite.delete_tiger_service(project_id, root_id)
     elif backend_info.default_uri and db_name:
         conn = None
         cur = None
@@ -366,6 +423,8 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
             updates_per_branch,
             deletes_per_branch,
         )
+        if config.backend == tp.Backend.TIGER:
+            backend_info.tiger['services'] = setup_bench.db_tools._services
 
     # Store the last branch info in BackendInfo for measurement phase.
     backend_info.default_branch_name = last_branch_name
@@ -580,6 +639,23 @@ class BenchmarkSuite:
                     self._db_name,
                     self._config.autocommit,
                 )
+            elif self._config.backend == tp.Backend.TIGER:
+                print(
+                    f"Default Tiger branch name: {self._root_branch_name}, "
+                    f"ID: {default_branch_id}"
+                )
+                if not self._backend_info.tiger:
+                    raise Exception("Tiger backend info empty")
+                db_tools = TigerToolSuite.init_for_bench(
+                    result_collector,
+                    self._backend_info.tiger['project_id'],
+                    self._backend_info.tiger['service_id'],
+                    self._backend_info.tiger['service_name'],
+                    self._backend_info.tiger['password'],
+                    self._backend_info.tiger['region'],
+                    self._config.autocommit,
+                    self._backend_info.tiger['services']
+                )
             elif self._config.backend == tp.Backend.XATA:
                 db_tools = XataToolSuite.init_for_bench(
                     result_collector,
@@ -631,6 +707,8 @@ class BenchmarkSuite:
         # thread after all worker threads have finished.
         if not self._backend_info.txn_conn:
             self.db_tools.close_connection()
+        if self._config.database_setup.cleanup and self._backend_info.tiger:
+            self._backend_info.tiger['services'] = self.db_tools.get_all_services()
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()

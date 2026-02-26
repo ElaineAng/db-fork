@@ -65,8 +65,7 @@ done
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] [--measure-storage]"
-    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] "
-    echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn)"
+    echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
