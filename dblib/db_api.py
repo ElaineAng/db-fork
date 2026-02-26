@@ -166,8 +166,8 @@ class DBToolSuite(ABC):
         """
         columns = self.execute_sql(query, (table_name,))
 
-        if not columns:
-            return f"Error: Table '{table_name}' not found."
+        if not columns or len(columns) == 0:
+            raise Exception(f"Error: Table '{table_name}' not found.")
 
         column_definitions = []
         for (

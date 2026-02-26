@@ -23,6 +23,7 @@ from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
+from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
 
 
@@ -83,7 +84,8 @@ class BackendInfo:
     default_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
-    file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
+    file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
+    txn_conn:        Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -114,6 +116,11 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_uri = KpgToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
+
+    elif backend == tp.Backend.TXN:
+        info.default_uri = TxnToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default PostgreSQL connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.FILE_COPY:
         info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
@@ -219,6 +226,9 @@ def get_initial_connection_uri(
     elif backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.get_initial_connection_uri(db_name)
 
+    elif backend == tp.Backend.TXN:
+        return TxnToolSuite.get_initial_connection_uri(db_name)
+
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
             backend_info.neon_project_id,
@@ -286,6 +296,8 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
+            if backend_info.txn_conn:
+                backend_info.txn_conn.close()
             conn = psycopg2.connect(backend_info.default_uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
@@ -535,6 +547,18 @@ class BenchmarkSuite:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )
+            elif self._config.backend == tp.Backend.TXN:
+                # No-op if there's already a connection active
+                # Otherwise, create the persistent connection
+                self._backend_info.txn_conn = TxnToolSuite.get_connection(
+                        self._backend_info.txn_conn, self._db_name
+                        )
+                db_tools = TxnToolSuite.init_for_bench(
+                    result_collector, self._db_name, self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                    self._backend_info.setup_branches,
+                    self._backend_info.txn_conn
+                )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
                     result_collector,
@@ -605,7 +629,8 @@ class BenchmarkSuite:
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
-        self.db_tools.close_connection()
+        if not self._backend_info.txn_conn:
+            self.db_tools.close_connection()
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
@@ -1310,26 +1335,36 @@ class BenchmarkSuite:
         # Use shared progress if available (multi-threaded), else use local tqdm
         use_shared_progress = self._shared_progress is not None
 
-        for i in range(num_ops):
-            if op == tp.OperationType.BRANCH:
-                next_bid = self._shared_branch_manager.get_next_branch_id()
-                self.branch_and_connect(next_bid)
-            elif op == tp.OperationType.READ:
-                self.read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.INSERT:
-                self.insert_op(benchmark_table)
-            elif op == tp.OperationType.UPDATE:
-                self.update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_UPDATE:
-                self.range_update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_READ:
-                self.range_read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.CONNECT:
-                self.connect_to_branch(rnd)
-
-            # Update progress
+        if (op == tp.OperationType.CONNECT_FIRST
+        or op == tp.OperationType.CONNECT_MID
+        or op == tp.OperationType.CONNECT_LAST):
+            self.db_tools.connect_specific_branch(op)
+            self._existing_pks = []
             if use_shared_progress:
                 self._shared_progress.update(1)
+
+        else:
+            for i in range(num_ops):
+                if op == tp.OperationType.BRANCH:
+                    next_bid = self._shared_branch_manager.get_next_branch_id()
+                    self.branch_and_connect(next_bid)
+                elif op == tp.OperationType.READ:
+                    self.read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.INSERT:
+                    self.insert_op(benchmark_table)
+                elif op == tp.OperationType.UPDATE:
+                    self.update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_UPDATE:
+                    self.range_update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_READ:
+                    self.range_read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.CONNECT:
+                    self.connect_to_branch(rnd)
+
+
+                # Update progress
+                if use_shared_progress:
+                    self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.

@@ -135,6 +135,36 @@ def load_and_compute_percentiles(parquet_files: list[str]) -> pd.DataFrame:
     return aggregated
 
 
+# Operation type enum values to names (from task.proto)
+OP_TYPE_NAMES = {
+    0: "UNSPECIFIED",
+    1: "BRANCH",
+    2: "CONNECT",
+    3: "READ",
+    4: "INSERT",
+    5: "UPDATE",
+    6: "RANGE_UPDATE (per-key)",
+    7: "RANGE_READ (per-key)",
+    8: "CONNECT_FIRST",
+    9: "CONNECT_MID",
+    10: "CONNECT_LAST",
+}
+
+# Colors for each operation type
+OP_COLORS = {
+    0: "#888888",
+    1: "#1f77b4",
+    2: "#ff7f0e",
+    3: "#2ca02c",
+    4: "#d62728",
+    5: "#9467bd",
+    6: "#8c564b",
+    7: "#17becf",
+    8: "#9fa123",
+    9: "#bcccbf",
+}
+
+
 def plot_latency_percentiles(
     df: pd.DataFrame, output_path: str = None, log_scale: bool = True
 ):
