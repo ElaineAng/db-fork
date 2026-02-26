@@ -352,6 +352,7 @@ def worker_fn(
     stop_event: threading.Event = None,
     worker_conns: dict | None = None,
     completed_work: dict | None = None,
+    max_runtime_sec: int = 0,
 ):
     """Worker thread function implementing the per-step automaton.
 
@@ -371,6 +372,7 @@ def worker_fn(
         stop_event: Event set by the main thread when deadline expires.
         worker_conns: Shared dict for main thread to cancel in-flight queries.
         completed_work: Shared dict to record {thread_id: {"steps": N, "ops": M}}.
+        max_runtime_sec: Runtime cap in seconds (used for slot wait timeout).
     """
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
@@ -414,7 +416,8 @@ def worker_fn(
                 break
 
             # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
-            if not branch_tree.wait_for_slot(timeout=60.0):
+            slot_timeout = max_runtime_sec if max_runtime_sec else 60.0
+            if not branch_tree.wait_for_slot(timeout=slot_timeout):
                 if verbose:
                     progress.write(
                         f"[T{thread_id}] Timed out waiting for branch slot "
@@ -894,6 +897,7 @@ def main():
                     stop_event=stop_event,
                     worker_conns=worker_conns,
                     completed_work=completed_work,
+                    max_runtime_sec=args.max_runtime_sec,
                 )
                 for i in range(num_workers)
             ]
