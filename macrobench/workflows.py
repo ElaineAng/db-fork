@@ -95,6 +95,23 @@ class WorkflowOps(ABC):
             this workflow.
         """
 
+    def estimate_write_bytes_per_step(
+        self, schema_changes: int, data_mutations: int
+    ) -> int:
+        """Estimate logical bytes written per step (DDL + DML combined).
+
+        Used for storage amplification measurement.  Override in
+        subclasses with workflow-specific estimates.
+
+        Args:
+            schema_changes: Number of DDL operations per step (M_s).
+            data_mutations: Number of DML operations per step (M_d).
+
+        Returns:
+            Estimated bytes written per step.
+        """
+        return 0
+
 
 class SoftwareDevOps(WorkflowOps):
     """Software development workflow: DDL-heavy schema migrations.
@@ -138,6 +155,13 @@ class SoftwareDevOps(WorkflowOps):
             """SELECT c_credit, COUNT(*), AVG(c_ytd_payment)
                FROM customer GROUP BY c_credit;""",
         ]
+
+    def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
+        # DDL: 2 ALTER ADD COLUMN per schema_change ~100B metadata each
+        # DML: 1 UPDATE backfill ~30K customers × ~20B per row
+        ddl_bytes = schema_changes * 200
+        dml_bytes = data_mutations * 600_000
+        return ddl_bytes + dml_bytes
 
 
 class FailureReproOps(WorkflowOps):
@@ -235,6 +259,14 @@ class FailureReproOps(WorkflowOps):
         # C=--- (no cross-branch queries for failure repro)
         return []
 
+    def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
+        # DDL: 5 ALTER (add/drop columns) ~200B metadata each
+        # DML: 45 stmts (1 INSERT orders + 1 UPDATE + 1 DELETE + 42 INSERT order_line)
+        #      ~100 rows avg × ~50B per row
+        ddl_bytes = schema_changes * 200
+        dml_bytes = data_mutations * 5_000
+        return ddl_bytes + dml_bytes
+
 
 class DataCleaningOps(WorkflowOps):
     """Data cleaning: multiple strategies on overlapping data regions.
@@ -282,6 +314,13 @@ class DataCleaningOps(WorkflowOps):
                FROM customer;""",
         ]
 
+    def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
+        # DDL: 1 ALTER ADD COLUMN ~100B metadata
+        # DML: UPDATE or DELETE ~10K customer rows × ~30B per row
+        ddl_bytes = schema_changes * 100
+        dml_bytes = data_mutations * 300_000
+        return ddl_bytes + dml_bytes
+
 
 class MctsOps(WorkflowOps):
     """Monte Carlo Tree Search: lightweight DML + analytical reward queries.
@@ -317,6 +356,10 @@ class MctsOps(WorkflowOps):
     def compare(self) -> list[str]:
         # C=--- (no cross-branch queries)
         return []
+
+    def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
+        # No DDL; DML: 1 UPDATE on single stock row ~16B per mutation
+        return data_mutations * 16
 
 
 class SimulationOps(WorkflowOps):
@@ -409,6 +452,12 @@ class SimulationOps(WorkflowOps):
                FROM stock s
                JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
         ]
+
+    def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
+        # No DDL; DML per mutation: 16 iterations × (INSERT order ~80B +
+        # UPDATE stock ~16B + UPDATE stock ~16B) = ~1792B, plus 2 extra
+        # stmts (~96B).  Total ~1888B per data_mutations unit.
+        return data_mutations * 1_888
 
 
 def get_workflow_ops(workflow_type, scale: int = 1) -> WorkflowOps:

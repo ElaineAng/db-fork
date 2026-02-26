@@ -26,7 +26,6 @@ from dblib.file_copy import FileCopyToolSuite
 from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
 from dblib.tiger import TigerToolSuite
-from dblib.storage import StorageMeasurer
 
 
 def OPS_WEIGHT(op_type: tp.OperationType):
@@ -87,8 +86,8 @@ class BackendInfo:
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
     tiger: Optional[dict] = None
-    file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
-    txn_conn:        Optional[psycopg2.extensions.connection] = None
+    file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
+    txn_conn: Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -164,16 +163,18 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         if require_db_setup:
             # Create a new Tiger base service for the benchmark.
             tiger_service = TigerToolSuite.create_tiger_service(
-                name = f"service_{db_name}"
+                name=f"service_{db_name}"
             )
             info.tiger = dict()
-            info.tiger['password'] = tiger_service['initial_password']
-            info.tiger['service_id'] = tiger_service["service_id"]
-            info.tiger['project_id'] = tiger_service["project_id"]
-            info.tiger['service_name'] = tiger_service["name"]
-            info.tiger['region'] = tiger_service["region_code"]
-            info.tiger['services'] = dict()
-            tiger_service = TigerToolSuite.wait_for_service(info.tiger['project_id'], info.tiger['service_id'])
+            info.tiger["password"] = tiger_service["initial_password"]
+            info.tiger["service_id"] = tiger_service["service_id"]
+            info.tiger["project_id"] = tiger_service["project_id"]
+            info.tiger["service_name"] = tiger_service["name"]
+            info.tiger["region"] = tiger_service["region_code"]
+            info.tiger["services"] = dict()
+            tiger_service = TigerToolSuite.wait_for_service(
+                info.tiger["project_id"], info.tiger["service_id"]
+            )
             info.default_uri = (
                 f"postgresql://tsdbadmin:{info.tiger['password']}"
                 f"@{tiger_service['endpoint']['host']}"
@@ -191,9 +192,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
                 config.database_setup.existing_db.tiger_service_id
             )
 
-            service_info = TigerToolSuite.get_service(
-                info.tiger_service_id
-            )
+            service_info = TigerToolSuite.get_service(info.tiger_service_id)
 
             info.default_branch_name = service_info["name"]
             info.default_branch_id = service_info["id"]
@@ -338,11 +337,11 @@ def cleanup_backend(
     if backend_info.file_copy_info:
         FileCopyToolSuite.cleanup(backend_info.file_copy_info)
     elif backend_info.tiger:
-        all_ids = backend_info.tiger.get('services', [])
-        root_id = backend_info.tiger['service_id']
-        project_id = backend_info.tiger['project_id']
+        all_ids = backend_info.tiger.get("services", [])
+        root_id = backend_info.tiger["service_id"]
+        project_id = backend_info.tiger["project_id"]
         # Delete forks first, root last (Tiger won't delete a parent with live children)
-        for sname, (sid, pw)  in all_ids:
+        for sname, (sid, pw) in all_ids:
             if sid != root_id:
                 try:
                     TigerToolSuite.delete_tiger_service(project_id, sid)
@@ -424,7 +423,7 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
             deletes_per_branch,
         )
         if config.backend == tp.Backend.TIGER:
-            backend_info.tiger['services'] = setup_bench.db_tools._services
+            backend_info.tiger["services"] = setup_bench.db_tools._services
 
     # Store the last branch info in BackendInfo for measurement phase.
     backend_info.default_branch_name = last_branch_name
@@ -610,13 +609,15 @@ class BenchmarkSuite:
                 # No-op if there's already a connection active
                 # Otherwise, create the persistent connection
                 self._backend_info.txn_conn = TxnToolSuite.get_connection(
-                        self._backend_info.txn_conn, self._db_name
-                        )
+                    self._backend_info.txn_conn, self._db_name
+                )
                 db_tools = TxnToolSuite.init_for_bench(
-                    result_collector, self._db_name, self._config.autocommit,
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
                     self._backend_info.default_branch_name,
                     self._backend_info.setup_branches,
-                    self._backend_info.txn_conn
+                    self._backend_info.txn_conn,
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
@@ -648,13 +649,13 @@ class BenchmarkSuite:
                     raise Exception("Tiger backend info empty")
                 db_tools = TigerToolSuite.init_for_bench(
                     result_collector,
-                    self._backend_info.tiger['project_id'],
-                    self._backend_info.tiger['service_id'],
-                    self._backend_info.tiger['service_name'],
-                    self._backend_info.tiger['password'],
-                    self._backend_info.tiger['region'],
+                    self._backend_info.tiger["project_id"],
+                    self._backend_info.tiger["service_id"],
+                    self._backend_info.tiger["service_name"],
+                    self._backend_info.tiger["password"],
+                    self._backend_info.tiger["region"],
                     self._config.autocommit,
-                    self._backend_info.tiger['services']
+                    self._backend_info.tiger["services"],
                 )
             elif self._config.backend == tp.Backend.XATA:
                 db_tools = XataToolSuite.init_for_bench(
@@ -708,7 +709,9 @@ class BenchmarkSuite:
         if not self._backend_info.txn_conn:
             self.db_tools.close_connection()
         if self._config.database_setup.cleanup and self._backend_info.tiger:
-            self._backend_info.tiger['services'] = self.db_tools.get_all_services()
+            self._backend_info.tiger["services"] = (
+                self.db_tools.get_all_services()
+            )
 
     def maybe_branch_and_reconnect(self, next_bid, rnd) -> None:
         cur_name, cur_id = self.db_tools.get_current_branch()
@@ -1413,9 +1416,11 @@ class BenchmarkSuite:
         # Use shared progress if available (multi-threaded), else use local tqdm
         use_shared_progress = self._shared_progress is not None
 
-        if (op == tp.OperationType.CONNECT_FIRST
-        or op == tp.OperationType.CONNECT_MID
-        or op == tp.OperationType.CONNECT_LAST):
+        if (
+            op == tp.OperationType.CONNECT_FIRST
+            or op == tp.OperationType.CONNECT_MID
+            or op == tp.OperationType.CONNECT_LAST
+        ):
             self.db_tools.connect_specific_branch(op)
             self._existing_pks = []
             if use_shared_progress:
@@ -1438,7 +1443,6 @@ class BenchmarkSuite:
                     self.range_read_op(rnd, benchmark_table)
                 elif op == tp.OperationType.CONNECT:
                     self.connect_to_branch(rnd)
-
 
                 # Update progress
                 if use_shared_progress:

@@ -9,7 +9,7 @@
 #   --outdir DIR        Directory for output parquet files (default: run_stats/)
 #   --max-runtime-sec N Cap total workflow runtime in seconds (0 = no limit)
 #   workflow     One of: software_dev, failure_repro, data_cleaning, mcts, simulation
-#   backend      One of: dolt, neon
+#   backend      One of: dolt, neon, kpg, xata, file_copy, txn
 #   db_scale     Integer scale factor (num warehouses)
 #   sql_path     Path to the schema SQL dump file
 #
@@ -21,6 +21,7 @@
 set -euo pipefail
 
 MINI=false
+STORAGE=false
 OUTDIR="run_stats/"
 MAX_RUNTIME_SEC=0
 
@@ -28,6 +29,7 @@ MAX_RUNTIME_SEC=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mini)            MINI=true; shift ;;
+        --storage)         STORAGE=true; shift ;;
         --outdir)          OUTDIR="$2"; shift 2 ;;
         --max-runtime-sec) MAX_RUNTIME_SEC="$2"; shift 2 ;;
         *)                 break ;;
@@ -40,7 +42,7 @@ if [[ $# -ne 4 ]]; then
     echo "  --outdir:            output directory for parquet files (default: run_stats/)"
     echo "  --max-runtime-sec:   cap total workflow runtime in seconds (0 = no limit)"
     echo "  workflow:    software_dev | failure_repro | data_cleaning | mcts | simulation"
-    echo "  backend:     dolt | neon"
+    echo "  backend:     dolt | neon | kpg | xata | file_copy | txn"
     echo "  db_scale:    integer scale factor (num warehouses)"
     echo "  sql_path:    path to schema SQL dump"
     exit 1
@@ -60,7 +62,7 @@ if ! echo "$VALID_WORKFLOWS" | grep -qw "$WORKFLOW"; then
 fi
 
 # Validate backend
-VALID_BACKENDS="dolt neon kpg xata file_copy"
+VALID_BACKENDS="dolt neon kpg xata file_copy txn"
 if ! echo "$VALID_BACKENDS" | grep -qw "$BACKEND"; then
     echo "Error: invalid backend '$BACKEND'"
     echo "Must be one of: $VALID_BACKENDS"
@@ -75,7 +77,10 @@ fi
 
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
-if $MINI; then
+if $STORAGE; then
+    SUFFIX="_storage"
+    RUN_ID="storage_${WORKFLOW}_${BACKEND}_${DB_SCALE}"
+elif $MINI; then
     SUFFIX="_mini"
     RUN_ID="macro_${WORKFLOW}_mini_${BACKEND}_${DB_SCALE}"
 else
@@ -91,7 +96,8 @@ if [[ ! -f "$BASE_CONFIG" ]]; then
 fi
 
 # Build a temporary config by patching the base config
-TMP_CONFIG=$(mktemp /tmp/macrobench_XXXXXX.textproto)
+# Use PID in the temp file name to avoid conflicts with concurrent runs
+TMP_CONFIG=$(mktemp /tmp/macrobench_$$_XXXXXX.textproto)
 trap 'rm -f "$TMP_CONFIG"' EXIT
 
 sed \
@@ -117,5 +123,5 @@ python -m macrobench.runner \
     --outdir "$OUTDIR" \
     --measure-storage \
     --measure-interference \
-    --monitor-queries olap \
+    --monitor-queries olap_heavy,olap_light \
     --max-runtime-sec "$MAX_RUNTIME_SEC"

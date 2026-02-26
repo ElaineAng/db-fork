@@ -7,10 +7,10 @@ from dblib import result_pb2 as rslt
 import dblib.util as dbutil
 from microbench import task_pb2 as tp
 
-PGSQL_USER = "postgres"
+PGSQL_USER = "elaineang"
 PGSQL_PASSWORD = "password"
 PGSQL_HOST = "localhost"
-PGSQL_PORT = 5432
+PGSQL_PORT = 5433
 
 class TxnToolSuite(DBToolSuite):
     """
@@ -150,6 +150,20 @@ class TxnToolSuite(DBToolSuite):
     def commit_changes(self, timed: bool = False, message: str = "") -> None:
         """ Override to a no-op, we have only one persistent transaction """
         pass
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage for the database.
+
+        Since TXN backend uses SAVEPOINTs within a single transaction,
+        all "branches" share the same database. We simply return the
+        size of the current database.
+        """
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT pg_database_size(current_database());")
+            return cur.fetchone()[0]
+        finally:
+            cur.close()
 
 class SavePoints(object):
     """ A simple container for cheap membership testing of an ordered list """

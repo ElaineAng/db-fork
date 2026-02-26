@@ -17,7 +17,7 @@ database_setup {
   
   # Create from SQL dump
   sql_dump {
-    sql_dump_path: "db_setup/tpcc_schema.sql"
+    sql_dump_path: "db_setup/ch_benchmark_schema.sql"
   }
 }
 
@@ -49,7 +49,9 @@ nth_op_benchmark {
   setup {
     num_branches: 4
     branch_shape: SPINE
-    inserts_per_branch: 50
+    inserts_per_branch: 100
+    updates_per_branch: 20
+    deletes_per_branch: 10
   }
 }
 

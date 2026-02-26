@@ -40,6 +40,7 @@ from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
 from dblib.file_copy import FileCopyToolSuite
+from dblib.transaction import TxnToolSuite
 
 
 def _create_db_tools(config, backend_info, result_collector):
@@ -96,6 +97,19 @@ def _create_db_tools(config, backend_info, result_collector):
             autocommit,
             backend_info.default_branch_name,
             backend_info.file_copy_info.branches,
+        )
+    elif backend == tp.Backend.TXN:
+        # TXN backend requires a shared persistent connection across all threads.
+        # Create the connection once if it doesn't exist.
+        if backend_info.txn_conn is None:
+            backend_info.txn_conn = TxnToolSuite.get_connection(None, db_name)
+        return TxnToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
+            backend_info.setup_branches if backend_info.setup_branches else [],
+            backend_info.txn_conn,
         )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -377,9 +391,12 @@ def worker_fn(
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
     # Per-op storage is too expensive for Neon (pg_database_size on every
-    # branch for every operation).  Keep the before/after in main() only.
-    measure_storage = (
-        config.measure_storage and config.backend != tp.Backend.NEON
+    # branch for every operation).  TXN also excluded since SAVEPOINTs share
+    # the same database, so storage would be identical across all branches.
+    # Keep the before/after in main() only.
+    measure_storage = config.measure_storage and config.backend not in (
+        tp.Backend.NEON,
+        tp.Backend.TXN,
     )
     verbose = thread_id == 0  # only log from thread 0 to reduce noise
 
@@ -635,7 +652,10 @@ def worker_fn(
                 "ops": ops_finished,
                 "status": status,
             }
-        db_tools.close_connection()
+        # Don't close the shared TXN connection from worker threads.
+        # It will be closed in the main cleanup.
+        if config.backend != tp.Backend.TXN:
+            db_tools.close_connection()
 
 
 def _build_microbench_config(config):
@@ -707,14 +727,14 @@ def main():
         "--monitor-threads",
         type=int,
         default=1,
-        help="Number of background interference monitor threads (default: 2).",
+        help="Number of background interference monitor threads (default: 1).",
     )
     parser.add_argument(
         "--monitor-queries",
         type=str,
-        default="oltp_read,oltp_write,olap",
+        default="oltp_read,oltp_write,olap_light",
         help="Comma-separated query types for interference monitor "
-        "(default: oltp_read,oltp_write,olap).",
+        "(default: oltp_read,oltp_write,olap_light).",
     )
     parser.add_argument(
         "--monitor-interval-ms",
@@ -785,6 +805,13 @@ def main():
         config.workflow, scale=config.setup.db_scale
     )
 
+    # Estimate logical bytes written per step (for storage amplification)
+    bytes_per_step = workflow_ops.estimate_write_bytes_per_step(
+        config.step.schema_changes, config.step.data_mutations
+    )
+    if bytes_per_step > 0:
+        print(f"Estimated bytes per step: {bytes_per_step:,}")
+
     # Neon limits active branches to 20 (including the default branch).
     max_active = 20 if config.backend == tp.Backend.NEON else 0
     if max_active:
@@ -847,7 +874,6 @@ def main():
             num_threads=args.monitor_threads,
             connection_factory=conn_factory,
             num_warehouses=workflow_ops.num_warehouses,
-            evaluate_queries=None,
             query_types=query_types,
             interval_sec=args.monitor_interval_ms / 1000.0,
             run_id=config.run_id,
@@ -959,23 +985,62 @@ def main():
                 if storage_db_tools:
                     storage_db_tools.close_connection()
 
-        # Fetch Neon consumption metrics (root/child branch storage)
+        # Fetch Neon consumption metrics (root/child branch storage).
+        # The API updates only every ~15 minutes, so poll in a loop.
         neon_consumption = None
-        if config.measure_storage and config.backend == tp.Backend.NEON:
-            try:
-                neon_consumption = NeonToolSuite.get_consumption_metrics(
-                    backend_info.neon_project_id
-                )
-                if neon_consumption:
-                    print(
-                        f"Neon consumption: "
-                        f"root={neon_consumption.get('root_branch_bytes_month', 0)}, "
-                        f"child={neon_consumption.get('child_branch_bytes_month', 0)}"
+        if config.backend == tp.Backend.NEON:
+            max_poll_attempts = 20
+            poll_interval = 60
+            poll_start = time.time()
+            print(
+                f"Polling Neon consumption metrics "
+                f"(up to {max_poll_attempts} attempts × {poll_interval}s = "
+                f"{max_poll_attempts * poll_interval // 60} min)...",
+                flush=True,
+            )
+            for attempt in range(max_poll_attempts):
+                poll_elapsed = time.time() - poll_start
+                try:
+                    metrics = NeonToolSuite.get_consumption_metrics(
+                        backend_info.neon_project_id
                     )
-            except Exception as e:
-                print(f"Warning: could not fetch Neon consumption: {e}")
+                    if metrics and (
+                        metrics.get("root_branch_bytes_month")
+                        or metrics.get("child_branch_bytes_month")
+                    ):
+                        neon_consumption = metrics
+                        print(
+                            f"  [{poll_elapsed:.0f}s] Got consumption metrics "
+                            f"on attempt {attempt + 1}/{max_poll_attempts}: "
+                            f"root={metrics.get('root_branch_bytes_month', 0)}, "
+                            f"child={metrics.get('child_branch_bytes_month', 0)}",
+                            flush=True,
+                        )
+                        break
+                except Exception as e:
+                    print(
+                        f"  [{poll_elapsed:.0f}s] Attempt {attempt + 1}/{max_poll_attempts}: "
+                        f"error: {e}",
+                        flush=True,
+                    )
+                print(
+                    f"  [{poll_elapsed:.0f}s] Attempt {attempt + 1}/{max_poll_attempts}: "
+                    f"no data yet, sleeping {poll_interval}s...",
+                    flush=True,
+                )
+                time.sleep(poll_interval)
+            if not neon_consumption:
+                total_poll = time.time() - poll_start
+                print(
+                    f"  WARNING: No consumption metrics after "
+                    f"{max_poll_attempts} attempts ({total_poll:.0f}s)",
+                    flush=True,
+                )
 
         # Write end-to-end stats (always, not just when storage is measured)
+        total_estimated_bytes = sum(
+            v["steps"] * bytes_per_step for v in completed_work.values()
+        )
         e2e_stats = {
             "run_id": config.run_id,
             "backend": tp.Backend.Name(config.backend),
@@ -995,18 +1060,24 @@ def main():
                 str(k): v.get("status", "unknown")
                 for k, v in completed_work.items()
             },
+            "estimated_bytes_per_step": bytes_per_step,
+            "total_estimated_bytes_written": total_estimated_bytes,
         }
         if config.measure_storage:
             e2e_stats["storage_before_bytes"] = storage_before
             e2e_stats["storage_after_bytes"] = storage_after
             e2e_stats["storage_delta_bytes"] = storage_after - storage_before
         if neon_consumption:
-            e2e_stats["neon_root_branch_bytes_month"] = (
-                neon_consumption.get("root_branch_bytes_month", 0)
-            )
-            e2e_stats["neon_child_branch_bytes_month"] = (
-                neon_consumption.get("child_branch_bytes_month", 0)
-            )
+            root_bytes = neon_consumption.get("root_branch_bytes_month", 0)
+            child_bytes = neon_consumption.get("child_branch_bytes_month", 0)
+            e2e_stats["neon_root_branch_bytes_month"] = root_bytes
+            e2e_stats["neon_child_branch_bytes_month"] = child_bytes
+            neon_total = root_bytes + child_bytes
+            e2e_stats["neon_total_bytes"] = neon_total
+            if total_estimated_bytes > 0:
+                e2e_stats["storage_amplification"] = round(
+                    neon_total / total_estimated_bytes, 2
+                )
         e2e_stats_path = os.path.join(
             args.outdir, f"{config.run_id}_e2e_stats.json"
         )

@@ -84,6 +84,17 @@ def _make_connection_factory(config, backend_info):
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             return conn
 
+    elif backend == tp.Backend.TXN:
+        from dblib.transaction import TxnToolSuite
+
+        def _connect():
+            uri = TxnToolSuite.get_initial_connection_uri(db_name)
+            conn = psycopg2.connect(uri)
+            # Don't use autocommit - keep transaction open to simulate
+            # concurrent queries against a database with a long-running
+            # transaction containing many savepoints
+            return conn
+
     else:
         raise ValueError(
             f"Unsupported backend for interference monitor: {backend}"
@@ -115,19 +126,29 @@ def _generate_oltp_write(num_warehouses, rng, seq):
     )
 
 
-def _generate_olap(evaluate_queries, num_warehouses, seq):
-    """Return an OLAP query that varies each call to avoid caching.
+def _generate_olap_heavy(num_warehouses, seq):
+    """Return an expensive OLAP query scanning the customer table.
 
-    Adds a ``WHERE c_w_id <= N`` filter with a rotating warehouse bound
-    so the SQL text (and scanned data) differs each iteration.
+    Rotates a ``WHERE c_w_id <= N`` bound so the SQL text (and scanned
+    data) differs each iteration, defeating query caching.
     """
     w_bound = (seq % num_warehouses) + 1
-    if evaluate_queries:
-        base = evaluate_queries[seq % len(evaluate_queries)].rstrip().rstrip(";")
-        return f"{base} WHERE c_w_id <= {w_bound}"
     return (
         f"SELECT c_credit, COUNT(*), AVG(c_ytd_payment) "
         f"FROM customer WHERE c_w_id <= {w_bound} GROUP BY c_credit"
+    )
+
+
+def _generate_olap_light(num_warehouses, seq):
+    """Return a cheap OLAP query scanning the warehouse table.
+
+    The warehouse table has only ``num_warehouses`` rows (typically 1–10),
+    so this is fast even at scale.
+    """
+    w_bound = (seq % num_warehouses) + 1
+    return (
+        f"SELECT COUNT(*), SUM(w_ytd), AVG(w_tax) "
+        f"FROM warehouse WHERE w_id <= {w_bound}"
     )
 
 
@@ -135,7 +156,6 @@ def _interference_worker(
     thread_id,
     connection_factory,
     num_warehouses,
-    evaluate_queries,
     query_types,
     interval_sec,
     phase_ref,
@@ -148,9 +168,8 @@ def _interference_worker(
         thread_id: Unique thread identifier (1000, 1001, ...).
         connection_factory: Zero-arg callable returning a psycopg2 connection.
         num_warehouses: Number of warehouses for query parameter generation.
-        evaluate_queries: List of OLAP queries from workflow_ops.evaluate().
         query_types: List of query type strings to cycle through
-                     (e.g. ["oltp_read", "oltp_write", "olap"]).
+                     (e.g. ["oltp_read", "olap_heavy", "olap_light"]).
         interval_sec: Sleep between queries (0 = no delay).
         phase_ref: Single-element list holding the current phase string.
         stop_event: threading.Event signalling shutdown.
@@ -173,8 +192,12 @@ def _interference_worker(
                 sql = _generate_oltp_read(num_warehouses, seq)
             elif qtype == "oltp_write":
                 sql = _generate_oltp_write(num_warehouses, rng, seq)
+            elif qtype == "olap_heavy":
+                sql = _generate_olap_heavy(num_warehouses, seq)
+            elif qtype == "olap_light":
+                sql = _generate_olap_light(num_warehouses, seq)
             else:
-                sql = _generate_olap(evaluate_queries, num_warehouses, seq)
+                sql = _generate_olap_heavy(num_warehouses, seq)
 
             seq += 1
 
@@ -229,14 +252,13 @@ class InterferenceMonitor:
         monitor.write_parquet()
     """
 
-    VALID_QUERY_TYPES = {"oltp_read", "oltp_write", "olap"}
+    VALID_QUERY_TYPES = {"oltp_read", "oltp_write", "olap_heavy", "olap_light"}
 
     def __init__(
         self,
         num_threads,
         connection_factory,
         num_warehouses,
-        evaluate_queries,
         run_id,
         output_dir,
         query_types=None,
@@ -245,13 +267,12 @@ class InterferenceMonitor:
         self._num_threads = num_threads
         self._connection_factory = connection_factory
         self._num_warehouses = num_warehouses
-        self._evaluate_queries = evaluate_queries
         self._run_id = run_id
         self._output_dir = output_dir
         self._interval_sec = interval_sec
 
         if query_types is None:
-            query_types = ["oltp_read", "oltp_write", "olap"]
+            query_types = ["oltp_read", "oltp_write", "olap_heavy", "olap_light"]
         unknown = set(query_types) - self.VALID_QUERY_TYPES
         if unknown:
             raise ValueError(
@@ -276,7 +297,6 @@ class InterferenceMonitor:
                     tid,
                     self._connection_factory,
                     self._num_warehouses,
-                    self._evaluate_queries,
                     self._query_types,
                     self._interval_sec,
                     self._phase_ref,

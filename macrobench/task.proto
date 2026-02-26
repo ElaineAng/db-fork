@@ -10,6 +10,7 @@ enum Backend {
     XATA = 3;
     FILE_COPY = 4;
     TIGER = 5;
+    TXN = 6;
 }
 
 // The five representative workflow categories from Section 3.1
