@@ -49,7 +49,7 @@ def parse_measurement_filename(filepath: str) -> dict | None:
 
     # Match: backend_tpcc_N_topology_operation[_rRANGE]
     m = re.match(
-        r"^(dolt|file_copy|neon)_tpcc_(\d+)_(spine|bushy|fan_out)_(update|range_update)(?:_r(\d+))?$",
+        r"^(dolt|file_copy|neon|xata)_tpcc_(\d+)_(spine|bushy|fan_out)_(update|range_update)(?:_r(\d+))?$",
         stem,
     )
     if not m:
@@ -84,8 +84,13 @@ def load_all(data_dir: str) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)", "neon": "Neon"}
-BACKENDS = ["dolt", "file_copy", "neon"]
+BACKEND_LABELS = {
+    "dolt": "Dolt",
+    "file_copy": "file_copy (PostgreSQL CoW)",
+    "neon": "Neon",
+    "xata": "Xata",
+}
+BACKENDS = ["dolt", "file_copy", "neon", "xata"]
 TOPO_ORDER = ["spine", "bushy", "fan_out"]
 N_VALUES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
@@ -114,9 +119,9 @@ def section_overview(df: pd.DataFrame):
               f"runs={row.runs:>3}  rows={row.rows:>5}")
     print()
 
-    # Exp 2b: RANGE_UPDATE varying range_size, spine only
+    # Range-size sweep: all RANGE_UPDATE on spine (includes r=20 from Exp 2a)
     exp2b = df[(df.operation == "RANGE_UPDATE") & (df.topology == "spine")]
-    print("Exp 2b (range size sweep, spine only):")
+    print("Range-size sweep, spine only (Exp 2b: r=1,10,50,100; r=20 from Exp 2a):")
     summary = exp2b.groupby(["backend", "range_size"]).agg(
         runs=("run_id", "nunique"), rows=("run_id", "count")
     ).reset_index()
@@ -134,6 +139,11 @@ def section_delta_distribution(df: pd.DataFrame):
 
     for backend in BACKENDS:
         sub = df[df.backend == backend]
+        if sub.empty:
+            print(f"--- {BACKEND_LABELS[backend]} ---")
+            print("  No rows found")
+            print()
+            continue
         total = len(sub)
         nz = int((sub.storage_delta != 0).sum())
         print(f"--- {BACKEND_LABELS[backend]} ---")
@@ -321,16 +331,22 @@ def section_research_questions(df: pd.DataFrame):
             sub = sub[sub.range_size == 20]
         for backend in BACKENDS:
             bsub = sub[sub.backend == backend]
+            if bsub.empty:
+                print(f"  {BACKEND_LABELS[backend]} {op}: no data")
+                continue
             agg = bsub.groupby("N")["storage_delta"].mean()
-            n1 = agg.get(1, 0)
-            n1024 = agg.get(1024, 0)
+            n_min = int(agg.index.min())
+            n_max = int(agg.index.max())
             print(f"  {BACKEND_LABELS[backend]} {op}:")
-            print(f"    N=1: mean delta = {fmt_bytes(n1)}")
-            print(f"    N=1024: mean delta = {fmt_bytes(n1024)}")
-            nz_by_n = bsub.groupby("N").apply(
-                lambda g: (g.storage_delta != 0).mean() * 100, include_groups=False
+            print(f"    N={n_min}: mean delta = {fmt_bytes(agg.iloc[0])}")
+            print(f"    N={n_max}: mean delta = {fmt_bytes(agg.iloc[-1])}")
+            nz_by_n = bsub.groupby("N")["storage_delta"].apply(
+                lambda s: (s != 0).mean() * 100
             )
-            print(f"    Non-zero fraction range: {nz_by_n.min():.1f}% — {nz_by_n.max():.1f}%")
+            print(
+                f"    Non-zero fraction range: "
+                f"{float(nz_by_n.min()):.1f}% — {float(nz_by_n.max()):.1f}%"
+            )
         print()
 
     # RQ2: Is the growth rate backend-dependent or topology-dependent?

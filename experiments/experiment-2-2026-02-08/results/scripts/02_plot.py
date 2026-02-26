@@ -30,7 +30,7 @@ def parse_measurement_filename(filepath: str) -> dict | None:
     if stem.endswith("_setup"):
         return None
     m = re.match(
-        r"^(dolt|file_copy|neon)_tpcc_(\d+)_(spine|bushy|fan_out)_(update|range_update)(?:_r(\d+))?$",
+        r"^(dolt|file_copy|neon|xata)_tpcc_(\d+)_(spine|bushy|fan_out)_(update|range_update)(?:_r(\d+))?$",
         stem,
     )
     if not m:
@@ -65,8 +65,13 @@ def load_all(data_dir: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Plot config
 # ---------------------------------------------------------------------------
-BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)", "neon": "Neon"}
-BACKENDS = ["dolt", "file_copy", "neon"]
+BACKEND_LABELS = {
+    "dolt": "Dolt",
+    "file_copy": "file_copy (PostgreSQL CoW)",
+    "neon": "Neon",
+    "xata": "Xata",
+}
+BACKENDS = ["dolt", "file_copy", "neon", "xata"]
 TOPO_ORDER = ["spine", "bushy", "fan_out"]
 TOPO_COLORS = {"spine": "#d62728", "bushy": "#2ca02c", "fan_out": "#1f77b4"}
 TOPO_LABELS = {"spine": "Spine", "bushy": "Bushy", "fan_out": "Fan-out"}

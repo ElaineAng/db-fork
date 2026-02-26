@@ -301,6 +301,10 @@ __marimo__/
 
 # Experiment data (parquet files are compressed into zip for version control)
 experiments/*/results/data/*.parquet
+# Exp2 raw data directory: ignore extracted/generated data files
+experiments/experiment-2-2026-02-08/results/data/
+# Keep committed archives
+!experiments/experiment-2-2026-02-08/results/exp2_xata_data_*.zip
 
 # End of https://www.toptal.com/developers/gitignore/api/pycharm+all,python,git
 
