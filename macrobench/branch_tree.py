@@ -174,11 +174,12 @@ class BranchTree:
             if self._cross_branch_readers == 0:
                 self._prune_lock.notify_all()
 
-    def wait_prune_safe(self) -> None:
+    def wait_prune_safe(self, timeout: float = 30.0) -> bool:
         """Block until no cross-branch queries are active (writer)."""
         with self._prune_lock:
-            self._prune_lock.wait_for(
-                lambda: self._cross_branch_readers == 0
+            return self._prune_lock.wait_for(
+                lambda: self._cross_branch_readers == 0,
+                timeout=timeout,
             )
 
     def mark_dead(self, node: BranchNode) -> None:

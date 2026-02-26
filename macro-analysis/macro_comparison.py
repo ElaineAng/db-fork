@@ -9,15 +9,20 @@ Reads parquet files from two backend directories and produces:
   3. Stacked bar chart: total time breakdown by op type per workflow,
      one group per backend.
   4. Text summary table with per-op median latencies for both backends.
+  5. Interference latency comparison (baseline vs measurement).
+  6. Storage & elapsed time comparison.
+  7. Storage delta by operation type.
 
 Usage:
     python macro-analysis/macro_comparison.py \
-        --dolt-dir run_stats/macro_dolt_mini_s1 \
-        --neon-dir run_stats/macro_neon_mini_s1 \
+        --dolt-dir run_stats/dolt_mini \
+        --neon-dir run_stats/neon_mini \
         --outdir macro-analysis/figures_comparison
 """
 
 import argparse
+import glob
+import json
 import os
 
 import numpy as np
@@ -87,12 +92,13 @@ BACKEND_COLORS = {
 
 def load_all_workflows(indir):
     """Load all macro_*.parquet files, return dict of {workflow_name: DataFrame}."""
-    import glob
-
     workflows = {}
     for wf in WORKFLOW_ORDER:
         pattern = os.path.join(indir, f"macro_{wf}*.parquet")
-        matches = sorted(glob.glob(pattern))
+        # Exclude interference parquet files
+        matches = sorted(
+            f for f in glob.glob(pattern) if "_interference" not in f
+        )
         if matches:
             df = pq.read_table(matches[0]).to_pandas()
             workflows[wf] = df
@@ -103,6 +109,38 @@ def load_all_workflows(indir):
         else:
             print(f"  Warning: no macro_{wf}*.parquet in {indir}, skipping.")
     return workflows
+
+
+def load_all_interference(indir):
+    """Load all *_interference.parquet files, return {workflow_name: DataFrame}."""
+    interference = {}
+    for wf in WORKFLOW_ORDER:
+        pattern = os.path.join(indir, f"macro_{wf}*_interference.parquet")
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            df = pq.read_table(matches[0]).to_pandas()
+            interference[wf] = df
+            if len(matches) > 1:
+                print(
+                    f"  Note: multiple interference files for {wf}, using {os.path.basename(matches[0])}"
+                )
+    return interference
+
+
+def load_all_storage(indir):
+    """Load all *_storage.json files, return {workflow_name: dict}."""
+    storage = {}
+    for wf in WORKFLOW_ORDER:
+        pattern = os.path.join(indir, f"macro_{wf}*_storage.json")
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            with open(matches[0]) as f:
+                storage[wf] = json.load(f)
+            if len(matches) > 1:
+                print(
+                    f"  Note: multiple storage files for {wf}, using {os.path.basename(matches[0])}"
+                )
+    return storage
 
 
 # ── Plot 1: Side-by-side box plots per workflow ──────────────────────
@@ -277,7 +315,7 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
         y=1.01,
     )
     fig.tight_layout()
-    path = os.path.join(outdir, "latency_boxplot_comparison.pdf")
+    path = os.path.join(outdir, "latency_boxplot_comparison.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"  Saved {path}")
     plt.close(fig)
@@ -415,7 +453,7 @@ def plot_time_breakdown(dolt_wfs, neon_wfs, outdir):
     )
 
     fig.tight_layout()
-    path = os.path.join(outdir, "time_breakdown_comparison.pdf")
+    path = os.path.join(outdir, "time_breakdown_comparison.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"  Saved {path}")
     plt.close(fig)
@@ -459,74 +497,28 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = data_n / data_d
 
-    fig, axes = plt.subplots(
-        1, 3, figsize=(18, 4.5), gridspec_kw={"width_ratios": [1, 1, 1]}
-    )
+    from matplotlib.colors import TwoSlopeNorm
+    import matplotlib.gridspec as gridspec
+
+    fig = plt.figure(figsize=(18, 10))
+    gs = gridspec.GridSpec(2, 2, figure=fig, height_ratios=[1, 1],
+                           hspace=0.35, wspace=0.25)
+
+    # Row 0: Ratio heatmap spanning full width
+    ax_r = fig.add_subplot(gs[0, :])
+    # Row 1: Dolt (left) and Neon (right)
+    ax_d = fig.add_subplot(gs[1, 0])
+    ax_n = fig.add_subplot(gs[1, 1])
 
     op_labels = [
         OP_SHORT.get(int(op), str(op)).replace("\n", " ") for op in all_ops
     ]
     wf_labels = [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs]
 
-    for ax_idx, (ax, data, title, cmap) in enumerate(
-        zip(
-            axes[:2],
-            [data_d, data_n],
-            ["Dolt", "Neon"],
-            ["Blues", "Reds"],
-        )
-    ):
-        masked = np.ma.masked_invalid(data)
-        log_data = np.ma.log10(masked)
-
-        im = ax.imshow(log_data, cmap=cmap, aspect="auto")
-        ax.set_xticks(range(n_op))
-        ax.set_xticklabels(op_labels, fontsize=9, rotation=45, ha="right")
-        ax.set_yticks(range(n_wf))
-        ax.set_yticklabels(wf_labels if ax_idx == 0 else [], fontsize=10)
-        ax.set_title(title, fontsize=12, fontweight="bold")
-
-        # Annotate cells
-        for i in range(n_wf):
-            for j in range(n_op):
-                if not np.isnan(data[i, j]):
-                    val = data[i, j]
-                    text = f"{val:.1f}" if val < 100 else f"{val:.0f}"
-                    log_val = np.log10(val) if val > 0 else 0
-                    log_max = np.nanmax(log_data)
-                    text_color = "white" if log_val > log_max * 0.6 else "black"
-                    ax.text(
-                        j,
-                        i,
-                        text,
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                        color=text_color,
-                        fontweight="bold",
-                    )
-                else:
-                    ax.text(
-                        j,
-                        i,
-                        "--",
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                        color="#cccccc",
-                    )
-
-        fig.colorbar(im, ax=ax, shrink=0.8, label="log10(ms)")
-
-    # Ratio heatmap — use log10 of the raw ratio for symmetric color mapping
-    from matplotlib.colors import TwoSlopeNorm
-    ax_r = axes[2]
-
-    # Work in log10 space: 0 = parity (1x), positive = Neon slower, negative = Dolt slower
+    # --- Row 0: Ratio heatmap ---
     with np.errstate(divide="ignore", invalid="ignore"):
         log10_ratio = np.log10(ratio)
 
-    # Symmetric bounds so 1x sits at the colormap center
     finite = log10_ratio[np.isfinite(log10_ratio)]
     if len(finite) > 0:
         bound = max(abs(finite.min()), abs(finite.max()), 0.5)
@@ -540,14 +532,13 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     ax_r.set_xticks(range(n_op))
     ax_r.set_xticklabels(op_labels, fontsize=9, rotation=45, ha="right")
     ax_r.set_yticks(range(n_wf))
-    ax_r.set_yticklabels([], fontsize=10)
+    ax_r.set_yticklabels(wf_labels, fontsize=10)
     ax_r.set_title("Neon / Dolt Ratio", fontsize=12, fontweight="bold")
 
     for i in range(n_wf):
         for j in range(n_op):
             if not np.isnan(ratio[i, j]):
                 r = ratio[i, j]
-                # Adaptive formatting: show enough precision for small ratios
                 if r >= 100:
                     text = f"{r:.0f}x"
                 elif r >= 10:
@@ -575,7 +566,6 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
                     color="#cccccc",
                 )
 
-    # Colorbar with ratio labels instead of raw log10 values
     cbar = fig.colorbar(im_r, ax=ax_r, shrink=0.8)
     cbar.set_label("Neon / Dolt", fontsize=10)
     tick_logs = np.array([-3, -2, -1, 0, 1, 2, 3])
@@ -584,11 +574,364 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     cbar.set_ticklabels([f"{10.0**t:.0g}x" if t >= 0 else f"{10.0**t:.2g}x"
                          for t in tick_logs])
 
+    # --- Row 1: Dolt and Neon heatmaps ---
+    for ax_idx, (ax, data, title, cmap) in enumerate(
+        zip(
+            [ax_d, ax_n],
+            [data_d, data_n],
+            ["Dolt", "Neon"],
+            ["Blues", "Reds"],
+        )
+    ):
+        masked = np.ma.masked_invalid(data)
+        log_data = np.ma.log10(masked)
+
+        im = ax.imshow(log_data, cmap=cmap, aspect="auto")
+        ax.set_xticks(range(n_op))
+        ax.set_xticklabels(op_labels, fontsize=9, rotation=45, ha="right")
+        ax.set_yticks(range(n_wf))
+        ax.set_yticklabels(wf_labels if ax_idx == 0 else [], fontsize=10)
+        ax.set_title(title, fontsize=12, fontweight="bold")
+
+        for i in range(n_wf):
+            for j in range(n_op):
+                if not np.isnan(data[i, j]):
+                    val = data[i, j]
+                    text = f"{val:.1f}" if val < 100 else f"{val:.0f}"
+                    log_val = np.log10(val) if val > 0 else 0
+                    log_max = np.nanmax(log_data)
+                    text_color = "white" if log_val > log_max * 0.6 else "black"
+                    ax.text(
+                        j, i, text,
+                        ha="center", va="center", fontsize=8,
+                        color=text_color, fontweight="bold",
+                    )
+                else:
+                    ax.text(
+                        j, i, "--",
+                        ha="center", va="center", fontsize=8,
+                        color="#cccccc",
+                    )
+
+        fig.colorbar(im, ax=ax, shrink=0.8, label="log10(ms)")
+
     fig.suptitle(
-        "Median Latency Comparison (ms)", fontsize=14, fontweight="bold", y=1.02
+        "Median Latency Comparison (ms)", fontsize=14, fontweight="bold",
     )
+    path = os.path.join(outdir, "heatmap_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
+# ── Plot 5: Interference latency comparison ──────────────────────────
+
+
+def plot_interference_comparison(dolt_intf, neon_intf, outdir):
+    """Grouped bar chart: baseline vs measurement latency per workflow per backend."""
+    common_wfs = [
+        wf for wf in WORKFLOW_ORDER if wf in dolt_intf or wf in neon_intf
+    ]
+    if not common_wfs:
+        print("  No interference data found, skipping.")
+        return
+
+    # Discover query types across all data
+    query_types = set()
+    for data in (dolt_intf, neon_intf):
+        for df in data.values():
+            query_types |= set(df["query_type"].unique())
+    query_types = sorted(query_types)
+
+    n_qt = len(query_types)
+    if n_qt == 0:
+        print("  No query types in interference data, skipping.")
+        return
+
+    fig, axes = plt.subplots(
+        n_qt, 1, figsize=(max(10, 2.5 * len(common_wfs)), 5 * n_qt),
+        squeeze=False,
+    )
+
+    for qt_idx, qt in enumerate(query_types):
+        ax = axes[qt_idx, 0]
+        n = len(common_wfs)
+        x = np.arange(n)
+        bar_w = 0.18
+        offsets = [-1.5, -0.5, 0.5, 1.5]
+
+        for wi, wf in enumerate(common_wfs):
+            for bi, (label, data, color) in enumerate([
+                ("Dolt", dolt_intf, BACKEND_COLORS["Dolt"]),
+                ("Neon", neon_intf, BACKEND_COLORS["Neon"]),
+            ]):
+                if wf not in data:
+                    continue
+                df = data[wf]
+                df_qt = df[df["query_type"] == qt]
+                if df_qt.empty:
+                    continue
+
+                baseline = df_qt[df_qt["phase"] == "baseline"]["latency"] * 1000
+                measurement = df_qt[df_qt["phase"] == "measurement"]["latency"] * 1000
+                med_base = baseline.median() if len(baseline) > 0 else 0
+                med_meas = measurement.median() if len(measurement) > 0 else 0
+
+                # Baseline bar (solid)
+                base_off = offsets[bi * 2]
+                ax.bar(
+                    x[wi] + base_off * bar_w, med_base, bar_w,
+                    color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+                    label=f"{label} baseline" if wi == 0 else None,
+                )
+                # Measurement bar (hatched)
+                meas_off = offsets[bi * 2 + 1]
+                ax.bar(
+                    x[wi] + meas_off * bar_w, med_meas, bar_w,
+                    color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+                    hatch="//",
+                    label=f"{label} measurement" if wi == 0 else None,
+                )
+                # Annotate % change
+                if med_base > 0:
+                    pct = (med_meas - med_base) / med_base * 100
+                    sign = "+" if pct >= 0 else ""
+                    ax.text(
+                        x[wi] + meas_off * bar_w, med_meas,
+                        f"{sign}{pct:.0f}%",
+                        ha="center", va="bottom", fontsize=8, fontweight="bold",
+                    )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+        )
+        ax.set_ylabel("Latency (ms)", fontsize=11)
+        ax.set_yscale("log")
+        title = "Interference Latency: Baseline vs Measurement"
+        if n_qt > 1:
+            title += f" ({qt})"
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.grid(True, alpha=0.3, axis="y")
+        ax.legend(fontsize=9, framealpha=0.9)
+
     fig.tight_layout()
-    path = os.path.join(outdir, "heatmap_comparison.pdf")
+    path = os.path.join(outdir, "interference_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
+# ── Plot 6: Storage & elapsed time comparison ────────────────────────
+
+
+def _human_size(nbytes):
+    """Format bytes as human-readable string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(nbytes) < 1024:
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} PB"
+
+
+def plot_storage_comparison(dolt_stor, neon_stor, outdir):
+    """Side-by-side bar charts: elapsed time and storage delta per workflow."""
+    common_wfs = [
+        wf for wf in WORKFLOW_ORDER if wf in dolt_stor or wf in neon_stor
+    ]
+    if not common_wfs:
+        print("  No storage data found, skipping.")
+        return
+
+    n = len(common_wfs)
+    x = np.arange(n)
+    bar_w = 0.35
+
+    fig, (ax_time, ax_stor) = plt.subplots(1, 2, figsize=(18, 5))
+
+    # Left: elapsed_sec
+    for bi, (label, data, color) in enumerate([
+        ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
+        ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
+    ]):
+        vals = [data[wf]["elapsed_sec"] if wf in data else 0 for wf in common_wfs]
+        offset = -bar_w / 2 if bi == 0 else bar_w / 2
+        bars = ax_time.bar(
+            x + offset, vals, bar_w,
+            color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+            label=label,
+        )
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax_time.text(
+                    bar.get_x() + bar.get_width() / 2, v,
+                    f"{v:.1f}s", ha="center", va="bottom", fontsize=8,
+                    fontweight="bold", clip_on=True,
+                )
+
+    ax_time.set_xticks(x)
+    ax_time.set_xticklabels(
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+    )
+    ax_time.set_ylabel("Elapsed Time (s)", fontsize=11)
+    ax_time.set_yscale("log")
+    ax_time.set_title("Elapsed Time per Workflow", fontsize=12, fontweight="bold")
+    ax_time.grid(True, alpha=0.3, axis="y")
+    ax_time.legend(fontsize=10, framealpha=0.9)
+
+    # Right: storage_delta_bytes
+    for bi, (label, data, color) in enumerate([
+        ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
+        ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
+    ]):
+        vals_bytes = [
+            data[wf]["storage_delta_bytes"] if wf in data else 0
+            for wf in common_wfs
+        ]
+        vals_mb = [v / (1024 * 1024) for v in vals_bytes]
+        offset = -bar_w / 2 if bi == 0 else bar_w / 2
+        bars = ax_stor.bar(
+            x + offset, vals_mb, bar_w,
+            color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+            label=label,
+        )
+        for bar, vb, vm in zip(bars, vals_bytes, vals_mb):
+            if vb > 0:
+                ax_stor.text(
+                    bar.get_x() + bar.get_width() / 2, vm,
+                    _human_size(vb), ha="center", va="bottom", fontsize=8,
+                    fontweight="bold", clip_on=True,
+                )
+
+    ax_stor.set_xticks(x)
+    ax_stor.set_xticklabels(
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+    )
+    ax_stor.set_ylabel("Storage Delta (MB)", fontsize=11)
+    ax_stor.set_yscale("log")
+    ax_stor.set_title("Storage Delta per Workflow", fontsize=12, fontweight="bold")
+    ax_stor.grid(True, alpha=0.3, axis="y")
+    ax_stor.legend(fontsize=10, framealpha=0.9)
+
+    fig.suptitle(
+        "Storage & Elapsed Time: Dolt vs Neon",
+        fontsize=14, fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    path = os.path.join(outdir, "storage_elapsed_comparison.png")
+    fig.savefig(path, dpi=150)
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
+# ── Plot 7: Storage delta by operation type ──────────────────────────
+
+
+def plot_storage_by_op(dolt_wfs, neon_wfs, outdir):
+    """Stacked bar chart: storage delta breakdown by op type, Dolt vs Neon."""
+    common_wfs = [
+        wf for wf in WORKFLOW_ORDER if wf in dolt_wfs and wf in neon_wfs
+    ]
+    if not common_wfs:
+        print("  No common workflows found, skipping storage-by-op.")
+        return
+
+    # Check if disk_size columns exist
+    sample = next(iter(dolt_wfs.values()))
+    if "disk_size_before" not in sample.columns or "disk_size_after" not in sample.columns:
+        print("  No disk_size columns in results data, skipping storage-by-op.")
+        return
+
+    # Collect all op types present
+    all_ops = set()
+    for wf in common_wfs:
+        all_ops |= set(dolt_wfs[wf].op_type.unique())
+        all_ops |= set(neon_wfs[wf].op_type.unique())
+    all_ops = sorted(op for op in all_ops if op != 0)
+
+    # Compute per-op storage delta for each workflow/backend
+    def compute_op_deltas(wfs):
+        result = {}
+        for wf in common_wfs:
+            df = wfs[wf].copy()
+            df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
+            op_deltas = {}
+            for op in all_ops:
+                sub = df[df.op_type == op]
+                op_deltas[op] = sub["storage_delta"].sum() / (1024 * 1024)  # MB
+            result[wf] = op_deltas
+        return result
+
+    dolt_deltas = compute_op_deltas(dolt_wfs)
+    neon_deltas = compute_op_deltas(neon_wfs)
+
+    # Determine if Neon data is all zeros
+    neon_all_zero = all(
+        all(abs(neon_deltas[wf][op]) < 0.001 for op in all_ops)
+        for wf in common_wfs
+    )
+
+    n = len(common_wfs)
+    x = np.arange(n)
+    bar_w = 0.25
+
+    # Op colors — reuse category palette
+    op_colors = {}
+    palette = ["#F5A623", "#2D8B57", "#52B788", "#95D5B2", "#D8F3DC",
+               "#B0B0B0", "#6C5CE7", "#E17055", "#00CEC9"]
+    for i, op in enumerate(all_ops):
+        op_colors[op] = palette[i % len(palette)]
+
+    fig, ax = plt.subplots(figsize=(max(10, 2.5 * n), 6))
+
+    for bi, (label, deltas, backend_key) in enumerate([
+        ("Dolt", dolt_deltas, "Dolt"),
+        ("Neon", neon_deltas, "Neon"),
+    ]):
+        if bi == 1 and neon_all_zero:
+            # Annotate N/A for Neon
+            offset = bar_w / 2
+            for wi in range(n):
+                ax.text(
+                    x[wi] + offset, 0, "N/A",
+                    ha="center", va="bottom", fontsize=9, fontstyle="italic",
+                    color="#999999",
+                )
+            continue
+
+        offset = -bar_w / 2 if bi == 0 else bar_w / 2
+        bottoms = np.zeros(n)
+        for op in all_ops:
+            vals = [deltas[wf][op] for wf in common_wfs]
+            ax.bar(
+                x + offset, vals, bar_w, bottom=bottoms,
+                color=op_colors[op], alpha=0.85, edgecolor="white",
+                linewidth=0.5,
+                label=OP_SHORT.get(int(op), str(op)).replace("\n", " ") if bi == 0 else None,
+            )
+            bottoms += np.array(vals)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+    )
+    ax.set_ylabel("Storage Delta (MB)", fontsize=11)
+    ax.set_title(
+        "Storage Delta by Operation Type: Dolt vs Neon",
+        fontsize=13, fontweight="bold",
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Build legend: op types + backend indicators
+    handles, labels = ax.get_legend_handles_labels()
+    # Add backend indicators
+    handles.append(Patch(facecolor="white", edgecolor="black", label="← Dolt  |  Neon →"))
+    labels.append("← Dolt  |  Neon →")
+    ax.legend(handles=handles, labels=labels, fontsize=9, framealpha=0.9,
+              loc="upper left", ncol=2)
+
+    fig.tight_layout()
+    path = os.path.join(outdir, "storage_by_op_comparison.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"  Saved {path}")
     plt.close(fig)
@@ -710,13 +1053,13 @@ def main():
     parser.add_argument(
         "--dolt-dir",
         type=str,
-        default="run_stats/macro_dolt_mini_s1",
+        default="run_stats/dolt_mini",
         help="Directory with Dolt parquet files.",
     )
     parser.add_argument(
         "--neon-dir",
         type=str,
-        default="run_stats/macro_neon_mini_s1",
+        default="run_stats/neon_mini",
         help="Directory with Neon parquet files.",
     )
     parser.add_argument(
@@ -747,6 +1090,25 @@ def main():
 
     print("\nPlot 4: Heatmap comparison with ratios")
     plot_heatmap_comparison(dolt_wfs, neon_wfs, args.outdir)
+
+    # Load interference data
+    print("\nLoading interference data...")
+    dolt_intf = load_all_interference(args.dolt_dir)
+    neon_intf = load_all_interference(args.neon_dir)
+
+    # Load storage data
+    print("\nLoading storage data...")
+    dolt_stor = load_all_storage(args.dolt_dir)
+    neon_stor = load_all_storage(args.neon_dir)
+
+    print("\nPlot 5: Interference latency comparison")
+    plot_interference_comparison(dolt_intf, neon_intf, args.outdir)
+
+    print("\nPlot 6: Storage & elapsed time comparison")
+    plot_storage_comparison(dolt_stor, neon_stor, args.outdir)
+
+    print("\nPlot 7: Storage delta by operation type")
+    plot_storage_by_op(dolt_wfs, neon_wfs, args.outdir)
 
     print_summary(dolt_wfs, neon_wfs)
 

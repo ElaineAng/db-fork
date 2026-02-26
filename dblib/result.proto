@@ -60,5 +60,7 @@ enum OpType {
   DDL = 7;
   BRANCH_DELETE = 8;
   API_RETRY_WAIT = 9;
+  CONNECT_FIRST = 10;
+  CONNECT_MID = 11;
+  CONNECT_LAST = 12; 
 }
-

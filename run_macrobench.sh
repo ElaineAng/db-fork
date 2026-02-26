@@ -5,8 +5,9 @@
 #   ./run_macrobench.sh [--mini] [--outdir DIR] <workflow> <backend> <db_scale> <sql_path>
 #
 # Arguments:
-#   --mini       Use the mini config (fewer workers/steps for Neon)
-#   --outdir DIR Directory for output parquet files (default: run_stats/)
+#   --mini              Use the mini config (fewer workers/steps for Neon)
+#   --outdir DIR        Directory for output parquet files (default: run_stats/)
+#   --max-runtime-sec N Cap total workflow runtime in seconds (0 = no limit)
 #   workflow     One of: software_dev, failure_repro, data_cleaning, mcts, simulation
 #   backend      One of: dolt, neon
 #   db_scale     Integer scale factor (num warehouses)
@@ -15,25 +16,29 @@
 # Example:
 #   ./run_macrobench.sh mcts neon 10 db_setup/ch_benchmark_schema.sql
 #   ./run_macrobench.sh --mini --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
+#   ./run_macrobench.sh --max-runtime-sec 600 mcts neon 10 db_setup/ch_benchmark_schema.sql
 
 set -euo pipefail
 
 MINI=false
 OUTDIR="run_stats/"
+MAX_RUNTIME_SEC=0
 
 # Parse optional flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --mini)   MINI=true; shift ;;
-        --outdir) OUTDIR="$2"; shift 2 ;;
-        *)        break ;;
+        --mini)            MINI=true; shift ;;
+        --outdir)          OUTDIR="$2"; shift 2 ;;
+        --max-runtime-sec) MAX_RUNTIME_SEC="$2"; shift 2 ;;
+        *)                 break ;;
     esac
 done
 
 if [[ $# -ne 4 ]]; then
-    echo "Usage: $0 [--mini] [--outdir DIR] <workflow> <backend> <db_scale> <sql_path>"
-    echo "  --mini:      use mini config (fewer workers/steps for Neon)"
-    echo "  --outdir:    output directory for parquet files (default: run_stats/)"
+    echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] <workflow> <backend> <db_scale> <sql_path>"
+    echo "  --mini:              use mini config (fewer workers/steps for Neon)"
+    echo "  --outdir:            output directory for parquet files (default: run_stats/)"
+    echo "  --max-runtime-sec:   cap total workflow runtime in seconds (0 = no limit)"
     echo "  workflow:    software_dev | failure_repro | data_cleaning | mcts | simulation"
     echo "  backend:     dolt | neon"
     echo "  db_scale:    integer scale factor (num warehouses)"
@@ -103,7 +108,14 @@ echo "  Scale:     $DB_SCALE"
 echo "  SQL:       $SQL_PATH"
 echo "  Run ID:    $RUN_ID"
 echo "  Output:    $OUTDIR"
+echo "  Timeout:   ${MAX_RUNTIME_SEC}s (0 = no limit)"
 echo "  Config:    $TMP_CONFIG (patched from $BASE_CONFIG)"
 echo "======================"
 
-python -m macrobench.runner --config "$TMP_CONFIG" --outdir "$OUTDIR"
+python -m macrobench.runner \
+    --config "$TMP_CONFIG" \
+    --outdir "$OUTDIR" \
+    --measure-storage \
+    --measure-interference \
+    --monitor-queries olap \
+    --max-runtime-sec "$MAX_RUNTIME_SEC"

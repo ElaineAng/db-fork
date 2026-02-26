@@ -65,11 +65,38 @@ done
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] [--measure-storage]"
-    echo "  backend: dolt, neon, kpg, xata, file_copy, tiger"
+    echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
     echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
     echo "  --shape: (optional) Branch tree shape: spine, bushy, or fan_out (default: spine)"
+    exit 1
+fi
+
+# Convert backend to uppercase for proto config
+BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
+
+# Validate backend
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TXN)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, txn"
+    exit 1
+fi
+
+# Convert shape to uppercase for proto config and validate
+SHAPE_UPPER=$(echo "$SHAPE" | tr '[:lower:]' '[:upper:]')
+if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
+    echo "Error: Invalid shape '$SHAPE'. Must be one of: spine, bushy, fan_out"
+    exit 1
+fi
+
+if [[ "$BACKEND" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
+    echo "Error: PostgreSQL Save Point only works with spine shape"
+    exit 1
+fi
+
+# Check if SQL dump file exists
+if [ ! -f "$SQL_DUMP_PATH" ]; then
+    echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
     echo "  --measure-storage: (optional) Measure disk_size_before/after around each update op (reduces num_ops)"
     echo "  --operations: (optional) Comma-separated list of operations (default: BRANCH). E.g. UPDATE,RANGE_UPDATE"
     echo "  --range-size: (optional) Range size for RANGE_UPDATE operation (default: 20)"
@@ -81,12 +108,57 @@ if [ -z "$SEED" ]; then
     SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 fi
 
+# Configuration parameters
+NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
+OPERATIONS=(BRANCH READ CONNECT INSERT UPDATE RANGE_READ RANGE_UPDATE)
+if [[ "$BACKEND" == "TXN" ]]; then 
+    OPERATIONS=(BRANCH READ INSERT UPDATE RANGE_READ RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
+fi
+
 # Override OPERATIONS if --operations was provided
 if [ -n "$OPS_STRING" ]; then
     IFS=',' read -ra OPERATIONS <<< "$OPS_STRING"
-else
-    OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
 fi
+
+# Other fixed config values
+TABLE_NAME="orders"
+DB_NAME="microbench"
+INSERTS_PER_BRANCH=100
+UPDATES_PER_BRANCH=20
+DELETES_PER_BRANCH=10
+RANGE_SIZE=20
+
+# Create temporary config file
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_bench_config.XXXXXX.textproto)
+
+cleanup() {
+    rm -f "$TEMP_CONFIG"
+}
+trap cleanup EXIT
+
+# Extract first 4 chars of sql_dump filename for run_id
+SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
+SQL_PREFIX=${SQL_BASENAME:0:4}
+
+# Function to get num_ops based on operation type
+get_num_ops() {
+    local op=$1
+    case $op in
+        BRANCH|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
+            echo 1
+            ;;
+        RANGE_UPDATE)
+            echo 200
+            ;;
+        CONNECT|READ|UPDATE|RANGE_READ)
+            echo 1000
+            ;;
+        *)
+            echo 1000
+            ;;
+    esac
+}
+
 
 echo "==================================================="
 echo "Single-Thread Benchmark Script"

@@ -23,6 +23,7 @@ from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
+from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
 from dblib.tiger import TigerToolSuite
 from dblib.storage import StorageMeasurer
@@ -87,6 +88,7 @@ class BackendInfo:
     xata_project_id: Optional[str] = None
     tiger: Optional[dict] = None
     file_copy_info:  Optional[FileCopyToolSuite.FileCopyInfo] = None
+    txn_conn:        Optional[psycopg2.extensions.connection] = None
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -118,12 +120,16 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
         info.default_branch_name = "main"
         print(f"Default KPG connection URI: {info.default_uri}")
 
+    elif backend == tp.Backend.TXN:
+        info.default_uri = TxnToolSuite.get_default_connection_uri()
+        info.default_branch_name = "main"
+        print(f"Default PostgreSQL connection URI: {info.default_uri}")
+
     elif backend == tp.Backend.FILE_COPY:
         info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
         info.default_uri = FileCopyToolSuite.get_default_connection_uri()
         info.default_branch_name = "main"
         print(f"Default FILE_COPY connection URI: {info.default_uri}")
-
 
     elif backend == tp.Backend.NEON:
         if require_db_setup:
@@ -262,6 +268,9 @@ def get_initial_connection_uri(
     elif backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.get_initial_connection_uri(db_name)
 
+    elif backend == tp.Backend.TXN:
+        return TxnToolSuite.get_initial_connection_uri(db_name)
+
     elif backend == tp.Backend.NEON:
         return NeonToolSuite._get_neon_connection_uri(
             backend_info.neon_project_id,
@@ -344,6 +353,8 @@ def cleanup_backend(
         conn = None
         cur = None
         try:
+            if backend_info.txn_conn:
+                backend_info.txn_conn.close()
             conn = psycopg2.connect(backend_info.default_uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
@@ -595,6 +606,18 @@ class BenchmarkSuite:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
                 )
+            elif self._config.backend == tp.Backend.TXN:
+                # No-op if there's already a connection active
+                # Otherwise, create the persistent connection
+                self._backend_info.txn_conn = TxnToolSuite.get_connection(
+                        self._backend_info.txn_conn, self._db_name
+                        )
+                db_tools = TxnToolSuite.init_for_bench(
+                    result_collector, self._db_name, self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                    self._backend_info.setup_branches,
+                    self._backend_info.txn_conn
+                )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
                     result_collector,
@@ -647,7 +670,10 @@ class BenchmarkSuite:
 
             self._add_branch(self._root_branch_name)
             self.db_tools = db_tools
-            self._storage = StorageMeasurer(db_tools, self._measure_storage)
+            if self._measure_storage:
+                db_tools.result_collector.set_storage_fn(
+                    db_tools.get_total_storage_bytes
+                )
 
             # If this thread has assigned branches (FAN_OUT mode), connect to the first one
             if self._assigned_branches:
@@ -679,7 +705,8 @@ class BenchmarkSuite:
         # Close the database connection.
         # NOTE: _cleanup_backend() should be called separately by the main
         # thread after all worker threads have finished.
-        self.db_tools.close_connection()
+        if not self._backend_info.txn_conn:
+            self.db_tools.close_connection()
         if self._config.database_setup.cleanup and self._backend_info.tiger:
             self._backend_info.tiger['services'] = self.db_tools.get_all_services()
 
@@ -695,12 +722,12 @@ class BenchmarkSuite:
         )
         if not branch_limit_reached:
             next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
-            with self._storage.measure():
-                self.db_tools.create_branch(
-                    branch_name=next_branch_name, parent_id=cur_id
-                )
-            self.db_tools.result_collector.record_num_keys_touched(0)
-            self.db_tools.result_collector.flush_record()
+            self.db_tools.create_branch(
+                branch_name=next_branch_name,
+                parent_id=cur_id,
+                timed=True,
+                storage=self._measure_storage,
+            )
             self._add_branch(next_branch_name)
 
             # Toss a fair coin to connect to the new branch, or stay on the
@@ -733,12 +760,12 @@ class BenchmarkSuite:
         next_branch_name = f"branch_tid{self._thread_id}_{next_bid}"
 
         # Create branch (timed, with optional storage measurement)
-        with self._storage.measure():
-            self.db_tools.create_branch(
-                branch_name=next_branch_name, parent_id=cur_id, timed=True
-            )
-        self.db_tools.result_collector.record_num_keys_touched(0)
-        self.db_tools.result_collector.flush_record()
+        self.db_tools.create_branch(
+            branch_name=next_branch_name,
+            parent_id=cur_id,
+            timed=True,
+            storage=self._measure_storage,
+        )
         self._add_branch(next_branch_name)
 
         # Connect to the new branch (timed)
@@ -859,25 +886,6 @@ class BenchmarkSuite:
             except Exception:
                 continue
 
-    def _execute_timed_op(self, sql, row_data, commit_message):
-        """Execute SQL with timing and optional storage measurement.
-
-        Bypasses execute_sql(timed=True) auto-flush so disk_size_before and
-        disk_size_after land on the same record.
-        """
-
-        result_collector = self.db_tools.result_collector
-        db_tools = self.db_tools
-
-        with self._storage.measure():
-            op_type = rc.GetOpTypeFromSQL(sql)
-            with result_collector.maybe_time_ops(timed=True, op_type=op_type):
-                db_tools.execute_sql(sql, row_data, timed=False)
-                if not db_tools.autocommit:
-                    db_tools.commit_changes(timed=False, message=commit_message)
-        result_collector.record_sql_query(f"{sql} -- args: {row_data}")
-        result_collector.flush_record()
-
     def update_op(self, rnd, benchmark_table, timed: bool = True) -> None:
         """Update a random row in the table.
 
@@ -934,12 +942,14 @@ class BenchmarkSuite:
             self.db_tools.result_collector.record_num_keys_touched(1)
 
         # Run the update.
-        if timed:
-            self._execute_timed_op(update_sql, row_data, "update")
-        else:
-            # NOTE: Never call execute_sql(timed=True) directly — its auto-flush
-            # conflicts with StorageMeasurer. Use _execute_timed_op for timed ops.
-            self.db_tools.execute_sql(update_sql, row_data, timed=False)
+        self.db_tools.execute_sql(
+            update_sql,
+            row_data,
+            timed=timed,
+            storage=self._measure_storage,
+        )
+        if timed and not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=False, message="update")
 
         # Track the modified key.
         if key_to_update not in self._modified_keys.get(cur_branch_id, []):
@@ -998,7 +1008,14 @@ class BenchmarkSuite:
         )
 
         # Run the range update.
-        self._execute_timed_op(update_sql, row_data, "range update")
+        self.db_tools.execute_sql(
+            update_sql,
+            row_data,
+            timed=True,
+            storage=self._measure_storage,
+        )
+        if not self.db_tools.autocommit:
+            self.db_tools.commit_changes(timed=False, message="range update")
 
         # Track all actual keys in the range as modified.
         modified_list = self._modified_keys.setdefault(cur_branch_id, [])
@@ -1147,9 +1164,7 @@ class BenchmarkSuite:
         # Initialize datagen for inserts.
         benchmark_table = self._config.table_name
         if not benchmark_table:
-            all_tables = dbh.get_all_tables(
-                db_tools.get_current_connection()
-            )
+            all_tables = dbh.get_all_tables(db_tools.get_current_connection())
             benchmark_table = rnd.choice(all_tables)
 
         table_schema = db_tools.get_table_schema(benchmark_table)
@@ -1192,33 +1207,35 @@ class BenchmarkSuite:
 
             if shape == tp.BranchShape.SPINE:
                 # Linear: branch from current
-                with self._storage.measure():
-                    db_tools.create_branch(
-                        branch_name, current_parent_id, timed=True
-                    )
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name,
+                    current_parent_id,
+                    timed=True,
+                    storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, current_parent_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, current_parent_id))
             elif shape == tp.BranchShape.FAN_OUT:
                 # Fan-out: always branch from root
-                with self._storage.measure():
-                    db_tools.create_branch(
-                        branch_name, root_branch_id, timed=True
-                    )
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name,
+                    root_branch_id,
+                    timed=True,
+                    storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
             else:  # BUSHY
                 # Bushy: branch from a random existing branch
                 parent_name, parent_id = rnd.choice(branch_ids)
-                with self._storage.measure():
-                    db_tools.create_branch(branch_name, parent_id, timed=True)
-                db_tools.result_collector.record_num_keys_touched(0)
-                db_tools.result_collector.flush_record()
+                db_tools.create_branch(
+                    branch_name,
+                    parent_id,
+                    timed=True,
+                    storage=self._measure_storage,
+                )
                 db_tools.connect_branch(branch_name, timed=False)
                 _, new_branch_id = db_tools.get_current_branch()
                 branch_ids.append((branch_name, new_branch_id))
@@ -1396,26 +1413,36 @@ class BenchmarkSuite:
         # Use shared progress if available (multi-threaded), else use local tqdm
         use_shared_progress = self._shared_progress is not None
 
-        for i in range(num_ops):
-            if op == tp.OperationType.BRANCH:
-                next_bid = self._shared_branch_manager.get_next_branch_id()
-                self.branch_and_connect(next_bid)
-            elif op == tp.OperationType.READ:
-                self.read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.INSERT:
-                self.insert_op(benchmark_table)
-            elif op == tp.OperationType.UPDATE:
-                self.update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_UPDATE:
-                self.range_update_op(rnd, benchmark_table)
-            elif op == tp.OperationType.RANGE_READ:
-                self.range_read_op(rnd, benchmark_table)
-            elif op == tp.OperationType.CONNECT:
-                self.connect_to_branch(rnd)
-
-            # Update progress
+        if (op == tp.OperationType.CONNECT_FIRST
+        or op == tp.OperationType.CONNECT_MID
+        or op == tp.OperationType.CONNECT_LAST):
+            self.db_tools.connect_specific_branch(op)
+            self._existing_pks = []
             if use_shared_progress:
                 self._shared_progress.update(1)
+
+        else:
+            for i in range(num_ops):
+                if op == tp.OperationType.BRANCH:
+                    next_bid = self._shared_branch_manager.get_next_branch_id()
+                    self.branch_and_connect(next_bid)
+                elif op == tp.OperationType.READ:
+                    self.read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.INSERT:
+                    self.insert_op(benchmark_table)
+                elif op == tp.OperationType.UPDATE:
+                    self.update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_UPDATE:
+                    self.range_update_op(rnd, benchmark_table)
+                elif op == tp.OperationType.RANGE_READ:
+                    self.range_read_op(rnd, benchmark_table)
+                elif op == tp.OperationType.CONNECT:
+                    self.connect_to_branch(rnd)
+
+
+                # Update progress
+                if use_shared_progress:
+                    self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
