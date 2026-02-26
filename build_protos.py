@@ -9,8 +9,10 @@ from setuptools.command.build_py import build_py as _build_py
 def compile_protos():
     """Compile all .proto files in the project."""
     # Collect proto files from both dblib and microbench directories
-    proto_files = list(Path("dblib").glob("*.proto")) + list(
-        Path("microbench").glob("*.proto")
+    proto_files = (
+        list(Path("dblib").glob("*.proto"))
+        + list(Path("microbench").glob("*.proto"))
+        + list(Path("macrobench").glob("*.proto"))
     )
 
     if not proto_files:

@@ -58,6 +58,9 @@ def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
         "UPDATE": rslt.OpType.UPDATE,
         "DELETE": rslt.OpType.UPDATE,  # DELETE is a write operation like UPDATE
         "WITH": rslt.OpType.READ,  # If we still have WITH, it's likely a CTE query (read)
+        "CREATE": rslt.OpType.DDL,
+        "ALTER": rslt.OpType.DDL,
+        "DROP": rslt.OpType.DDL,
     }
 
     return keyword_map.get(keyword, rslt.OpType.UNSPECIFIED)
@@ -115,6 +118,10 @@ class ResultCollector:
             self._thread_local.current_latency = 0.0
             self._thread_local.num_keys_touched = 0
             self._thread_local.sql_query = ""
+            self._thread_local.disk_size_before = 0
+            self._thread_local.disk_size_after = 0
+            self._thread_local.branch_count = 0
+            self._thread_local.storage_fn = None
         return self._thread_local
 
     def _reset_metrics(self):
@@ -124,6 +131,9 @@ class ResultCollector:
         state.current_latency = 0.0
         state.num_keys_touched = 0
         state.sql_query = ""
+        state.disk_size_before = 0
+        state.disk_size_after = 0
+        state.branch_count = 0
 
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
@@ -156,28 +166,47 @@ class ResultCollector:
             )
         state.current_op_type = op_type
 
+    def set_storage_fn(self, fn):
+        """Set the storage measurement function for the current thread."""
+        state = self._get_thread_state()
+        state.storage_fn = fn
+
     @contextmanager
-    def maybe_time_ops(self, timed: bool, op_type: rslt.OpType):
-        # Return early if not timed.
-        if not timed:
+    def maybe_measure_ops(self, timed: bool, op_type: rslt.OpType, storage: bool = False):
+        state = self._get_thread_state()
+        if storage and state.storage_fn:
+            state.disk_size_before = state.storage_fn()
+        if not timed and not storage:
             yield
             return
-        start_time = time.perf_counter()
+        start_time = time.perf_counter() if timed else None
         try:
             yield
-        # Propagate exceptions.
         except Exception as e:
             raise e
-        # Only collect elapsed time if no exceptions.
         else:
-            end_time = time.perf_counter()
-            self._validate_and_set_op_type(op_type)
-            state = self._get_thread_state()
-            state.current_latency = end_time - start_time
+            if timed:
+                end_time = time.perf_counter()
+                self._validate_and_set_op_type(op_type)
+                state.current_latency = end_time - start_time
+            if storage and state.storage_fn:
+                state.disk_size_after = state.storage_fn()
 
     def record_num_keys_touched(self, num_keys: int) -> None:
         state = self._get_thread_state()
         state.num_keys_touched = num_keys
+
+    def record_disk_size_before(self, size: int) -> None:
+        state = self._get_thread_state()
+        state.disk_size_before = size
+
+    def record_disk_size_after(self, size: int) -> None:
+        state = self._get_thread_state()
+        state.disk_size_after = size
+
+    def record_branch_count(self, branch_count: int) -> None:
+        state = self._get_thread_state()
+        state.branch_count = branch_count
 
     def record_sql_query(self, sql_query: str) -> None:
         state = self._get_thread_state()
@@ -206,6 +235,9 @@ class ResultCollector:
         result.latency = state.current_latency
         result.sql_query = state.sql_query
         result.thread_id = get_current_thread_id()
+        result.disk_size_before = state.disk_size_before
+        result.disk_size_after = state.disk_size_after
+        result.branch_count = state.branch_count
 
         # Append to results (thread-safe)
         with self._lock:
@@ -245,6 +277,7 @@ class ResultCollector:
                 "disk_size_before": result.disk_size_before,
                 "disk_size_after": result.disk_size_after,
                 "sql_query": result.sql_query,
+                "branch_count": result.branch_count,
             }
             rows.append(row)
 

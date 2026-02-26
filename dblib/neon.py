@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import time
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
@@ -10,7 +11,7 @@ from dblib.db_api import DBToolSuite
 from neon_api import NeonAPI
 import dblib.result_collector as rc
 
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
 neon = NeonAPI(api_key=API_KEY)
 NEON_API_BASE_URL = "https://console.neon.tech/api/v2/"
@@ -83,17 +84,39 @@ class NeonToolSuite(DBToolSuite):
 
     @classmethod
     def _get_neon_connection_uri(
-        cls, project_id: str, branch_id: str, db_name: str
+        cls,
+        project_id: str,
+        branch_id: str,
+        db_name: str,
+        max_retries: int = 10,
+        retry_delay: float = 0.5,
     ) -> str:
         """
         Retrieves the connection URI for a specific Neon database branch.
+
+        Retries on HTTP 404 (newly created branches not yet visible)
+        and HTTP 429 (rate limit) with jittered backoff.
         """
+        import random as _rng
+
         endpoint = (
             f"projects/{project_id}/connection_uri?branch_id={branch_id}"
             f"&database_name={db_name}&role_name=neondb_owner"
         )
-        response = cls._request("GET", endpoint)
-        return response["uri"]
+        for attempt in range(max_retries):
+            try:
+                response = cls._request("GET", endpoint)
+                return response["uri"]
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 0
+                retryable = status in (404, 429)
+                if retryable and attempt < max_retries - 1:
+                    delay = retry_delay * (2 ** min(attempt, 5))
+                    delay *= 0.5 + _rng.random()  # jitter
+                    time.sleep(delay)
+                    continue
+                raise
+        return None
 
     @classmethod
     def get_project_branches(cls, project_id: str) -> dict:
@@ -120,7 +143,7 @@ class NeonToolSuite(DBToolSuite):
         self.autocommit = autocommit
         self._all_branches = {branch_name: (branch_id, None)}
 
-    def _get_neon_branches(self) -> list[dict]:
+    def _get_neon_branches(self) -> dict:
         """
         Lists all branches in the current Neon project.
         """
@@ -207,3 +230,171 @@ class NeonToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> Tuple[str, str]:
         return (self.current_branch_name, self.current_branch_id)
+
+    @staticmethod
+    def _pg_database_size(conn) -> int:
+        """Return pg_database_size(current_database()) in bytes via SQL."""
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_database_size(current_database())")
+            return cur.fetchone()[0]
+
+    _BRANCH_CONNECT_MAX_RETRIES = 3
+    _BRANCH_CONNECT_RETRY_DELAY = 3.0
+
+    def get_total_storage_bytes(self) -> int:
+        """Get total storage across all branches via pg_database_size().
+
+        Opens a temporary connection to each branch (except the current one,
+        which reuses self.conn) and sums pg_database_size().  This is an
+        instant, real-time metric — unlike synthetic_storage_size or the
+        branch-level logical_size from the API, which lag ~15 minutes.
+
+        Per-branch failures (e.g. cold-compute timeouts) are retried and,
+        if still unsuccessful, skipped so that measurements from other
+        branches are not discarded.
+
+        Returns:
+            Total storage in bytes across all branches, or 0 if unavailable.
+        """
+        try:
+            db_name = self.conn.get_dsn_parameters()["dbname"]
+            branches = self._get_neon_branches()
+        except Exception as e:
+            print(f"Warning: Could not list Neon branches: {e}")
+            return 0
+
+        total = 0
+        for name, (branch_id, _) in branches.items():
+            if branch_id == self.current_branch_id:
+                try:
+                    total += self._pg_database_size(self.conn)
+                except Exception as e:
+                    print(
+                        f"Warning: Could not get storage for current "
+                        f"branch '{name}': {e}"
+                    )
+                continue
+
+            for attempt in range(self._BRANCH_CONNECT_MAX_RETRIES):
+                try:
+                    uri = self.__class__._get_neon_connection_uri(
+                        self.project_id,
+                        branch_id,
+                        db_name,
+                    )
+                    tmp_conn = psycopg2.connect(uri)
+                    try:
+                        total += self._pg_database_size(tmp_conn)
+                    finally:
+                        tmp_conn.close()
+                    break  # success — move to next branch
+                except Exception as e:
+                    if attempt < self._BRANCH_CONNECT_MAX_RETRIES - 1:
+                        print(
+                            f"Warning: branch '{name}' attempt "
+                            f"{attempt + 1}/{self._BRANCH_CONNECT_MAX_RETRIES}"
+                            f" failed ({e}), retrying in "
+                            f"{self._BRANCH_CONNECT_RETRY_DELAY}s..."
+                        )
+                        time.sleep(self._BRANCH_CONNECT_RETRY_DELAY)
+                    else:
+                        print(
+                            f"Warning: Could not get storage for branch "
+                            f"'{name}' after "
+                            f"{self._BRANCH_CONNECT_MAX_RETRIES} attempts: "
+                            f"{e}"
+                        )
+
+        return total
+
+    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
+        """Delete a branch via the Neon REST API.
+
+        Uses DELETE /projects/{project_id}/branches/{branch_id}.
+
+        Restrictions enforced by Neon:
+          - Cannot delete the root/default branch.
+          - Cannot delete a branch that has child branches.
+        """
+        bid = branch_id
+        if not bid:
+            info = self._all_branches.get(branch_name)
+            if info:
+                bid = info[0]
+        if not bid:
+            # Fall back to API lookup
+            all_branches = self._get_neon_branches()
+            if branch_name in all_branches:
+                bid = all_branches[branch_name][0]
+        if not bid:
+            raise ValueError(
+                f"Cannot delete branch '{branch_name}': unknown branch ID"
+            )
+
+        endpoint = f"projects/{self.project_id}/branches/{bid}"
+        self.__class__._request("DELETE", endpoint)
+
+        # Remove from local cache.
+        self._all_branches.pop(branch_name, None)
+
+    @classmethod
+    def get_consumption_metrics(cls, project_id, org_id=None):
+        """Fetch storage consumption metrics for a project from the Neon API.
+
+        Uses the ``consumption_history/v2/projects`` endpoint to retrieve
+        ``root_branch_bytes_month`` and ``child_branch_bytes_month``.
+
+        Args:
+            project_id: Neon project ID.
+            org_id: Neon organization ID.  Falls back to the
+                     ``NEON_ORG_ID`` environment variable.
+
+        Returns:
+            Dict with ``root_branch_bytes_month`` and
+            ``child_branch_bytes_month``, or ``None`` on failure.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        org_id = org_id or os.environ.get("NEON_ORG_ID", "")
+        if not org_id:
+            print("Warning: NEON_ORG_ID not set, skipping consumption metrics")
+            return None
+
+        now = datetime.now(timezone.utc)
+        # Use a 24-hour window — hourly data may lag behind real time.
+        start = (now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        endpoint = (
+            f"consumption_history/v2/projects"
+            f"?org_id={org_id}"
+            f"&project_ids={project_id}"
+            f"&from={start}&to={end}"
+            f"&granularity=hourly"
+            f"&metrics=root_branch_bytes_month,child_branch_bytes_month"
+        )
+        try:
+            resp = cls._request("GET", endpoint)
+        except Exception as e:
+            print(f"Warning: consumption metrics request failed: {e}")
+            return None
+
+        # Walk the response to find the most recent non-empty data point.
+        try:
+            projects = resp.get("projects", [])
+            if not projects:
+                print("Warning: no projects in consumption response")
+                return None
+            for period in reversed(projects[0].get("periods", [])):
+                for entry in reversed(period.get("consumption", [])):
+                    metrics = entry.get("metrics", [])
+                    if metrics:
+                        result = {}
+                        for m in metrics:
+                            result[m["metric_name"]] = m["value"]
+                        return result
+            print("Warning: no consumption data points found")
+            return None
+        except (KeyError, IndexError) as e:
+            print(f"Warning: could not parse consumption metrics: {e}")
+            return None

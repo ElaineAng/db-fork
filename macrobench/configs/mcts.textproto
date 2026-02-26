@@ -1,0 +1,34 @@
+# MCTS workflow (Table 1, Section 3.3)
+# Lightweight DML + analytical reward queries.
+# Tree shape: deep bounded tree (F_r=10, F_i=10, D=25).
+
+run_id: "macro_mcts"
+backend: DOLT
+workflow: MCTS
+
+database_setup {
+    db_name: "macrobench_mcts"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/ch_benchmark_seed.sql"
+    }
+}
+
+setup {
+    workers: 10             # T
+    total_steps: 100        # S (per worker)
+    root_fanout: 10         # F_r
+    inner_fanout: 10        # F_i
+    max_depth: 25           # D
+    cross_branch_queries: 0 # C (no cross-branch queries)
+    db_scale: 1            # 10 warehouses, 1K items, 100 cust/district
+}
+
+step {
+    schema_changes: 0   # M_s (no DDL)
+    data_mutations: 1   # M_d
+    eval_queries: 1     # Q_v
+    prune_prob: 0.1     # gamma
+}
+
+autocommit: true

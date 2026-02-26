@@ -1,0 +1,34 @@
+# Software Development workflow (Table 1, Section 3.3)
+# DDL-heavy: schema migrations, backfill, integrity tests.
+# Tree shape: moderate depth (F_r=5, F_i=3, D=3).
+
+run_id: "macro_software_dev"
+backend: DOLT
+workflow: SOFTWARE_DEV
+
+database_setup {
+    db_name: "macrobench_softdev"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/ch_benchmark_seed.sql"
+    }
+}
+
+setup {
+    workers: 5              # T
+    total_steps: 20         # S (per worker)
+    root_fanout: 5          # F_r
+    inner_fanout: 3         # F_i
+    max_depth: 4            # D
+    cross_branch_queries: 1 # C
+    db_scale: 0             # 10 warehouses, 1K items, 100 cust/district
+}
+
+step {
+    schema_changes: 1   # M_s
+    data_mutations: 1   # M_d
+    eval_queries: 2     # Q_v
+    prune_prob: 0.1     # gamma
+}
+
+autocommit: true

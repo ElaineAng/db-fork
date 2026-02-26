@@ -42,6 +42,10 @@ message Result {
 
   // Thread ID for multi-threaded benchmark runs
   int32 thread_id = 13;
+
+  // Number of active branches at the time of this operation
+  // (used by isolation overhead benchmark)
+  int32 branch_count = 14;
 }
 
 // Enum for different types of database operations
@@ -52,9 +56,11 @@ enum OpType {
   READ = 3;
   INSERT = 4;
   UPDATE = 5;
-  RANGE_UPDATE = 6;
-  RANGE_READ = 7;
-  CONNECT_FIRST = 8;
-  CONNECT_MID = 9;
-  CONNECT_LAST = 10; 
+  COMMIT = 6;
+  DDL = 7;
+  BRANCH_DELETE = 8;
+  API_RETRY_WAIT = 9;
+  CONNECT_FIRST = 10;
+  CONNECT_MID = 11;
+  CONNECT_LAST = 12; 
 }
