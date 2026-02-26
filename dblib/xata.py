@@ -1,5 +1,6 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
+import random
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,40 @@ class XataToolSuite(DBToolSuite):
     """
     A suite of tools for interacting with a Xata database on a shared connection.
     """
+
+    _TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+    @classmethod
+    def _parse_int_env(cls, name: str, default: int, minimum: int) -> int:
+        raw = os.environ.get(name, str(default))
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return value if value >= minimum else minimum
+
+    @classmethod
+    def _parse_float_env(cls, name: str, default: float, minimum: float) -> float:
+        raw = os.environ.get(name, str(default))
+        try:
+            value = float(raw)
+        except ValueError:
+            return default
+        return value if value >= minimum else minimum
+
+    @classmethod
+    def _retry_delay_seconds(
+        cls,
+        attempt: int,
+        retry_after_header: str,
+        base_delay: float,
+        cap_delay: float,
+    ) -> float:
+        if retry_after_header and retry_after_header.isdigit():
+            return max(1.0, float(retry_after_header))
+        backoff = min(cap_delay, base_delay * (2**attempt))
+        jitter = random.uniform(0.0, min(1.0, backoff * 0.2))
+        return backoff + jitter
 
     @classmethod
     def add_db_name_to_connection_string(
@@ -124,31 +159,84 @@ class XataToolSuite(DBToolSuite):
         """
         Helper method to make requests to the Xata API.
         """
+        max_retries = cls._parse_int_env("XATA_API_MAX_RETRIES", 8, 0)
+        base_delay = cls._parse_float_env(
+            "XATA_API_RETRY_BASE_SECONDS", 1.0, 0.1
+        )
+        cap_delay = cls._parse_float_env(
+            "XATA_API_RETRY_CAP_SECONDS", 60.0, 1.0
+        )
+        timeout_seconds = cls._parse_float_env(
+            "XATA_API_TIMEOUT_SECONDS", 60.0, 1.0
+        )
+
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {API_KEY}"
         headers["Accept"] = "application/json"
         headers["Content-Type"] = "application/json"
 
-        r = requests.request(
-            method, XATA_API_BASE_URL + endpoint, headers=headers, **kwargs
-        )
+        for attempt in range(max_retries + 1):
+            try:
+                r = requests.request(
+                    method,
+                    XATA_API_BASE_URL + endpoint,
+                    headers=headers,
+                    timeout=timeout_seconds,
+                    **kwargs,
+                )
+            except requests.exceptions.RequestException as e:
+                if attempt >= max_retries:
+                    raise
+                delay = cls._retry_delay_seconds(
+                    attempt, "", base_delay, cap_delay
+                )
+                print(
+                    f"Warning: Xata API request error on {method} {endpoint} "
+                    f"(attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Retrying in {delay:.1f}s."
+                )
+                time.sleep(delay)
+                continue
 
-        if r.status_code == 429:
-            retry_after = r.headers.get("Retry-After", "unknown")
-            print(
-                f"\nFATAL: Xata API rate limit hit (HTTP 429).\n"
-                f"  Endpoint: {method} {endpoint}\n"
-                f"  Retry-After: {retry_after}\n"
-                f"  Response: {r.text}\n"
-                f"Reduce concurrency or add delays between API calls."
-            )
-            sys.exit(1)
+            if r.status_code in (401, 403):
+                print(
+                    f"\nFATAL: Unauthorized Xata API request (HTTP {r.status_code}).\n"
+                    f"  Endpoint: {method} {endpoint}\n"
+                    f"  Response: {r.text}\n"
+                    f"Check XATA_API_KEY and XATA_ORGANIZATION_ID."
+                )
+                sys.exit(1)
 
-        r.raise_for_status()
+            if r.status_code in cls._TRANSIENT_STATUS_CODES:
+                if attempt < max_retries:
+                    retry_after = r.headers.get("Retry-After", "")
+                    delay = cls._retry_delay_seconds(
+                        attempt,
+                        retry_after,
+                        base_delay,
+                        cap_delay,
+                    )
+                    print(
+                        f"Warning: transient Xata API error (HTTP {r.status_code}) "
+                        f"on {method} {endpoint} "
+                        f"(attempt {attempt + 1}/{max_retries + 1}). "
+                        f"Retrying in {delay:.1f}s."
+                    )
+                    time.sleep(delay)
+                    continue
+                print(
+                    f"\nFATAL: Xata API transient failure after retries "
+                    f"(HTTP {r.status_code}).\n"
+                    f"  Endpoint: {method} {endpoint}\n"
+                    f"  Response: {r.text}"
+                )
+                sys.exit(1)
 
-        if r.status_code == 204 or not r.content:
-            return {}
-        return r.json()
+            r.raise_for_status()
+
+            if r.status_code == 204 or not r.content:
+                return {}
+            return r.json()
 
     _READY_STATUSES = {"STATUS_TYPE_ACTIVE", "STATUS_TYPE_HEALTHY"}
 
