@@ -25,7 +25,7 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 def parse_filename(filepath: str) -> dict:
     stem = Path(filepath).stem
-    m = re.match(r"^(dolt|file_copy|neon)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
+    m = re.match(r"^(dolt|file_copy|neon|xata)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
     if not m:
         return None
     return {"backend": m.group(1), "N": int(m.group(2)), "topology": m.group(3)}
@@ -50,8 +50,13 @@ def load_all(data_dir: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Plot config
 # ---------------------------------------------------------------------------
-BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)", "neon": "Neon"}
-BACKENDS = ["dolt", "file_copy", "neon"]
+BACKEND_LABELS = {
+    "dolt": "Dolt",
+    "file_copy": "file_copy (PostgreSQL CoW)",
+    "neon": "Neon",
+    "xata": "Xata",
+}
+BACKENDS = ["dolt", "file_copy", "neon", "xata"]
 TOPO_ORDER = ["spine", "bushy", "fan_out"]
 TOPO_COLORS = {"spine": "#d62728", "bushy": "#2ca02c", "fan_out": "#1f77b4"}
 TOPO_LABELS = {"spine": "Spine", "bushy": "Bushy", "fan_out": "Fan-out"}
@@ -74,6 +79,9 @@ def fmt_bytes_axis(val, _pos):
 def plot_fig1(df: pd.DataFrame, output_dir: str):
     df = df.copy()
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
+    # Exclude Xata rows where the metrics API returned no data (disk_size == 0).
+    # Other backends can legitimately have disk_size_before=0 (e.g. Dolt N=1).
+    df = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
 
     backends_present = [b for b in BACKENDS if b in df["backend"].unique()]
     ncols = len(backends_present)

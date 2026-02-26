@@ -146,7 +146,7 @@ for fname, y in parent_files:
 # Clone arrows
 for (px, py), (nx, ny) in zip(file_boxes_parent, file_boxes_new):
     draw_arrow(ax_pg, (px + 0.1, py), (nx - 0.1, ny), color=C_CLONE, lw=1.3,
-               label="clonefile()", label_offset=(0, 0.3))
+               label="clone_file()", label_offset=(0, 0.3))
 
 # F label
 ax_pg.annotate("", xy=(4.1, 4.5), xytext=(4.1, 9.3),
@@ -158,7 +158,7 @@ ax_pg.text(4.45, 6.9, "F files", ha="left", va="center",
 cost_box = FancyBboxPatch((0.2, 1.8), 9.8, 1.8, boxstyle="round,pad=0.15",
                           facecolor="#fce4ec", edgecolor="#d9534f", linewidth=1.5)
 ax_pg.add_patch(cost_box)
-ax_pg.text(5.1, 3.05, "Cost = F × clonefile() + WAL + catalog updates", ha="center", va="center",
+ax_pg.text(5.1, 3.05, "Cost = F × clone_file() + WAL + catalog updates", ha="center", va="center",
            fontsize=10.5, fontweight="bold", color="#c62828")
 ax_pg.text(5.1, 2.3, "F grows with parent size. Spine: parent accumulates N−1\n"
            "workloads → more heap segments → F increases → higher cost.",

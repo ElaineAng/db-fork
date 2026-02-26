@@ -36,7 +36,7 @@ def parse_filename(filepath: str) -> dict:
     """Extract backend, N, topology from filename like
     `dolt_tpcc_64_spine_branch_setup.parquet`."""
     stem = Path(filepath).stem  # e.g. dolt_tpcc_64_spine_branch_setup
-    m = re.match(r"^(dolt|file_copy|neon)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
+    m = re.match(r"^(dolt|file_copy|neon|xata)_tpcc_(\d+)_(spine|bushy|fan_out)_branch_setup$", stem)
     if not m:
         return None
     return {
@@ -66,8 +66,13 @@ def load_all(data_dir: str) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-BACKEND_LABELS = {"dolt": "Dolt", "file_copy": "file_copy (PostgreSQL CoW)", "neon": "Neon"}
-BACKENDS = ["dolt", "file_copy", "neon"]
+BACKEND_LABELS = {
+    "dolt": "Dolt",
+    "file_copy": "file_copy (PostgreSQL CoW)",
+    "neon": "Neon",
+    "xata": "Xata",
+}
+BACKENDS = ["dolt", "file_copy", "neon", "xata"]
 TOPO_ORDER = ["spine", "bushy", "fan_out"]
 
 
@@ -85,8 +90,8 @@ def section_overview(df: pd.DataFrame):
     print(f"Total rows: {len(df)}")
     print()
 
-    print(f"{'Backend':<30} {'Topology':<10} {'N values':>30} {'Rows':>8} {'Reps':>5}")
-    print("-" * 85)
+    print(f"{'Backend':<30} {'Topology':<10} {'N values':>30} {'Rows':>8} {'Reps':>10}")
+    print("-" * 90)
     for backend in BACKENDS:
         for topo in TOPO_ORDER:
             sub = df[(df["backend"] == backend) & (df["topology"] == topo)]
@@ -94,8 +99,10 @@ def section_overview(df: pd.DataFrame):
                 continue
             n_vals = sorted(sub["N"].unique())
             n_str = ",".join(str(n) for n in n_vals)
-            reps = sub.groupby("N")["rep_id"].nunique().iloc[0]
-            print(f"{BACKEND_LABELS[backend]:<30} {topo:<10} {n_str:>30} {len(sub):>8} {reps:>5}")
+            reps_per_n = sub.groupby("N")["rep_id"].nunique()
+            rep_min, rep_max = int(reps_per_n.min()), int(reps_per_n.max())
+            reps_str = str(rep_min) if rep_min == rep_max else f"{rep_min}-{rep_max}"
+            print(f"{BACKEND_LABELS[backend]:<30} {topo:<10} {n_str:>30} {len(sub):>8} {reps_str:>10}")
     print()
 
 
@@ -108,10 +115,13 @@ def section_mean_marginal_delta(df: pd.DataFrame):
     print()
 
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
+    # Exclude rows where Xata metrics API returned no data (disk_size == 0).
+    # Other backends can legitimately have disk_size_before=0 (e.g. Dolt N=1).
+    valid = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
 
     for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
-        sub = df[df["backend"] == backend]
+        sub = valid[valid["backend"] == backend]
         # Group by (topology, N), compute mean delta
         agg = sub.groupby(["topology", "N"])["storage_delta"].agg(["mean", "median", "std"]).reset_index()
         agg = agg.sort_values(["topology", "N"])
@@ -146,9 +156,12 @@ def section_cumulative_storage(df: pd.DataFrame):
     print("Total disk_size_after at the last branch creation, averaged across reps.")
     print()
 
+    # Exclude Xata rows with missing storage metrics (API lag)
+    valid = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
+
     for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
-        sub = df[df["backend"] == backend]
+        sub = valid[valid["backend"] == backend]
 
         print(f"{'N':>6}", end="")
         for topo in TOPO_ORDER:
@@ -181,10 +194,12 @@ def section_topology_ratios(df: pd.DataFrame):
     print()
 
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
+    # Exclude Xata rows with missing storage metrics (API lag)
+    valid = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
 
     for backend in BACKENDS:
         print(f"--- {BACKEND_LABELS[backend]} ---")
-        sub = df[df["backend"] == backend]
+        sub = valid[valid["backend"] == backend]
         agg = sub.groupby(["topology", "N"])["storage_delta"].mean().reset_index()
 
         n_vals = sorted(sub["N"].unique())
@@ -250,7 +265,9 @@ def section_research_questions(df: pd.DataFrame):
     print()
 
     df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
-    agg = df.groupby(["backend", "topology", "N"])["storage_delta"].mean().reset_index()
+    # Exclude Xata rows with missing storage metrics (API lag)
+    valid = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
+    agg = valid.groupby(["backend", "topology", "N"])["storage_delta"].mean().reset_index()
 
     # RQ1: Does marginal cost differ across topologies?
     print("RQ1: Does the marginal storage cost of the nth branch differ across")
@@ -284,9 +301,21 @@ def section_research_questions(df: pd.DataFrame):
     print()
     for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
+        if sub.empty:
+            print(f"  {BACKEND_LABELS[backend]}: no rows")
+            continue
         max_n = sub["N"].max()
-        spine_at_max = sub[(sub["topology"] == "spine") & (sub["N"] == max_n)]["storage_delta"].iloc[0]
-        fan_at_max = sub[(sub["topology"] == "fan_out") & (sub["N"] == max_n)]["storage_delta"].iloc[0]
+        max_n = int(max_n)
+        spine_series = sub[(sub["topology"] == "spine") & (sub["N"] == max_n)]["storage_delta"]
+        fan_series = sub[(sub["topology"] == "fan_out") & (sub["N"] == max_n)]["storage_delta"]
+        if spine_series.empty or fan_series.empty:
+            print(
+                f"  {BACKEND_LABELS[backend]} at N={max_n}: insufficient topology "
+                f"coverage (spine/fan_out not both present)"
+            )
+            continue
+        spine_at_max = spine_series.iloc[0]
+        fan_at_max = fan_series.iloc[0]
         ratio = spine_at_max / fan_at_max if fan_at_max != 0 else float("inf")
         direction = "higher" if ratio > 1 else "lower"
         print(f"  {BACKEND_LABELS[backend]} at N={max_n}: spine is {ratio:.2f}x fan_out ({direction})")
