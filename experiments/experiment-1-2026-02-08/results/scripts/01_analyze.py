@@ -269,19 +269,40 @@ def section_research_questions(df: pd.DataFrame):
     valid = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
     agg = valid.groupby(["backend", "topology", "N"])["storage_delta"].mean().reset_index()
 
+    def max_common_n(sub: pd.DataFrame, topologies: list[str]) -> int | None:
+        common = None
+        for topo in topologies:
+            ns = set(sub[sub["topology"] == topo]["N"].unique())
+            common = ns if common is None else (common & ns)
+        if not common:
+            return None
+        return int(max(common))
+
     # RQ1: Does marginal cost differ across topologies?
     print("RQ1: Does the marginal storage cost of the nth branch differ across")
     print("     topologies for the same backend?")
     print()
     for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
-        max_n = sub["N"].max()
-        at_max = sub[sub["N"] == max_n]
-        print(f"  {BACKEND_LABELS[backend]} at N={max_n}:")
+        if sub.empty:
+            print(f"  {BACKEND_LABELS[backend]}: no rows")
+            continue
+        n = max_common_n(sub, TOPO_ORDER)
+        if n is None:
+            print(f"  {BACKEND_LABELS[backend]}: no common N across spine/bushy/fan_out")
+            continue
+        at_n = sub[sub["N"] == n]
+        vals = {}
+        print(f"  {BACKEND_LABELS[backend]} at common comparable N={n}:")
         for topo in TOPO_ORDER:
-            val = at_max[at_max["topology"] == topo]["storage_delta"]
-            if not val.empty:
-                print(f"    {topo:<10}: {fmt_bytes(val.iloc[0])}")
+            series = at_n[at_n["topology"] == topo]["storage_delta"]
+            if series.empty:
+                continue
+            vals[topo] = float(series.iloc[0])
+            print(f"    {topo:<10}: {fmt_bytes(vals[topo])}")
+        if len(vals) >= 2:
+            spread = max(vals.values()) - min(vals.values())
+            print(f"    spread     : {fmt_bytes(spread)}")
     print()
 
     # RQ2: Do any backends exhibit constant marginal cost regardless of topology?
@@ -289,10 +310,30 @@ def section_research_questions(df: pd.DataFrame):
     print()
     for backend in BACKENDS:
         sub = agg[agg["backend"] == backend]
-        # Check coefficient of variation across topologies at each N
-        cv = sub.groupby("N")["storage_delta"].agg(lambda x: x.std() / x.mean() if x.mean() != 0 else 0)
-        max_cv = cv.max()
-        print(f"  {BACKEND_LABELS[backend]}: max CV across topologies = {max_cv:.3f}")
+        if sub.empty:
+            print(f"  {BACKEND_LABELS[backend]}: no rows")
+            continue
+        n = max_common_n(sub, TOPO_ORDER)
+        if n is None:
+            print(f"  {BACKEND_LABELS[backend]}: no common N across all three topologies")
+            continue
+        at_n = sub[sub["N"] == n]
+        vals = {}
+        for topo in TOPO_ORDER:
+            series = at_n[at_n["topology"] == topo]["storage_delta"]
+            if not series.empty:
+                vals[topo] = float(series.iloc[0])
+        if len(vals) < 3:
+            print(f"  {BACKEND_LABELS[backend]} at N={n}: incomplete topology set")
+            continue
+        spread = max(vals.values()) - min(vals.values())
+        fan = vals["fan_out"]
+        s_f = vals["spine"] / fan if fan != 0 else float("inf")
+        b_f = vals["bushy"] / fan if fan != 0 else float("inf")
+        print(f"  {BACKEND_LABELS[backend]} at common comparable N={n}:")
+        print(f"    spread        = {fmt_bytes(spread)}")
+        print(f"    spine/fan_out = {s_f:.2f}x")
+        print(f"    bushy/fan_out = {b_f:.2f}x")
     print()
 
     # RQ3: Does fan-out produce lower or higher overhead than spine?
@@ -304,22 +345,32 @@ def section_research_questions(df: pd.DataFrame):
         if sub.empty:
             print(f"  {BACKEND_LABELS[backend]}: no rows")
             continue
-        max_n = sub["N"].max()
-        max_n = int(max_n)
-        spine_series = sub[(sub["topology"] == "spine") & (sub["N"] == max_n)]["storage_delta"]
-        fan_series = sub[(sub["topology"] == "fan_out") & (sub["N"] == max_n)]["storage_delta"]
-        if spine_series.empty or fan_series.empty:
-            print(
-                f"  {BACKEND_LABELS[backend]} at N={max_n}: insufficient topology "
-                f"coverage (spine/fan_out not both present)"
-            )
+        n = max_common_n(sub, ["spine", "fan_out"])
+        if n is None:
+            print(f"  {BACKEND_LABELS[backend]}: no common N for spine vs fan_out")
             continue
-        spine_at_max = spine_series.iloc[0]
-        fan_at_max = fan_series.iloc[0]
-        ratio = spine_at_max / fan_at_max if fan_at_max != 0 else float("inf")
-        direction = "higher" if ratio > 1 else "lower"
-        print(f"  {BACKEND_LABELS[backend]} at N={max_n}: spine is {ratio:.2f}x fan_out ({direction})")
-        print(f"    spine = {fmt_bytes(spine_at_max)}, fan_out = {fmt_bytes(fan_at_max)}")
+        at_n = sub[sub["N"] == n]
+        spine_series = at_n[at_n["topology"] == "spine"]["storage_delta"]
+        fan_series = at_n[at_n["topology"] == "fan_out"]["storage_delta"]
+        if spine_series.empty or fan_series.empty:
+            print(f"  {BACKEND_LABELS[backend]} at N={n}: missing spine/fan_out data")
+            continue
+        spine = float(spine_series.iloc[0])
+        fan = float(fan_series.iloc[0])
+        ratio = spine / fan if fan != 0 else float("inf")
+        if fan == 0:
+            direction = "undefined (fan_out = 0)"
+        elif ratio > 1:
+            direction = "higher"
+        elif ratio < 1:
+            direction = "lower"
+        else:
+            direction = "equal"
+        print(
+            f"  {BACKEND_LABELS[backend]} at common comparable N={n}: "
+            f"spine is {ratio:.2f}x fan_out ({direction})"
+        )
+        print(f"    spine = {fmt_bytes(spine)}, fan_out = {fmt_bytes(fan)}")
     print()
 
 

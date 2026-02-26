@@ -83,16 +83,41 @@ def plot_fig1(df: pd.DataFrame, output_dir: str):
     # Other backends can legitimately have disk_size_before=0 (e.g. Dolt N=1).
     df = df[~((df["backend"] == "xata") & ((df["disk_size_before"] == 0) | (df["disk_size_after"] == 0)))]
 
+    def max_common_n(bdf: pd.DataFrame, topologies: list[str]) -> int | None:
+        common = None
+        for topo in topologies:
+            ns = set(bdf[bdf["topology"] == topo]["N"].unique())
+            common = ns if common is None else (common & ns)
+        if not common:
+            return None
+        return int(max(common))
+
     backends_present = [b for b in BACKENDS if b in df["backend"].unique()]
-    ncols = len(backends_present)
-    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols, 5), sharey=False)
+
+    # Default: one panel at backend max N.
+    # Xata: use comparable panel at max common N across all topologies (prefer N=8 here)
+    # instead of partial-coverage max N.
+    panel_specs = []
+    for backend in backends_present:
+        bdf = df[df["backend"] == backend]
+        if backend == "xata":
+            common_n = max_common_n(bdf, TOPO_ORDER)
+            target_n = int(common_n) if common_n is not None else int(bdf["N"].max())
+            if common_n is not None:
+                panel_specs.append((backend, target_n, f"N={target_n}, all topologies"))
+            else:
+                panel_specs.append((backend, target_n, f"N={target_n}"))
+        else:
+            backend_max_n = int(bdf["N"].max())
+            panel_specs.append((backend, backend_max_n, f"N={backend_max_n}"))
+
+    ncols = len(panel_specs)
+    fig, axes = plt.subplots(1, ncols, figsize=(6.2 * ncols, 5), sharey=False)
     if ncols == 1:
         axes = [axes]
 
-    for ax, backend in zip(axes, backends_present):
-        bdf = df[df["backend"] == backend]
-        backend_max_n = bdf["N"].max()
-        bsub = bdf[bdf["N"] == backend_max_n]
+    for ax, (backend, target_n, title_suffix) in zip(axes, panel_specs):
+        bsub = df[(df["backend"] == backend) & (df["N"] == target_n)]
         for topo in TOPO_ORDER:
             tsub = bsub[bsub["topology"] == topo]
             if tsub.empty:
@@ -106,7 +131,7 @@ def plot_fig1(df: pd.DataFrame, output_dir: str):
             ax.plot(x, y, color=TOPO_COLORS[topo], label=TOPO_LABELS[topo], linewidth=0.8, alpha=0.9)
             ax.fill_between(x, y - std, y + std, color=TOPO_COLORS[topo], alpha=0.15)
 
-        ax.set_title(f"{BACKEND_LABELS[backend]} (N={backend_max_n})", fontsize=12)
+        ax.set_title(f"{BACKEND_LABELS[backend]} ({title_suffix})", fontsize=12)
         ax.set_xlabel("Branch index (nth branch created)")
         ax.set_ylabel("Marginal storage delta (bytes)")
         ax.yaxis.set_major_formatter(plt.FuncFormatter(fmt_bytes_axis))
