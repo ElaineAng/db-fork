@@ -216,10 +216,15 @@ def _run_cross_branch_queries(
             connect_fn = lambda: db_tools.connect_branch(
                 node.name,
                 timed=True,
-                storage=measure_storage,
+                storage=False,
             )
             if result_collector:
-                _retry_on_429(connect_fn, result_collector)
+                _retry_on_rate_limit(
+                    connect_fn,
+                    result_collector,
+                    progress=progress,
+                    thread_id=thread_id,
+                )
             else:
                 connect_fn()
             for query in compare_queries:
@@ -230,51 +235,109 @@ def _run_cross_branch_queries(
                 except Exception as e:
                     progress.write(
                         f"[T{thread_id}] Compare query failed on "
-                        f"{node.name}: {e}"
+                        f"{node.name}: {type(e).__name__}"
                     )
         except Exception as e:
             progress.write(
-                f"[T{thread_id}] Connect failed for compare on {node.name}: {e}"
+                f"[T{thread_id}] Connect failed for compare on "
+                f"{node.name}: {type(e).__name__}"
             )
 
 
-def _retry_on_429(fn, result_collector, max_retries=10, base_delay=1.0):
-    """Retry a callable with exponential backoff + jitter on rate-limit errors.
+def _is_retryable_error(e):
+    """Return True if the exception is a retryable Neon rate-limit or
+    resource-limit error.
 
-    Handles HTTP 429, Neon "too many running operations", and similar
-    rate-limit responses.  Each retry wait is recorded as an
-    API_RETRY_WAIT timing entry so the overhead is visible in results.
+    Covers:
+      - HTTP 429 (API rate limit)
+      - "too many running operations" / "too many" (concurrent op limit)
+      - "branches limit" / "endpoints limit" (active resource caps)
+      - "limit reached" (generic Neon limit wording)
+    """
+    msg = str(e).lower()
+    if any(
+        pattern in msg
+        for pattern in (
+            "429",
+            "too many",
+            "running operations",
+            "branches limit",
+            "endpoints limit",
+            "limit reached",
+        )
+    ):
+        return True
+    # NeonAPIError may lose the HTTP status code in the message;
+    # check the underlying response object if available.
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        code = getattr(resp, "status_code", 0)
+        if code in (429, 409):
+            return True
+    return False
+
+
+def _retry_on_rate_limit(
+    fn,
+    result_collector,
+    max_retries=10,
+    base_delay=1.0,
+    progress=None,
+    thread_id=None,
+    stop_event: threading.Event = None,
+):
+    """Retry a callable with exponential backoff + jitter on rate-limit
+    and resource-limit errors.
+
+    Handles HTTP 429, Neon "too many running operations", active branch/
+    endpoint limits, and similar retryable responses.  Each retry wait is
+    recorded as an API_RETRY_WAIT timing entry so the overhead is visible
+    in results.
+
+    Only the first and last retry are logged (via *progress*) to avoid
+    flooding output.
     """
     from dblib import result_pb2 as rslt
+
+    tag = f"[T{thread_id}] " if thread_id is not None else ""
 
     for attempt in range(max_retries):
         try:
             return fn()
         except Exception as e:
-            msg = str(e).lower()
-            is_rate_limit = (
-                "429" in msg or "too many" in msg or "running operations" in msg
-            )
-            # NeonAPIError loses the HTTP status code; check the
-            # underlying response object if available.
-            if not is_rate_limit and hasattr(e, "response"):
-                resp = getattr(e, "response", None)
-                if resp is not None:
-                    code = getattr(resp, "status_code", 0)
-                    is_rate_limit = code == 429
-            if is_rate_limit and attempt < max_retries - 1:
+            if _is_retryable_error(e) and attempt < max_retries - 1:
                 delay = base_delay * (2**attempt)
                 # Add jitter (0.5x–1.5x) to avoid thundering herd.
                 delay *= 0.5 + random.random()
+                # Log first retry only; avoids flooding output.
+                if attempt == 0 and progress:
+                    progress.write(
+                        f"{tag}Rate limited, retrying "
+                        f"(up to {max_retries}x, {delay:.1f}s backoff)..."
+                    )
                 # Record the retry wait (including sleep) as a timed event.
+                # stop_event.wait(delay) sleeps up to `delay` seconds but
+                # returns True immediately if the event fires mid-sleep.
+                stopped = False
                 with result_collector.maybe_measure_ops(
                     op_type=rslt.OpType.API_RETRY_WAIT, timed=True
                 ):
-                    time.sleep(delay)
+                    if stop_event:
+                        stopped = stop_event.wait(delay)
+                    else:
+                        time.sleep(delay)
                 result_collector.record_num_keys_touched(0)
                 result_collector.flush_record()
+                if stopped:
+                    raise _WorkerStopped()
             else:
                 raise
+
+
+class _WorkerStopped(Exception):
+    """Raised inside a worker when stop_event is set, to break out of nested loops."""
+
+    pass
 
 
 def worker_fn(
@@ -286,6 +349,9 @@ def worker_fn(
     workflow_ops: WorkflowOps,
     progress: SharedProgress,
     cb_sync: CrossBranchSync,
+    stop_event: threading.Event = None,
+    worker_conns: dict | None = None,
+    completed_work: dict | None = None,
 ):
     """Worker thread function implementing the per-step automaton.
 
@@ -301,13 +367,26 @@ def worker_fn(
         result_collector: Shared result collector.
         workflow_ops: SQL operations for the configured workflow.
         progress: Shared progress bar.
+        cb_sync: Cross-branch query synchronization.
+        stop_event: Event set by the main thread when deadline expires.
+        worker_conns: Shared dict for main thread to cancel in-flight queries.
+        completed_work: Shared dict to record {thread_id: {"steps": N, "ops": M}}.
     """
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
-    measure_storage = config.measure_storage
+    # Per-op storage is too expensive for Neon (pg_database_size on every
+    # branch for every operation).  Keep the before/after in main() only.
+    measure_storage = (
+        config.measure_storage and config.backend != tp.Backend.NEON
+    )
+    verbose = thread_id == 0  # only log from thread 0 to reduce noise
 
     # Create per-thread DB connection
     db_tools = _create_db_tools(config, backend_info, result_collector)
+
+    # Register connection so main thread can cancel in-flight queries
+    if worker_conns is not None:
+        worker_conns[thread_id] = db_tools.conn
 
     # Set up storage measurement if enabled
     if measure_storage:
@@ -323,15 +402,24 @@ def worker_fn(
 
     S = config.setup.total_steps
 
+    steps_finished = 0
+    ops_finished = 0
+    status = "completed"
+
     try:
         step_id = 0
         while step_id < S:
+            if stop_event and stop_event.is_set():
+                status = "stopped"
+                break
+
             # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
             if not branch_tree.wait_for_slot(timeout=60.0):
-                progress.write(
-                    f"[T{thread_id}] Timed out waiting for branch slot "
-                    f"at step {step_id}, skipping."
-                )
+                if verbose:
+                    progress.write(
+                        f"[T{thread_id}] Timed out waiting for branch slot "
+                        f"at step {step_id}, skipping."
+                    )
                 cb_sync.report_progress(thread_id, step_id)
                 progress.update(1)
                 step_id += 1
@@ -349,7 +437,7 @@ def worker_fn(
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
                 # Create child branch (retry on rate-limit)
-                _retry_on_429(
+                _retry_on_rate_limit(
                     lambda: db_tools.create_branch(
                         branch_name,
                         parent_node.branch_id,
@@ -357,21 +445,32 @@ def worker_fn(
                         storage=measure_storage,
                     ),
                     result_collector,
+                    progress=progress if verbose else None,
+                    thread_id=thread_id,
+                    stop_event=stop_event,
                 )
+                ops_finished += 1
                 # Connect to the new branch
-                _retry_on_429(
+                _retry_on_rate_limit(
                     lambda: db_tools.connect_branch(
                         branch_name,
                         timed=True,
-                        storage=measure_storage,
+                        storage=False,
                     ),
                     result_collector,
+                    progress=progress if verbose else None,
+                    thread_id=thread_id,
+                    stop_event=stop_event,
                 )
+                ops_finished += 1
             except Exception as e:
-                progress.write(
-                    f"[T{thread_id}] Branch creation failed at step "
-                    f"{step_id}: {e}"
-                )
+                if stop_event and stop_event.is_set():
+                    raise _WorkerStopped()
+                if verbose:
+                    progress.write(
+                        f"[T{thread_id}] Branch create failed at step "
+                        f"{step_id}: {type(e).__name__}; {e}"
+                    )
                 cb_sync.report_progress(thread_id, step_id)
                 progress.update(1)
                 step_id += 1
@@ -396,12 +495,17 @@ def worker_fn(
                     db_tools.execute_sql(
                         stmt, timed=True, storage=measure_storage
                     )
+                    ops_finished += 1
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="ddl")
                 except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] DDL failed at step {step_id}: {e}"
-                    )
+                    if stop_event and stop_event.is_set():
+                        raise _WorkerStopped()
+                    if verbose:
+                        progress.write(
+                            f"[T{thread_id}] DDL failed at step "
+                            f"{step_id}: {type(e).__name__}"
+                        )
 
             # --- Mutate (DML: M_d data mutations) ---
             dml_stmts = workflow_ops.mutate_dml(
@@ -414,12 +518,17 @@ def worker_fn(
                     db_tools.execute_sql(
                         stmt, timed=True, storage=measure_storage
                     )
+                    ops_finished += 1
                     if not config.autocommit:
                         db_tools.commit_changes(timed=False, message="dml")
                 except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] DML failed at step {step_id}: {e}"
-                    )
+                    if stop_event and stop_event.is_set():
+                        raise _WorkerStopped()
+                    if verbose:
+                        progress.write(
+                            f"[T{thread_id}] DML failed at step "
+                            f"{step_id}: {type(e).__name__}"
+                        )
 
             # --- Evaluate (Q_v queries) ---
             eval_queries = workflow_ops.evaluate()
@@ -430,10 +539,15 @@ def worker_fn(
                     db_tools.execute_sql(
                         query, timed=True, storage=measure_storage
                     )
+                    ops_finished += 1
                 except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] Eval failed at step {step_id}: {e}"
-                    )
+                    if stop_event and stop_event.is_set():
+                        raise _WorkerStopped()
+                    if verbose:
+                        progress.write(
+                            f"[T{thread_id}] Eval failed at step "
+                            f"{step_id}: {type(e).__name__}"
+                        )
 
             # --- Mark pre-committed (eligible for cross-branch reads) ---
             branch_tree.mark_pre_committed(child_node)
@@ -463,39 +577,61 @@ def worker_fn(
             if should_prune:
                 # Wait until no cross-branch queries are running.
                 branch_tree.wait_prune_safe()
-                branch_tree.mark_dead(child_node)
                 try:
-                    _retry_on_429(
+                    _retry_on_rate_limit(
                         lambda: db_tools.connect_branch(
                             branch_tree.root.name,
                             timed=True,
-                            storage=measure_storage,
+                            storage=False,
                         ),
                         result_collector,
+                        progress=progress if verbose else None,
+                        thread_id=thread_id,
+                        stop_event=stop_event,
                     )
+                    ops_finished += 1
                     # Delete branch (retry on rate-limit)
-                    _retry_on_429(
+                    _retry_on_rate_limit(
                         lambda: _do_delete_branch(
                             db_tools,
                             child_node,
                             storage=measure_storage,
                         ),
                         result_collector,
+                        progress=progress if verbose else None,
+                        thread_id=thread_id,
+                        stop_event=stop_event,
                     )
+                    ops_finished += 1
                 except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] Prune failed at step {step_id}: {e}"
-                    )
+                    branch_tree.mark_dead(child_node)
+                    if stop_event and stop_event.is_set():
+                        raise _WorkerStopped()
+                    if verbose:
+                        progress.write(
+                            f"[T{thread_id}] Prune failed at step "
+                            f"{step_id}: {type(e).__name__}"
+                        )
+                branch_tree.mark_dead(child_node)
             else:
                 # Survived pruning — promote to committed (parent-eligible)
                 branch_tree.mark_committed(child_node)
 
             progress.update(1)
             step_id += 1
+            steps_finished += 1
 
+    except _WorkerStopped:
+        status = "interrupted"
     except Exception as e:
-        progress.write(f"[T{thread_id}] Worker crashed: {e}")
+        status = f"crashed: {type(e).__name__}: {e}"
     finally:
+        if completed_work is not None:
+            completed_work[thread_id] = {
+                "steps": steps_finished,
+                "ops": ops_finished,
+                "status": status,
+            }
         db_tools.close_connection()
 
 
@@ -562,19 +698,7 @@ def main():
     parser.add_argument(
         "--measure-interference",
         action="store_true",
-        help="Enable background interference measurement (3-phase: warmup/baseline/measurement).",
-    )
-    parser.add_argument(
-        "--warmup-sec",
-        type=int,
-        default=5,
-        help="Seconds for interference warmup phase (default: 5).",
-    )
-    parser.add_argument(
-        "--baseline-sec",
-        type=int,
-        default=30,
-        help="Seconds for interference baseline phase (default: 15).",
+        help="Run background queries on the main branch during the benchmark.",
     )
     parser.add_argument(
         "--monitor-threads",
@@ -592,8 +716,14 @@ def main():
     parser.add_argument(
         "--monitor-interval-ms",
         type=int,
-        default=100,
+        default=1000,
         help="Sleep between monitor queries in ms (default: 0, no delay).",
+    )
+    parser.add_argument(
+        "--max-runtime-sec",
+        type=int,
+        default=0,
+        help="Cap total workflow runtime in seconds (0 = no limit).",
     )
 
     args = parser.parse_args()
@@ -635,11 +765,12 @@ def main():
     print(f"Cross-branch queries: C={config.setup.cross_branch_queries}")
     if config.measure_storage:
         print("Storage measurement: enabled")
+    if args.max_runtime_sec:
+        print(f"Runtime cap: {args.max_runtime_sec}s")
     if args.measure_interference:
         print(
-            f"Interference measurement: enabled "
-            f"(threads={args.monitor_threads}, "
-            f"warmup={args.warmup_sec}s, baseline={args.baseline_sec}s)"
+            f"Background main-branch load: enabled "
+            f"(threads={args.monitor_threads})"
         )
 
     # Set up backend and database
@@ -696,19 +827,16 @@ def main():
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
 
-    # --- Interference monitor setup (3-phase: warmup → baseline → measurement) ---
+    # --- Background main-branch load (interference monitor) ---
     monitor = None
     if args.measure_interference:
         from macrobench.interference_monitor import (
             InterferenceMonitor,
             _make_connection_factory,
-            BASELINE,
             MEASUREMENT,
         )
 
         conn_factory = _make_connection_factory(config, backend_info)
-        # evaluate_queries = workflow_ops.evaluate()
-        evaluate_queries = None  # Don't run workflow queries in monitor; use separate interference queries instead.
         query_types = [
             q.strip() for q in args.monitor_queries.split(",") if q.strip()
         ]
@@ -716,25 +844,39 @@ def main():
             num_threads=args.monitor_threads,
             connection_factory=conn_factory,
             num_warehouses=workflow_ops.num_warehouses,
-            evaluate_queries=evaluate_queries,
+            evaluate_queries=None,
             query_types=query_types,
             interval_sec=args.monitor_interval_ms / 1000.0,
             run_id=config.run_id,
             output_dir=args.outdir,
         )
         monitor.start()
-        print(f"Interference monitor: WARMUP ({args.warmup_sec}s)...")
-        time.sleep(args.warmup_sec)
-
-        monitor.set_phase(BASELINE)
-        print(f"Interference monitor: BASELINE ({args.baseline_sec}s)...")
-        time.sleep(args.baseline_sec)
-
         monitor.set_phase(MEASUREMENT)
-        print("Interference monitor: MEASUREMENT (workers starting)...")
+        print("Background main-branch load started.")
 
     print(f"\nStarting macrobenchmark with {num_workers} worker(s)...")
     start_time = time.time()
+    deadline = (
+        time.time() + args.max_runtime_sec if args.max_runtime_sec else None
+    )
+    completed_work = {}
+
+    stop_event = threading.Event()
+    worker_conns = {}
+
+    def _on_deadline():
+        stop_event.set()
+        for conn in list(worker_conns.values()):
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+
+    deadline_timer = None
+    if args.max_runtime_sec:
+        deadline_timer = threading.Timer(args.max_runtime_sec, _on_deadline)
+        deadline_timer.daemon = True
+        deadline_timer.start()
 
     try:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -749,6 +891,9 @@ def main():
                     workflow_ops=workflow_ops,
                     progress=progress,
                     cb_sync=cb_sync,
+                    stop_event=stop_event,
+                    worker_conns=worker_conns,
+                    completed_work=completed_work,
                 )
                 for i in range(num_workers)
             ]
@@ -762,16 +907,32 @@ def main():
         progress.close()
 
     finally:
+        # Cancel the deadline timer if it hasn't fired
+        if deadline_timer is not None:
+            deadline_timer.cancel()
+
         # Stop interference monitor before any cleanup
         if monitor:
             monitor.stop()
 
         elapsed = time.time() - start_time
+        timed_out = deadline is not None and time.time() > deadline
         print(f"\nCompleted in {elapsed:.1f}s")
+        if timed_out:
+            print("Run terminated early due to runtime cap.")
         print(
             f"Branch tree: {branch_tree.size()} total nodes, "
             f"{branch_tree.alive_count()} alive"
         )
+        if completed_work:
+            total_configured = config.setup.total_steps
+            total_steps = sum(w["steps"] for w in completed_work.values())
+            total_ops = sum(w["ops"] for w in completed_work.values())
+            total_possible = num_workers * total_configured
+            print(
+                f"  Total: {total_steps}/{total_possible} steps, "
+                f"{total_ops} ops across {num_workers} worker(s)"
+            )
 
         # Write interference results
         if monitor:
@@ -794,26 +955,61 @@ def main():
                 if storage_db_tools:
                     storage_db_tools.close_connection()
 
-        # Write storage summary to a separate log file
+        # Fetch Neon consumption metrics (root/child branch storage)
+        neon_consumption = None
+        if config.measure_storage and config.backend == tp.Backend.NEON:
+            try:
+                neon_consumption = NeonToolSuite.get_consumption_metrics(
+                    backend_info.neon_project_id
+                )
+                if neon_consumption:
+                    print(
+                        f"Neon consumption: "
+                        f"root={neon_consumption.get('root_branch_bytes_month', 0)}, "
+                        f"child={neon_consumption.get('child_branch_bytes_month', 0)}"
+                    )
+            except Exception as e:
+                print(f"Warning: could not fetch Neon consumption: {e}")
+
+        # Write end-to-end stats (always, not just when storage is measured)
+        e2e_stats = {
+            "run_id": config.run_id,
+            "backend": tp.Backend.Name(config.backend),
+            "workflow": tp.WorkflowType.Name(config.workflow),
+            "workers": num_workers,
+            "total_steps": config.setup.total_steps,
+            "elapsed_sec": round(elapsed, 2),
+            "max_runtime_sec": args.max_runtime_sec,
+            "timed_out": timed_out,
+            "completed_steps": {
+                str(k): v["steps"] for k, v in completed_work.items()
+            },
+            "completed_ops": {
+                str(k): v["ops"] for k, v in completed_work.items()
+            },
+            "worker_status": {
+                str(k): v.get("status", "unknown")
+                for k, v in completed_work.items()
+            },
+        }
         if config.measure_storage:
-            storage_log = {
-                "run_id": config.run_id,
-                "backend": tp.Backend.Name(config.backend),
-                "workflow": tp.WorkflowType.Name(config.workflow),
-                "workers": num_workers,
-                "total_steps": config.setup.total_steps,
-                "elapsed_sec": round(elapsed, 2),
-                "storage_before_bytes": storage_before,
-                "storage_after_bytes": storage_after,
-                "storage_delta_bytes": storage_after - storage_before,
-            }
-            storage_log_path = os.path.join(
-                args.outdir, f"{config.run_id}_storage.json"
+            e2e_stats["storage_before_bytes"] = storage_before
+            e2e_stats["storage_after_bytes"] = storage_after
+            e2e_stats["storage_delta_bytes"] = storage_after - storage_before
+        if neon_consumption:
+            e2e_stats["neon_root_branch_bytes_month"] = (
+                neon_consumption.get("root_branch_bytes_month", 0)
             )
-            os.makedirs(args.outdir, exist_ok=True)
-            with open(storage_log_path, "w") as f:
-                json.dump(storage_log, f, indent=2)
-            print(f"Storage log written to {storage_log_path}")
+            e2e_stats["neon_child_branch_bytes_month"] = (
+                neon_consumption.get("child_branch_bytes_month", 0)
+            )
+        e2e_stats_path = os.path.join(
+            args.outdir, f"{config.run_id}_e2e_stats.json"
+        )
+        os.makedirs(args.outdir, exist_ok=True)
+        with open(e2e_stats_path, "w") as f:
+            json.dump(e2e_stats, f, indent=2)
+        print(f"E2E stats written to {e2e_stats_path}")
 
         # Write results
         result_collector.write_to_parquet()

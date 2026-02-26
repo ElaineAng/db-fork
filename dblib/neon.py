@@ -11,7 +11,7 @@ from dblib.db_api import DBToolSuite
 from neon_api import NeonAPI
 import dblib.result_collector as rc
 
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
 neon = NeonAPI(api_key=API_KEY)
 NEON_API_BASE_URL = "https://console.neon.tech/api/v2/"
@@ -108,19 +108,11 @@ class NeonToolSuite(DBToolSuite):
                 response = cls._request("GET", endpoint)
                 return response["uri"]
             except requests.exceptions.HTTPError as e:
-                status = (
-                    e.response.status_code if e.response is not None else 0
-                )
+                status = e.response.status_code if e.response is not None else 0
                 retryable = status in (404, 429)
                 if retryable and attempt < max_retries - 1:
                     delay = retry_delay * (2 ** min(attempt, 5))
                     delay *= 0.5 + _rng.random()  # jitter
-                    reason = "not yet visible" if status == 404 else "rate limited"
-                    print(
-                        f"Branch {branch_id} {reason} (attempt "
-                        f"{attempt + 1}/{max_retries}), retrying in "
-                        f"{delay:.1f}s..."
-                    )
                     time.sleep(delay)
                     continue
                 raise
@@ -344,3 +336,65 @@ class NeonToolSuite(DBToolSuite):
 
         # Remove from local cache.
         self._all_branches.pop(branch_name, None)
+
+    @classmethod
+    def get_consumption_metrics(cls, project_id, org_id=None):
+        """Fetch storage consumption metrics for a project from the Neon API.
+
+        Uses the ``consumption_history/v2/projects`` endpoint to retrieve
+        ``root_branch_bytes_month`` and ``child_branch_bytes_month``.
+
+        Args:
+            project_id: Neon project ID.
+            org_id: Neon organization ID.  Falls back to the
+                     ``NEON_ORG_ID`` environment variable.
+
+        Returns:
+            Dict with ``root_branch_bytes_month`` and
+            ``child_branch_bytes_month``, or ``None`` on failure.
+        """
+        from datetime import datetime, timezone, timedelta
+
+        org_id = org_id or os.environ.get("NEON_ORG_ID", "")
+        if not org_id:
+            print("Warning: NEON_ORG_ID not set, skipping consumption metrics")
+            return None
+
+        now = datetime.now(timezone.utc)
+        # Use a 24-hour window — hourly data may lag behind real time.
+        start = (now - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        endpoint = (
+            f"consumption_history/v2/projects"
+            f"?org_id={org_id}"
+            f"&project_ids={project_id}"
+            f"&from={start}&to={end}"
+            f"&granularity=hourly"
+            f"&metrics=root_branch_bytes_month,child_branch_bytes_month"
+        )
+        try:
+            resp = cls._request("GET", endpoint)
+        except Exception as e:
+            print(f"Warning: consumption metrics request failed: {e}")
+            return None
+
+        # Walk the response to find the most recent non-empty data point.
+        try:
+            projects = resp.get("projects", [])
+            if not projects:
+                print("Warning: no projects in consumption response")
+                return None
+            for period in reversed(projects[0].get("periods", [])):
+                for entry in reversed(period.get("consumption", [])):
+                    metrics = entry.get("metrics", [])
+                    if metrics:
+                        result = {}
+                        for m in metrics:
+                            result[m["metric_name"]] = m["value"]
+                        return result
+            print("Warning: no consumption data points found")
+            return None
+        except (KeyError, IndexError) as e:
+            print(f"Warning: could not parse consumption metrics: {e}")
+            return None
