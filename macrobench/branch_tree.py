@@ -3,7 +3,9 @@
 The tree tracks the branch topology as workers create new branches.
 Parent selection: uniformly at random among committed nodes (plus the root)
 whose current child count is below their fanout limit and whose depth is
-below D.  The root uses root_fanout; inner nodes use inner_fanout.
+at most D.  The root (depth 0) uses root_fanout; inner nodes use
+inner_fanout.  D is the number of levels below the root, so the maximum
+node depth in the tree is D (total tree height = D + 1).
 """
 
 import threading
@@ -93,7 +95,7 @@ class BranchTree:
           - it is the root OR it is committed
           - its alive-child count is below its fanout limit
             (root_fanout for root, inner_fanout for inner nodes)
-          - its depth is below D (so a child at depth+1 <= D)
+          - its depth is at most D (so a child at depth+1 <= D+1)
 
         Args:
             rng: A random.Random instance for thread-safe randomness.
@@ -117,7 +119,7 @@ class BranchTree:
                 alive_children = len([c for c in n.children if c.alive])
                 if alive_children >= fanout_limit:
                     continue
-                if n.depth >= self._max_depth:
+                if n.depth > self._max_depth:
                     continue
                 eligible.append(n)
             if not eligible:

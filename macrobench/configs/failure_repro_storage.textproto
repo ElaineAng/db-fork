@@ -1,0 +1,33 @@
+# Failure Reproduction workflow — storage amplification test.
+# Write-only: no eval queries, no cross-branch queries, no pruning.
+
+run_id: "storage_failure_repro"
+backend: NEON
+workflow: FAILURE_REPRO
+
+database_setup {
+    db_name: "storage_failrepro"
+    cleanup: true
+    sql_dump {
+        sql_dump_path: "db_setup/ch_benchmark_seed.sql"
+    }
+}
+
+setup {
+    workers: 1              # T
+    total_steps: 10         # S
+    root_fanout: 10         # F_r
+    max_depth: 1            # D
+    cross_branch_queries: 0 # C  (skip reads)
+    db_scale: 1
+}
+
+step {
+    schema_changes: 5   # M_s
+    data_mutations: 45  # M_d
+    eval_queries: 0     # Q_v (skip reads)
+    prune_prob: 0.0     # gamma (no deletion)
+}
+
+autocommit: true
+measure_storage: true

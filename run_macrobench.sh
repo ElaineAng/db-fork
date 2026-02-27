@@ -22,6 +22,7 @@ set -euo pipefail
 
 MINI=false
 STORAGE=false
+MEASURE_STORAGE=false
 OUTDIR="run_stats/"
 MAX_RUNTIME_SEC=0
 
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --mini)            MINI=true; shift ;;
         --storage)         STORAGE=true; shift ;;
+        --measure-storage) MEASURE_STORAGE=true; shift ;;
         --outdir)          OUTDIR="$2"; shift 2 ;;
         --max-runtime-sec) MAX_RUNTIME_SEC="$2"; shift 2 ;;
         *)                 break ;;
@@ -39,6 +41,7 @@ done
 if [[ $# -ne 4 ]]; then
     echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] <workflow> <backend> <db_scale> <sql_path>"
     echo "  --mini:              use mini config (fewer workers/steps for Neon)"
+    echo "  --measure-storage:   enable Neon storage measurement (15-min sleep before/after)"
     echo "  --outdir:            output directory for parquet files (default: run_stats/)"
     echo "  --max-runtime-sec:   cap total workflow runtime in seconds (0 = no limit)"
     echo "  workflow:    software_dev | failure_repro | data_cleaning | mcts | simulation"
@@ -118,10 +121,15 @@ echo "  Timeout:   ${MAX_RUNTIME_SEC}s (0 = no limit)"
 echo "  Config:    $TMP_CONFIG (patched from $BASE_CONFIG)"
 echo "======================"
 
+EXTRA_FLAGS=()
+if $MEASURE_STORAGE; then
+    EXTRA_FLAGS+=(--measure-storage)
+fi
+
 python -m macrobench.runner \
     --config "$TMP_CONFIG" \
     --outdir "$OUTDIR" \
-    --measure-storage \
     --measure-interference \
     --monitor-queries olap_heavy,olap_light \
-    --max-runtime-sec "$MAX_RUNTIME_SEC"
+    --max-runtime-sec "$MAX_RUNTIME_SEC" \
+    "${EXTRA_FLAGS[@]}"
