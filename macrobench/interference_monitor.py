@@ -90,9 +90,11 @@ def _make_connection_factory(config, backend_info):
         def _connect():
             uri = TxnToolSuite.get_initial_connection_uri(db_name)
             conn = psycopg2.connect(uri)
-            # Don't use autocommit - keep transaction open to simulate
-            # concurrent queries against a database with a long-running
-            # transaction containing many savepoints
+            # Use autocommit for the monitor so each query runs in its own
+            # short transaction and releases locks immediately.  Otherwise
+            # the monitor's writes hold row locks indefinitely, blocking
+            # the worker threads' shared TXN connection.
+            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             return conn
 
     else:

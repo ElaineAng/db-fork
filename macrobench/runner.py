@@ -99,17 +99,14 @@ def _create_db_tools(config, backend_info, result_collector):
             backend_info.file_copy_info.branches,
         )
     elif backend == tp.Backend.TXN:
-        # TXN backend requires a shared persistent connection across all threads.
-        # Create the connection once if it doesn't exist.
-        if backend_info.txn_conn is None:
-            backend_info.txn_conn = TxnToolSuite.get_connection(None, db_name)
+        # Each worker gets its own TxnToolSuite with its own root connection.
+        # init_for_bench creates the connection internally when conn=None.
         return TxnToolSuite.init_for_bench(
             result_collector,
             db_name,
             autocommit,
             backend_info.default_branch_name,
             backend_info.setup_branches if backend_info.setup_branches else [],
-            backend_info.txn_conn,
         )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -547,7 +544,7 @@ def worker_fn(
                     if verbose:
                         progress.write(
                             f"[T{thread_id}] DML failed at step "
-                            f"{step_id}: {type(e).__name__}"
+                            f"{step_id}: {type(e).__name__}: {e}"
                         )
 
             # --- Evaluate (Q_v queries) ---
@@ -652,10 +649,7 @@ def worker_fn(
                 "ops": ops_finished,
                 "status": status,
             }
-        # Don't close the shared TXN connection from worker threads.
-        # It will be closed in the main cleanup.
-        if config.backend != tp.Backend.TXN:
-            db_tools.close_connection()
+        db_tools.close_connection()
 
 
 def _build_microbench_config(config):

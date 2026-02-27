@@ -14,10 +14,13 @@ PGSQL_PORT = 5433
 
 class TxnToolSuite(DBToolSuite):
     """
-    A suite of tools for interacting with a PGSQL database on a shared connection.
-    Uses a single persistent transaction and Postgres SAVEPOINTs to simulate
-    branching. Uses raw SQL to manage transaction instead of psycopg2 semantics
-    to better control behavior.
+    A suite of tools for interacting with a PGSQL database using
+    connection-per-root-branch concurrency.
+
+    Root-level branches get their own PG connection (with an implicit open
+    transaction), so multiple workers can operate concurrently without
+    interleaving SAVEPOINTs. Sub-branches (children of non-root nodes) still
+    use SAVEPOINTs within their root-ancestor's connection.
     """
 
     @classmethod
@@ -56,12 +59,15 @@ class TxnToolSuite(DBToolSuite):
         setup_branches: list,
         conn: _pgconn = None
     ):
+        if conn is None:
+            conn = cls.get_connection(None, db_name)
         return cls(
             connection=conn,
             collector=collector,
             autocommit=autocommit,
             setup_branches=setup_branches,
             default_branch_name=default_branch_name,
+            db_name=db_name,
         )
 
     def __init__(
@@ -71,29 +77,55 @@ class TxnToolSuite(DBToolSuite):
         autocommit: bool,
         setup_branches: list,
         default_branch_name: str,
+        db_name: str = "",
     ):
         super().__init__(connection, result_collector=collector)
-        self.autocommit = False # Cannot commit during benchmark
-
-        self._save_points = SavePoints(setup_branches)
-        self._create_branch_impl(default_branch_name)
-        self._connect_branch_impl(default_branch_name)
+        self.autocommit = False  # Cannot commit during benchmark
+        self._db_name = db_name
+        self._root_name = default_branch_name
+        self._current_branch = default_branch_name
+        # Map branch name -> the PG connection it lives on
+        self._branch_conn = {default_branch_name: connection}
+        # Ordered list of all branches (for microbench connect_specific_branch)
+        self._all_branches = list(setup_branches) if setup_branches else []
+        if default_branch_name not in self._all_branches:
+            self._all_branches.append(default_branch_name)
 
     def list_branches(self) -> list[str]:
-        return self._save_points.l
+        return list(self._all_branches)
+
+    def _open_new_connection(self) -> _pgconn:
+        """Open a new PG connection to the same database.
+
+        The connection starts with an implicit open transaction (psycopg2
+        default when autocommit is off), which is what we want — it
+        simulates a branch fork from the committed state.
+        """
+        uri = self.get_initial_connection_uri(self._db_name)
+        return psycopg2.connect(uri)
 
     def _create_branch_impl(self, branch_name: str, parent_id: str = None) -> None:
+        """Create a new branch.
+
+        If branching from root (or parent_id is None), open a brand-new PG
+        connection so the branch can run concurrently with others.
+        If branching from a non-root node, create a SAVEPOINT within the
+        parent's connection.
         """
-        Creates a new SAVEPOINT in the PGSQL database transaction.
-        """
-        if parent_id and parent_id != self._save_points[-1]:
-            raise Exception("Tried to branch from earlier save point, spine shape only allowed")
-        cmd = f"SAVEPOINT {branch_name};"
-        # Allow exceptions to percolate up
-        cur = self.conn.cursor()
-        cur.execute(cmd)
-        cur.close()
-        self._save_points.append(branch_name)
+        if parent_id is None or parent_id == self._root_name:
+            # Root-level branch: new connection with its own transaction
+            conn = self._open_new_connection()
+            self._branch_conn[branch_name] = conn
+        else:
+            # Sub-branch: savepoint in parent's connection
+            parent_conn = self._branch_conn.get(parent_id)
+            if parent_conn is None:
+                raise Exception(f"No connection for parent '{parent_id}'")
+            cur = parent_conn.cursor()
+            cur.execute(f"SAVEPOINT {branch_name}")
+            cur.close()
+            self._branch_conn[branch_name] = parent_conn
+        self._all_branches.append(branch_name)
 
     def connect_specific_branch(self, op: rslt.OpType) -> None:
         """
@@ -104,13 +136,13 @@ class TxnToolSuite(DBToolSuite):
         branch = ""
         op_type = 0
         if op == tp.OperationType.CONNECT_FIRST:
-            branch = self._save_points[0]
+            branch = self._all_branches[0]
             op_type = rslt.OpType.CONNECT_FIRST
         elif op == tp.OperationType.CONNECT_MID:
-            branch = self._save_points[int(len(self._save_points) / 2)]
+            branch = self._all_branches[int(len(self._all_branches) / 2)]
             op_type = rslt.OpType.CONNECT_MID
         elif op == tp.OperationType.CONNECT_LAST:
-            branch = self._save_points[len(self._save_points) - 1] 
+            branch = self._all_branches[len(self._all_branches) - 1]
             op_type = rslt.OpType.CONNECT_LAST
         try:
             with self.result_collector.maybe_time_ops(
@@ -123,40 +155,72 @@ class TxnToolSuite(DBToolSuite):
             self.result_collector.record_num_keys_touched(0)
             self.result_collector.flush_record()
 
-
     def _connect_branch_impl(self, branch_name: str) -> None:
+        """Switch to a branch's connection.
+
+        For root-level branches this simply swaps self.conn.
+        No ROLLBACK TO SAVEPOINT is needed for the primary macrobench
+        use case (flat star topology).
         """
-        Connects to an existing branch in the PGSQL database to allow reads and
-        writes on that branch. With this backend, that means rolling back to 
-        a previous SAVEPOINT.
-        """
-        if branch_name not in self._save_points:
-            return # No-op when trying to roll forward
-        cmd = f"ROLLBACK TO SAVEPOINT {branch_name};"
-        # Allow exceptions to percolate up
-        cur = self.conn.cursor()
-        cur.execute(cmd)
-        cur.close()
-        # Only truncate if there were no exceptions
-        self._save_points.truncate(branch_name)
+        conn = self._branch_conn.get(branch_name)
+        if conn is None:
+            return  # Unknown branch, no-op
+        self.conn = conn
+        self._current_branch = branch_name
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
-        return (self._save_points[-1], self._save_points[-1])
+        return (self._current_branch, self._current_branch)
+
+    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
+        """Delete a branch.
+
+        For root-level branches (those with their own connection), rollback
+        and close the connection.  For sub-branches (savepoints), just
+        remove tracking — the savepoint is implicitly released when the
+        parent connection is closed.
+        """
+        conn = self._branch_conn.pop(branch_name, None)
+        if conn is None:
+            return
+        if branch_name in self._all_branches:
+            self._all_branches.remove(branch_name)
+        # Root-level branch: rollback and close the dedicated connection
+        root_conn = self._branch_conn.get(self._root_name)
+        if conn is not root_conn:
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception:
+                pass
+        # else: sub-branch savepoint — connection is shared, just remove tracking
 
     def delete_db(self, db_name: str) -> None:
-        conn.commit()
+        self.conn.commit()
         super().delete_db(db_name)
 
     def commit_changes(self, timed: bool = False, message: str = "") -> None:
         """ Override to a no-op, we have only one persistent transaction """
         pass
 
+    def close_connection(self) -> None:
+        """Close ALL connections managed by this tool suite."""
+        closed = set()
+        for name, conn in self._branch_conn.items():
+            if id(conn) not in closed and conn and not conn.closed:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
+                closed.add(id(conn))
+        self._branch_conn.clear()
+        self.conn = None
+
     def get_total_storage_bytes(self) -> int:
         """Get total storage for the database.
 
-        Since TXN backend uses SAVEPOINTs within a single transaction,
-        all "branches" share the same database. We simply return the
-        size of the current database.
+        Since TXN backend uses a single database for all branches,
+        we simply return the size of the current database.
         """
         cur = self.conn.cursor()
         try:

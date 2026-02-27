@@ -132,4 +132,4 @@ python -m macrobench.runner \
     --measure-interference \
     --monitor-queries olap_heavy,olap_light \
     --max-runtime-sec "$MAX_RUNTIME_SEC" \
-    "${EXTRA_FLAGS[@]}"
+    ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}
