@@ -652,6 +652,57 @@ def worker_fn(
         db_tools.close_connection()
 
 
+def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
+    """Wait for Neon consumption metrics, retrying once per minute after the
+    initial sleep.
+
+    Args:
+        project_id: Neon project ID.
+        label: Human-readable label for log messages (e.g. "before", "after").
+        wait_min: Minutes to sleep before the first API call.
+        max_retries: Number of 60s retry attempts if the API returns nothing.
+
+    Returns:
+        Dict with consumption metrics, or None if all retries exhausted.
+    """
+    print(
+        f"Waiting {wait_min} min for Neon consumption metrics "
+        f"to reflect {label} state...",
+        flush=True,
+    )
+    for elapsed_min in range(wait_min):
+        time.sleep(60)
+        if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
+            print(
+                f"  {elapsed_min + 1}/{wait_min} min elapsed...",
+                flush=True,
+            )
+
+    for attempt in range(max_retries):
+        result = NeonToolSuite.get_consumption_metrics(project_id)
+        if result:
+            print(
+                f"  Neon storage {label}: "
+                f"root={result.get('root_branch_bytes_month', 0)}, "
+                f"child={result.get('child_branch_bytes_month', 0)}",
+                flush=True,
+            )
+            return result
+        if attempt < max_retries - 1:
+            print(
+                f"  No metrics yet, retrying in 60s "
+                f"({attempt + 1}/{max_retries})...",
+                flush=True,
+            )
+            time.sleep(60)
+
+    print(
+        f"  WARNING: No Neon consumption metrics for {label} state",
+        flush=True,
+    )
+    return None
+
+
 def _build_microbench_config(config):
     """Build a microbench-compatible TaskConfig for create_backend_project().
 
@@ -852,35 +903,12 @@ def main():
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
 
-    # For Neon with storage measurement: wait 15 min for consumption
-    # metrics to reflect the initial state (data just loaded).
+    # For Neon with storage measurement: wait for consumption metrics
+    # to reflect the initial state (data just loaded).
     if config.measure_storage and config.backend == tp.Backend.NEON:
-        wait_min = 15
-        print(
-            f"Waiting {wait_min} min for Neon consumption metrics "
-            f"to reflect initial state...",
-            flush=True,
+        neon_before = _fetch_neon_consumption(
+            backend_info.neon_project_id, label="before"
         )
-        for elapsed_min in range(wait_min):
-            time.sleep(60)
-            if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
-                print(
-                    f"  {elapsed_min + 1}/{wait_min} min elapsed...",
-                    flush=True,
-                )
-        neon_before = NeonToolSuite.get_consumption_metrics(
-            backend_info.neon_project_id
-        )
-        if neon_before:
-            print(
-                f"  Neon storage before: "
-                f"root={neon_before.get('root_branch_bytes_month', 0)}, "
-                f"child={neon_before.get('child_branch_bytes_month', 0)}",
-                flush=True,
-            )
-        else:
-            print("  WARNING: No Neon consumption metrics for initial state")
-            neon_before = None
 
     # --- Background main-branch load (interference monitor) ---
     monitor = None
@@ -1011,37 +1039,11 @@ def main():
                     storage_db_tools.close_connection()
 
         # Fetch Neon consumption metrics (root/child branch storage).
-        # Wait 15 min for the API to reflect the end state of the workflow.
         neon_consumption = None
-        if config.backend == tp.Backend.NEON:
-            wait_min = 15
-            print(
-                f"Waiting {wait_min} min for Neon consumption metrics "
-                f"to reflect end state...",
-                flush=True,
+        if config.measure_storage and config.backend == tp.Backend.NEON:
+            neon_consumption = _fetch_neon_consumption(
+                backend_info.neon_project_id, label="after"
             )
-            for elapsed_min in range(wait_min):
-                time.sleep(60)
-                if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
-                    print(
-                        f"  {elapsed_min + 1}/{wait_min} min elapsed...",
-                        flush=True,
-                    )
-            neon_consumption = NeonToolSuite.get_consumption_metrics(
-                backend_info.neon_project_id
-            )
-            if neon_consumption:
-                print(
-                    f"  Neon storage after: "
-                    f"root={neon_consumption.get('root_branch_bytes_month', 0)}, "
-                    f"child={neon_consumption.get('child_branch_bytes_month', 0)}",
-                    flush=True,
-                )
-            else:
-                print(
-                    "  WARNING: No Neon consumption metrics for end state",
-                    flush=True,
-                )
 
         # Write end-to-end stats (always, not just when storage is measured)
         total_estimated_bytes = sum(

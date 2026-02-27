@@ -128,14 +128,27 @@ def load_all_interference(indir):
 
 
 def load_all_storage(indir):
-    """Load all *_e2e_stats.json files, return {workflow_name: dict}."""
+    """Load all *_e2e_stats.json files, return {workflow_name: dict}.
+
+    If ``storage_delta_bytes`` is absent, estimate it from
+    ``neon_after_total_bytes - 104325120`` (the approximate size of the
+    seed database before the workflow).
+    """
+    SEED_SIZE_BYTES = 104325120
     storage = {}
     for wf in WORKFLOW_ORDER:
         pattern = os.path.join(indir, f"macro_{wf}*_e2e_stats.json")
         matches = sorted(glob.glob(pattern))
         if matches:
             with open(matches[0]) as f:
-                storage[wf] = json.load(f)
+                data = json.load(f)
+            if "storage_delta_bytes" not in data:
+                after = data.get("neon_after_total_bytes", 0)
+                if after > 0:
+                    data["storage_delta_bytes"] = after - SEED_SIZE_BYTES
+                else:
+                    data["storage_delta_bytes"] = 0
+            storage[wf] = data
             if len(matches) > 1:
                 print(
                     f"  Note: multiple e2e_stats files for {wf}, using {os.path.basename(matches[0])}"
@@ -805,8 +818,22 @@ def _human_size(nbytes):
     return f"{nbytes:.1f} PB"
 
 
-def plot_storage_comparison(dolt_stor, neon_stor, outdir):
-    """Side-by-side bar charts: elapsed time and storage delta per workflow."""
+def _completed_steps(e2e: dict) -> int:
+    """Return total completed steps across all workers from an e2e_stats dict."""
+    completed = e2e.get("completed_steps", {})
+    return sum(int(v) for v in completed.values())
+
+
+def _total_steps(e2e: dict) -> int:
+    """Return total possible steps (workers * steps_per_worker)."""
+    return e2e.get("workers", 0) * e2e.get("total_steps", 0)
+
+
+def plot_storage_comparison(
+    dolt_stor, neon_stor, outdir, dolt_wfs=None, neon_wfs=None
+):
+    """Side-by-side bar charts: elapsed time (stacked by op category) and
+    storage delta per workflow."""
     common_wfs = [
         wf for wf in WORKFLOW_ORDER if wf in dolt_stor or wf in neon_stor
     ]
@@ -814,58 +841,210 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
         print("  No storage data found, skipping.")
         return
 
+    # Categories matching the time-breakdown figure
+    elapsed_categories = [
+        ("Branch Ops", BRANCH_OPS, "#F5A623"),
+        (
+            "Data Ops",
+            DATA_OPS | {6},
+            "#2D8B57",
+        ),  # Read/Insert/Update/DDL/Commit
+        ("API Retry", OVERHEAD_OPS, "#B0B0B0"),
+    ]
+
     n = len(common_wfs)
     x = np.arange(n)
     bar_w = 0.35
 
-    fig, (ax_time, ax_stor) = plt.subplots(1, 2, figsize=(18, 5))
+    fig, (ax_time, ax_stor) = plt.subplots(1, 2, figsize=(18, 7))
 
-    # Left: elapsed_sec
-    for bi, (label, data, color) in enumerate(
+    # Left: elapsed_sec broken down by op category (stacked)
+    for bi, (label, stor_data, wfs, base_color) in enumerate(
         [
-            ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
-            ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
+            ("Dolt", dolt_stor, dolt_wfs, BACKEND_COLORS["Dolt"]),
+            ("Neon", neon_stor, neon_wfs, BACKEND_COLORS["Neon"]),
         ]
     ):
-        vals = [
-            data[wf]["elapsed_sec"] if wf in data else 0 for wf in common_wfs
-        ]
         offset = -bar_w / 2 if bi == 0 else bar_w / 2
-        bars = ax_time.bar(
-            x + offset,
-            vals,
-            bar_w,
-            color=color,
-            alpha=0.85,
-            edgecolor="black",
-            linewidth=0.8,
-            label=label,
-        )
-        for bar, v in zip(bars, vals):
-            if v > 0:
-                ax_time.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    v,
-                    f"{v:.1f}s",
-                    ha="center",
-                    va="bottom",
-                    fontsize=8,
-                    fontweight="bold",
-                    clip_on=True,
-                )
+        elapsed_vals = [
+            stor_data[wf]["elapsed_sec"] if wf in stor_data else 0
+            for wf in common_wfs
+        ]
 
+        # If we have parquet data, compute per-category time fractions
+        if wfs:
+            bottoms = np.zeros(n)
+            for ci, (cat_name, op_set, cat_color) in enumerate(
+                elapsed_categories
+            ):
+                cat_secs = []
+                for wi, wf in enumerate(common_wfs):
+                    if wf in wfs:
+                        df = wfs[wf]
+                        cat_secs.append(
+                            df[df.op_type.isin(op_set)]["latency"].sum()
+                        )
+                    else:
+                        cat_secs.append(0)
+                # Scale category times so they sum to elapsed_sec
+                # (latency totals may differ from wall-clock elapsed)
+                for wi, wf in enumerate(common_wfs):
+                    if wf in wfs:
+                        df = wfs[wf]
+                        total_lat = df["latency"].sum()
+                        if total_lat > 0:
+                            cat_secs[wi] = (
+                                cat_secs[wi] / total_lat * elapsed_vals[wi]
+                            )
+
+                hatch = "//" if bi == 1 else None
+                bars = ax_time.bar(
+                    x + offset,
+                    cat_secs,
+                    bar_w,
+                    bottom=bottoms,
+                    color=cat_color,
+                    alpha=0.85,
+                    edgecolor="white",
+                    linewidth=0.5,
+                    hatch=hatch,
+                    label=cat_name if bi == 0 else None,
+                )
+                bottoms += np.array(cat_secs)
+
+            # Total label on top of stacked bar
+            for wi, v in enumerate(elapsed_vals):
+                if v > 0:
+                    wf = common_wfs[wi]
+                    done = _completed_steps(stor_data.get(wf, {}))
+                    bx = x[wi] + offset
+                    # Seconds (black) just above the bar
+                    ax_time.annotate(
+                        f"{v:.1f}s",
+                        xy=(bx, bottoms[wi]),
+                        xytext=(0, 2),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                        color="black",
+                    )
+                    if done:
+                        # Completed steps (blue) above the seconds
+                        ax_time.annotate(
+                            f"{done} steps",
+                            xy=(bx, bottoms[wi]),
+                            xytext=(0, 13),
+                            textcoords="offset points",
+                            ha="center",
+                            va="bottom",
+                            fontsize=6,
+                            color="#1565C0",
+                            fontstyle="italic",
+                        )
+        else:
+            # Fallback: solid bar when no parquet data available
+            hatch = "//" if bi == 1 else None
+            bars = ax_time.bar(
+                x + offset,
+                elapsed_vals,
+                bar_w,
+                color=base_color,
+                alpha=0.85,
+                edgecolor="black",
+                linewidth=0.8,
+                hatch=hatch,
+                label=label,
+            )
+            for wi, (bar, v) in enumerate(zip(bars, elapsed_vals)):
+                if v > 0:
+                    wf = common_wfs[wi]
+                    done = _completed_steps(stor_data.get(wf, {}))
+                    bx = bar.get_x() + bar.get_width() / 2
+                    ax_time.annotate(
+                        f"{v:.1f}s",
+                        xy=(bx, v),
+                        xytext=(0, 2),
+                        textcoords="offset points",
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                        color="black",
+                    )
+                    if done:
+                        ax_time.annotate(
+                            f"{done} steps",
+                            xy=(bx, v),
+                            xytext=(0, 13),
+                            textcoords="offset points",
+                            ha="center",
+                            va="bottom",
+                            fontsize=6,
+                            color="#1565C0",
+                            fontstyle="italic",
+                        )
+
+    # Build legend: category colors + backend indicators (solid vs hatched)
+    handles, labels = ax_time.get_legend_handles_labels()
+    handles.append(
+        Patch(
+            facecolor="white",
+            edgecolor="black",
+            linewidth=1,
+            label="Dolt (solid)",
+        )
+    )
+    labels.append("Dolt (solid)")
+    handles.append(
+        Patch(
+            facecolor="white",
+            edgecolor="black",
+            linewidth=1,
+            hatch="//",
+            label="Neon (hatched)",
+        )
+    )
+    labels.append("Neon (hatched)")
+    ax_time.legend(
+        handles=handles,
+        labels=labels,
+        fontsize=9,
+        framealpha=0.9,
+        loc="upper left",
+    )
+
+    # X-axis labels: workflow name (black) + total steps (gray) below
     ax_time.set_xticks(x)
     ax_time.set_xticklabels(
         [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
         fontsize=10,
     )
+    for wi, wf in enumerate(common_wfs):
+        e2e = dolt_stor.get(wf) or neon_stor.get(wf) or {}
+        total = _total_steps(e2e)
+        if total > 0:
+            ax_time.text(
+                x[wi],
+                -0.08,
+                f"({total} total steps)",
+                ha="center",
+                va="top",
+                fontsize=8,
+                color="#1565C0",
+                fontstyle="italic",
+                transform=ax_time.get_xaxis_transform(),
+            )
     ax_time.set_ylabel("Elapsed Time (s)", fontsize=11)
     ax_time.set_yscale("log")
+    # Expand y-axis top to avoid clipping bar annotations
+    y_lo, y_hi = ax_time.get_ylim()
+    ax_time.set_ylim(y_lo, y_hi * 3)
     ax_time.set_title(
         "Elapsed Time per Workflow", fontsize=12, fontweight="bold"
     )
     ax_time.grid(True, alpha=0.3, axis="y")
-    ax_time.legend(fontsize=10, framealpha=0.9)
 
     # Right: storage_delta_bytes
     for bi, (label, data, color) in enumerate(
@@ -880,6 +1059,7 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
         ]
         vals_mb = [v / (1024 * 1024) for v in vals_bytes]
         offset = -bar_w / 2 if bi == 0 else bar_w / 2
+        hatch = "//" if bi == 1 else None
         bars = ax_stor.bar(
             x + offset,
             vals_mb,
@@ -888,6 +1068,7 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
             alpha=0.85,
             edgecolor="black",
             linewidth=0.8,
+            hatch=hatch,
             label=label,
         )
         for bar, vb, vm in zip(bars, vals_bytes, vals_mb):
@@ -924,155 +1105,6 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     path = os.path.join(outdir, "storage_elapsed_comparison.png")
     fig.savefig(path, dpi=150)
-    print(f"  Saved {path}")
-    plt.close(fig)
-
-
-# ── Plot 7: Storage delta by operation type ──────────────────────────
-
-
-def plot_storage_by_op(dolt_wfs, neon_wfs, outdir):
-    """Stacked bar chart: storage delta breakdown by op type, Dolt vs Neon."""
-    common_wfs = [
-        wf for wf in WORKFLOW_ORDER if wf in dolt_wfs and wf in neon_wfs
-    ]
-    if not common_wfs:
-        print("  No common workflows found, skipping storage-by-op.")
-        return
-
-    # Check if disk_size columns exist
-    sample = next(iter(dolt_wfs.values()))
-    if (
-        "disk_size_before" not in sample.columns
-        or "disk_size_after" not in sample.columns
-    ):
-        print("  No disk_size columns in results data, skipping storage-by-op.")
-        return
-
-    # Collect all op types present
-    all_ops = set()
-    for wf in common_wfs:
-        all_ops |= set(dolt_wfs[wf].op_type.unique())
-        all_ops |= set(neon_wfs[wf].op_type.unique())
-    all_ops = sorted(op for op in all_ops if op != 0)
-
-    # Compute per-op storage delta for each workflow/backend
-    def compute_op_deltas(wfs):
-        result = {}
-        for wf in common_wfs:
-            df = wfs[wf].copy()
-            df["storage_delta"] = df["disk_size_after"] - df["disk_size_before"]
-            op_deltas = {}
-            for op in all_ops:
-                sub = df[df.op_type == op]
-                op_deltas[op] = sub["storage_delta"].sum() / (1024 * 1024)  # MB
-            result[wf] = op_deltas
-        return result
-
-    dolt_deltas = compute_op_deltas(dolt_wfs)
-    neon_deltas = compute_op_deltas(neon_wfs)
-
-    # Determine if Neon data is all zeros
-    neon_all_zero = all(
-        all(abs(neon_deltas[wf][op]) < 0.001 for op in all_ops)
-        for wf in common_wfs
-    )
-
-    n = len(common_wfs)
-    x = np.arange(n)
-    bar_w = 0.25
-
-    # Op colors — reuse category palette
-    op_colors = {}
-    palette = [
-        "#F5A623",
-        "#2D8B57",
-        "#52B788",
-        "#95D5B2",
-        "#D8F3DC",
-        "#B0B0B0",
-        "#6C5CE7",
-        "#E17055",
-        "#00CEC9",
-    ]
-    for i, op in enumerate(all_ops):
-        op_colors[op] = palette[i % len(palette)]
-
-    fig, ax = plt.subplots(figsize=(max(10, 2.5 * n), 6))
-
-    for bi, (label, deltas, backend_key) in enumerate(
-        [
-            ("Dolt", dolt_deltas, "Dolt"),
-            ("Neon", neon_deltas, "Neon"),
-        ]
-    ):
-        if bi == 1 and neon_all_zero:
-            # Annotate N/A for Neon
-            offset = bar_w / 2
-            for wi in range(n):
-                ax.text(
-                    x[wi] + offset,
-                    0,
-                    "N/A",
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                    fontstyle="italic",
-                    color="#999999",
-                )
-            continue
-
-        offset = -bar_w / 2 if bi == 0 else bar_w / 2
-        bottoms = np.zeros(n)
-        for op in all_ops:
-            vals = [deltas[wf][op] for wf in common_wfs]
-            ax.bar(
-                x + offset,
-                vals,
-                bar_w,
-                bottom=bottoms,
-                color=op_colors[op],
-                alpha=0.85,
-                edgecolor="white",
-                linewidth=0.5,
-                label=OP_SHORT.get(int(op), str(op)).replace("\n", " ")
-                if bi == 0
-                else None,
-            )
-            bottoms += np.array(vals)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(
-        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
-        fontsize=10,
-    )
-    ax.set_ylabel("Storage Delta (MB)", fontsize=11)
-    ax.set_title(
-        "Storage Delta by Operation Type: Dolt vs Neon",
-        fontsize=13,
-        fontweight="bold",
-    )
-    ax.grid(True, alpha=0.3, axis="y")
-
-    # Build legend: op types + backend indicators
-    handles, labels = ax.get_legend_handles_labels()
-    # Add backend indicators
-    handles.append(
-        Patch(facecolor="white", edgecolor="black", label="← Dolt  |  Neon →")
-    )
-    labels.append("← Dolt  |  Neon →")
-    ax.legend(
-        handles=handles,
-        labels=labels,
-        fontsize=9,
-        framealpha=0.9,
-        loc="upper left",
-        ncol=2,
-    )
-
-    fig.tight_layout()
-    path = os.path.join(outdir, "storage_by_op_comparison.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
     print(f"  Saved {path}")
     plt.close(fig)
 
@@ -1237,10 +1269,9 @@ def main():
     neon_stor = load_all_storage(args.neon_dir)
 
     print("\nPlot 5: Storage & elapsed time comparison")
-    plot_storage_comparison(dolt_stor, neon_stor, args.outdir)
-
-    print("\nPlot 7: Storage delta by operation type")
-    plot_storage_by_op(dolt_wfs, neon_wfs, args.outdir)
+    plot_storage_comparison(
+        dolt_stor, neon_stor, args.outdir, dolt_wfs=dolt_wfs, neon_wfs=neon_wfs
+    )
 
     print_summary(dolt_wfs, neon_wfs)
 
