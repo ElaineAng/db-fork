@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -50,6 +51,9 @@ FAILURE_CATEGORY_COLOR = {
 }
 
 BRANCH_CREATE_OP_TYPE = 1
+RUN_RE = re.compile(
+    r"^exp3_(dolt|file_copy|neon)_(spine|bushy|fan_out)_(\d+)t_(branch|crud)_[A-Za-z0-9]+$"
+)
 
 
 @dataclass
@@ -81,12 +85,91 @@ def _to_float(value, default=0.0) -> float:
         return default
 
 
+def _parse_run_id(run_id: str):
+    m = RUN_RE.match(run_id)
+    if not m:
+        return None
+    return {
+        "backend": m.group(1),
+        "shape": m.group(2),
+        "threads": int(m.group(3)),
+        "mode": m.group(4),
+    }
+
+
+def _count_ops_from_parquet(parquet_path: Path):
+    cols = ["outcome_success", "failure_reason"]
+    try:
+        df = pd.read_parquet(parquet_path, columns=cols)
+    except Exception:
+        return 0, 0, 0, 0, 0.0
+
+    if "outcome_success" not in df.columns:
+        df["outcome_success"] = True
+    df["outcome_success"] = df["outcome_success"].fillna(False).astype(bool)
+
+    if "failure_reason" not in df.columns:
+        df["failure_reason"] = ""
+    df["failure_reason"] = df["failure_reason"].fillna("").astype(str)
+
+    attempted_ops = int(len(df))
+    successful_ops = int(df["outcome_success"].sum())
+    failed_ops = attempted_ops - successful_ops
+    failed_df = df[~df["outcome_success"]]
+    failed_slow_ops = int(failed_df["failure_reason"].str.startswith("Slow operation:", na=False).sum())
+    failed_exception_ops = int(failed_ops - failed_slow_ops)
+    success_rate = (float(successful_ops) / float(attempted_ops)) if attempted_ops > 0 else 0.0
+    return attempted_ops, successful_ops, failed_exception_ops, failed_slow_ops, success_rate
+
+
 def load_runs(manifest_path: Path, data_dir: Path) -> List[RunRow]:
-    manifest = pd.read_csv(manifest_path)
+    manifest = pd.DataFrame()
+    if manifest_path.exists():
+        manifest = pd.read_csv(manifest_path)
+
+    by_run_id = {}
+    if not manifest.empty and {"run_id", "backend", "shape", "mode", "threads"}.issubset(manifest.columns):
+        for _, r in manifest.iterrows():
+            run_id = str(r["run_id"])
+            meta = _parse_run_id(run_id)
+            if meta is None:
+                meta = {
+                    "backend": str(r["backend"]),
+                    "shape": str(r["shape"]),
+                    "mode": str(r["mode"]),
+                    "threads": _to_int(r["threads"]),
+                }
+            by_run_id[run_id] = {
+                "run_id": run_id,
+                "backend": meta["backend"],
+                "shape": meta["shape"],
+                "mode": meta["mode"],
+                "threads": int(meta["threads"]),
+                "manifest_row": r.to_dict(),
+            }
+
+    for parquet_path in sorted(data_dir.glob("exp3_*.parquet")):
+        if parquet_path.name.endswith("_setup.parquet"):
+            continue
+        run_id = parquet_path.stem
+        meta = _parse_run_id(run_id)
+        if meta is None:
+            continue
+        if run_id not in by_run_id:
+            by_run_id[run_id] = {
+                "run_id": run_id,
+                "backend": meta["backend"],
+                "shape": meta["shape"],
+                "mode": meta["mode"],
+                "threads": int(meta["threads"]),
+                "manifest_row": {},
+            }
+
     runs: List[RunRow] = []
 
-    for _, r in manifest.iterrows():
-        run_id = str(r["run_id"])
+    for run_id in sorted(by_run_id.keys()):
+        info = by_run_id[run_id]
+        r = info["manifest_row"]
         summary_path = data_dir / f"{run_id}_summary.json"
         summary = {}
         if summary_path.exists():
@@ -95,21 +178,26 @@ def load_runs(manifest_path: Path, data_dir: Path) -> List[RunRow]:
             except Exception:
                 summary = {}
 
-        attempted_ops = _to_int(summary.get("attempted_ops", r.get("attempted_ops", 0)))
-        successful_ops = _to_int(summary.get("successful_ops", r.get("successful_ops", 0)))
-        failed_exception_ops = _to_int(
-            summary.get("failed_exception_ops", r.get("failed_exception_ops", 0))
-        )
-        failed_slow_ops = _to_int(summary.get("failed_slow_ops", r.get("failed_slow_ops", 0)))
-        success_rate = _to_float(summary.get("success_rate", r.get("success_rate", 0.0)))
+        if summary:
+            attempted_ops = _to_int(summary.get("attempted_ops", r.get("attempted_ops", 0)))
+            successful_ops = _to_int(summary.get("successful_ops", r.get("successful_ops", 0)))
+            failed_exception_ops = _to_int(
+                summary.get("failed_exception_ops", r.get("failed_exception_ops", 0))
+            )
+            failed_slow_ops = _to_int(summary.get("failed_slow_ops", r.get("failed_slow_ops", 0)))
+            success_rate = _to_float(summary.get("success_rate", r.get("success_rate", 0.0)))
+        else:
+            attempted_ops, successful_ops, failed_exception_ops, failed_slow_ops, success_rate = (
+                _count_ops_from_parquet(data_dir / f"{run_id}.parquet")
+            )
 
         runs.append(
             RunRow(
                 run_id=run_id,
-                backend=str(r["backend"]),
-                shape=str(r["shape"]),
-                mode=str(r["mode"]),
-                threads=_to_int(r["threads"]),
+                backend=str(info["backend"]),
+                shape=str(info["shape"]),
+                mode=str(info["mode"]),
+                threads=int(info["threads"]),
                 attempted_ops=attempted_ops,
                 successful_ops=successful_ops,
                 failed_exception_ops=failed_exception_ops,

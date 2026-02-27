@@ -203,15 +203,10 @@ def ordered_backends(backends: set[str] | list[str]) -> list[str]:
     return out
 
 
-def infer_threads_by_backend(
-    stats: list[RunStats], manifest_points: list[tuple[str, str, str, int]]
-) -> dict[str, list[int]]:
+def infer_threads_by_backend(stats: list[RunStats]) -> dict[str, list[int]]:
     out: dict[str, set[int]] = {}
-    for b, _sh, _m, t in manifest_points:
-        out.setdefault(b, set()).add(int(t))
-    if not out:
-        for s in stats:
-            out.setdefault(s.backend, set()).add(int(s.threads))
+    for s in stats:
+        out.setdefault(s.backend, set()).add(int(s.threads))
     return {b: sorted(ts) for b, ts in out.items()}
 
 
@@ -229,7 +224,6 @@ def pick_best(
 
 def gen_table_1_coverage(
     stats: list[RunStats],
-    manifest_points: list[tuple[str, str, str, int]],
     backends: list[str],
     threads_by_backend: dict[str, list[int]],
 ) -> str:
@@ -238,22 +232,13 @@ def gen_table_1_coverage(
     total_expected = 0
     total_found = 0
 
-    expected_by_backend: dict[str, set[tuple[str, str, str, int]]] = {}
-    if manifest_points:
-        for point in manifest_points:
-            b = point[0]
-            expected_by_backend.setdefault(b, set()).add(point)
-    else:
-        for b in backends:
-            expected_by_backend[b] = {
-                (b, sh, m, t)
-                for sh in SHAPES
-                for m in MODES
-                for t in threads_by_backend.get(b, [])
-            }
-
     for b in backends:
-        expected = expected_by_backend.get(b, set())
+        expected = {
+            (b, sh, m, t)
+            for sh in SHAPES
+            for m in MODES
+            for t in threads_by_backend.get(b, [])
+        }
         found = sum(1 for k in expected if k in present)
         missing = max(len(expected) - found, 0)
         total_expected += len(expected)
@@ -604,9 +589,9 @@ def main() -> None:
         raise SystemExit("No Exp3 parquet files found.")
 
     ix = index_stats(stats)
-    manifest_points = load_manifest_points(args.manifest)
-    threads_by_backend = infer_threads_by_backend(stats, manifest_points)
-    backends = ordered_backends(set(threads_by_backend.keys()) | {s.backend for s in stats})
+    _ = load_manifest_points(args.manifest)  # legacy input; no longer used for coverage/thread inference
+    threads_by_backend = infer_threads_by_backend(stats)
+    backends = ordered_backends(set(threads_by_backend.keys()))
 
     max_thread_note = ", ".join(
         [f"`{b}=T{threads_by_backend[b][-1]}`" for b in backends if threads_by_backend.get(b)]
@@ -619,6 +604,7 @@ def main() -> None:
     print("- CRUD tables (RQ2/RQ3): `successful CRUD rows / 30s`.")
     print("- `T1 throughput`: throughput at thread count `T=1`.")
     print("- `Max-thread throughput`: throughput at backend-specific maximum T.")
+    print("- Coverage expected points are inferred from backend thread sets in data.")
     if max_thread_note:
         print(f"  (From manifest/data: {max_thread_note}).")
     print("")
@@ -626,7 +612,7 @@ def main() -> None:
     tables = [
         (
             "Table 1. Matrix Coverage",
-            gen_table_1_coverage(stats, manifest_points, backends, threads_by_backend),
+            gen_table_1_coverage(stats, backends, threads_by_backend),
         ),
         (
             "Table 2. Branch Throughput Summary by Backend",
