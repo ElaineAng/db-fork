@@ -67,7 +67,13 @@ def load_all(data_dir: str) -> pd.DataFrame:
         dfs.append(df)
     if not dfs:
         raise RuntimeError(f"No measurement parquet files found in {data_dir}")
-    return pd.concat(dfs, ignore_index=True)
+    out = pd.concat(dfs, ignore_index=True)
+    out["is_xata_invalid"] = (
+        (out["backend"] == "xata")
+        & ((out["disk_size_before"] == 0) | (out["disk_size_after"] == 0))
+    )
+    # Keep non-Xata rows unchanged; drop Xata rows with missing disk metrics.
+    return out[~out["is_xata_invalid"]].copy()
 
 
 def print_overview_table(df: pd.DataFrame) -> None:

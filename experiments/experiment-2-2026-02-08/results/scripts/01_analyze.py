@@ -81,7 +81,12 @@ def load_all(data_dir: str) -> pd.DataFrame:
         dfs.append(df)
     if not dfs:
         raise RuntimeError(f"No measurement parquet files found in {data_dir}")
-    return pd.concat(dfs, ignore_index=True)
+    out = pd.concat(dfs, ignore_index=True)
+    out["is_xata_invalid"] = (
+        (out["backend"] == "xata")
+        & ((out["disk_size_before"] == 0) | (out["disk_size_after"] == 0))
+    )
+    return out
 
 
 BACKEND_LABELS = {
@@ -99,17 +104,27 @@ N_VALUES = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 # Sections
 # ---------------------------------------------------------------------------
 def section_overview(df: pd.DataFrame):
+    filtered = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 1: Data Overview")
     print("=" * 70)
     print()
 
-    print(f"Total measurement rows: {len(df)}")
-    print(f"Unique run_ids: {df['run_id'].nunique()}")
+    print(f"Total measurement rows (raw): {len(df)}")
+    print(f"Unique run_ids (raw): {df['run_id'].nunique()}")
+    print(f"Total measurement rows (filtered for storage_delta analysis): {len(filtered)}")
+    xata_raw = df[df["backend"] == "xata"]
+    if not xata_raw.empty:
+        xata_invalid = int(xata_raw["is_xata_invalid"].sum())
+        print(
+            f"Xata rows excluded by filter: {xata_invalid}/{len(xata_raw)} "
+            f"({xata_invalid / len(xata_raw) * 100:.2f}%)"
+        )
     print()
 
     # Exp 2a: UPDATE + RANGE_UPDATE(r=20), all topologies
-    exp2a = df[(df.operation == "UPDATE") | ((df.operation == "RANGE_UPDATE") & (df.range_size == 20))]
+    exp2a = filtered[(filtered.operation == "UPDATE") | ((filtered.operation == "RANGE_UPDATE") & (filtered.range_size == 20))]
     print("Exp 2a (topology comparison, UPDATE + RANGE_UPDATE r=20):")
     summary = exp2a.groupby(["backend", "topology", "operation"]).agg(
         runs=("run_id", "nunique"), rows=("run_id", "count")
@@ -120,7 +135,7 @@ def section_overview(df: pd.DataFrame):
     print()
 
     # Range-size sweep: all RANGE_UPDATE on spine (includes r=20 from Exp 2a)
-    exp2b = df[(df.operation == "RANGE_UPDATE") & (df.topology == "spine")]
+    exp2b = filtered[(filtered.operation == "RANGE_UPDATE") & (filtered.topology == "spine")]
     print("Range-size sweep, spine only (Exp 2b: r=1,10,50,100; r=20 from Exp 2a):")
     summary = exp2b.groupby(["backend", "range_size"]).agg(
         runs=("run_id", "nunique"), rows=("run_id", "count")
@@ -132,6 +147,8 @@ def section_overview(df: pd.DataFrame):
 
 
 def section_delta_distribution(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 2: Storage Delta Distribution")
     print("=" * 70)
@@ -164,6 +181,8 @@ def section_delta_distribution(df: pd.DataFrame):
 
 
 def section_update_delta_vs_N(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 3: Point UPDATE — Mean Storage Delta vs Branch Count")
     print("=" * 70)
@@ -199,6 +218,8 @@ def section_update_delta_vs_N(df: pd.DataFrame):
 
 
 def section_range_update_delta_vs_N(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 4: RANGE_UPDATE (r=20) — Mean Storage Delta vs Branch Count")
     print("=" * 70)
@@ -232,6 +253,8 @@ def section_range_update_delta_vs_N(df: pd.DataFrame):
 
 
 def section_range_size_sweep(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 5: RANGE_UPDATE — Per-Key Delta vs Range Size (spine only)")
     print("=" * 70)
@@ -283,6 +306,8 @@ def section_range_size_sweep(df: pd.DataFrame):
 
 
 def section_latency(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 6: Operation Latency Summary")
     print("=" * 70)
@@ -317,6 +342,8 @@ def section_latency(df: pd.DataFrame):
 
 
 def section_research_questions(df: pd.DataFrame):
+    df = df[~df["is_xata_invalid"]].copy()
+
     print("=" * 70)
     print("SECTION 7: Research Question Answers")
     print("=" * 70)

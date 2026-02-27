@@ -72,6 +72,11 @@ drop row if backend == xata and (disk_size_before == 0 or disk_size_after == 0)
 
 Recomputed Xata filtered rows: **32 / 1,014** (3.16%), leaving **982** valid rows.
 
+Why these rows are dropped for delta analysis:
+- Xata `disk` comes from a windowed metrics API, and zero values in this dataset occur when metrics are not yet available (sampling lag), not when true storage is zero.
+- Including those rows in `storage_delta` would create artificial jumps (for example, `0 -> positive` or `positive -> 0`) that do not represent one SQL statement's storage effect.
+- Therefore, raw row counts are retained for coverage reporting, but zero-metric rows are excluded from storage-delta calculations.
+
 ## 3. Research Questions
 
 ### 3.1 RQ-to-Evidence Mapping
@@ -188,6 +193,7 @@ Observed from plotted data:
 ## 5. Notable Observations
 
 - Xata filtering is material: **32/1,014** rows dropped due to zero disk metrics from the API.
+- Xata zero-metric rows are treated as missing metric samples (not true zero storage): kept in raw coverage counts, excluded from `storage_delta` math.
 - Xata Exp 2a high-N coverage is partial after filtering (`N=8` and `N=16` are sparse across topologies/ops).
 - Medians of per-key delta are 0 B for all backends/ranges; mean values are driven by sparse non-zero outliers.
 - file_copy Exp 2a non-zero rate is much lower than aggregate Exp 2 (0.13% in Exp 2a vs 0.69% overall) because most file_copy non-zero events appear in Exp 2b range sweeps.
