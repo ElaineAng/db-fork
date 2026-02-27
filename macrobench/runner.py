@@ -433,7 +433,7 @@ def worker_fn(
                 break
 
             # --- Wait for branch slot (Neon has a 20 active branch limit, and burst of 40 request/s limit) ---
-            slot_timeout = max_runtime_sec if max_runtime_sec else 60.0
+            slot_timeout = 60.0
             if not branch_tree.wait_for_slot(timeout=slot_timeout):
                 if verbose:
                     progress.write(
@@ -843,9 +843,10 @@ def main():
         config.setup.total_steps, config.setup.cross_branch_queries, num_workers
     )
 
-    # Measure total storage before the workflow
+    # Measure total storage before the workflow (single branch, cheap).
     storage_before = 0
     storage_db_tools = None
+    neon_before = None
     if config.measure_storage:
         try:
             storage_db_tools = _create_db_tools(
@@ -856,6 +857,36 @@ def main():
             print(f"Storage before workflow: {storage_before} bytes")
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
+
+    # For Neon with storage measurement: wait 15 min for consumption
+    # metrics to reflect the initial state (data just loaded).
+    if config.measure_storage and config.backend == tp.Backend.NEON:
+        wait_min = 15
+        print(
+            f"Waiting {wait_min} min for Neon consumption metrics "
+            f"to reflect initial state...",
+            flush=True,
+        )
+        for elapsed_min in range(wait_min):
+            time.sleep(60)
+            if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
+                print(
+                    f"  {elapsed_min + 1}/{wait_min} min elapsed...",
+                    flush=True,
+                )
+        neon_before = NeonToolSuite.get_consumption_metrics(
+            backend_info.neon_project_id
+        )
+        if neon_before:
+            print(
+                f"  Neon storage before: "
+                f"root={neon_before.get('root_branch_bytes_month', 0)}, "
+                f"child={neon_before.get('child_branch_bytes_month', 0)}",
+                flush=True,
+            )
+        else:
+            print("  WARNING: No Neon consumption metrics for initial state")
+            neon_before = None
 
     # --- Background main-branch load (interference monitor) ---
     monitor = None
@@ -970,7 +1001,7 @@ def main():
 
         # Measure total storage after the workflow
         storage_after = 0
-        if config.measure_storage:
+        if config.measure_storage and config.backend != tp.Backend.NEON:
             try:
                 if storage_db_tools:
                     _flush_to_disk(storage_db_tools)
@@ -986,54 +1017,35 @@ def main():
                     storage_db_tools.close_connection()
 
         # Fetch Neon consumption metrics (root/child branch storage).
-        # The API updates only every ~15 minutes, so poll in a loop.
+        # Wait 15 min for the API to reflect the end state of the workflow.
         neon_consumption = None
         if config.backend == tp.Backend.NEON:
-            max_poll_attempts = 20
-            poll_interval = 60
-            poll_start = time.time()
+            wait_min = 15
             print(
-                f"Polling Neon consumption metrics "
-                f"(up to {max_poll_attempts} attempts × {poll_interval}s = "
-                f"{max_poll_attempts * poll_interval // 60} min)...",
+                f"Waiting {wait_min} min for Neon consumption metrics "
+                f"to reflect end state...",
                 flush=True,
             )
-            for attempt in range(max_poll_attempts):
-                poll_elapsed = time.time() - poll_start
-                try:
-                    metrics = NeonToolSuite.get_consumption_metrics(
-                        backend_info.neon_project_id
-                    )
-                    if metrics and (
-                        metrics.get("root_branch_bytes_month")
-                        or metrics.get("child_branch_bytes_month")
-                    ):
-                        neon_consumption = metrics
-                        print(
-                            f"  [{poll_elapsed:.0f}s] Got consumption metrics "
-                            f"on attempt {attempt + 1}/{max_poll_attempts}: "
-                            f"root={metrics.get('root_branch_bytes_month', 0)}, "
-                            f"child={metrics.get('child_branch_bytes_month', 0)}",
-                            flush=True,
-                        )
-                        break
-                except Exception as e:
+            for elapsed_min in range(wait_min):
+                time.sleep(60)
+                if (elapsed_min + 1) % 3 == 0 or elapsed_min + 1 == wait_min:
                     print(
-                        f"  [{poll_elapsed:.0f}s] Attempt {attempt + 1}/{max_poll_attempts}: "
-                        f"error: {e}",
+                        f"  {elapsed_min + 1}/{wait_min} min elapsed...",
                         flush=True,
                     )
+            neon_consumption = NeonToolSuite.get_consumption_metrics(
+                backend_info.neon_project_id
+            )
+            if neon_consumption:
                 print(
-                    f"  [{poll_elapsed:.0f}s] Attempt {attempt + 1}/{max_poll_attempts}: "
-                    f"no data yet, sleeping {poll_interval}s...",
+                    f"  Neon storage after: "
+                    f"root={neon_consumption.get('root_branch_bytes_month', 0)}, "
+                    f"child={neon_consumption.get('child_branch_bytes_month', 0)}",
                     flush=True,
                 )
-                time.sleep(poll_interval)
-            if not neon_consumption:
-                total_poll = time.time() - poll_start
+            else:
                 print(
-                    f"  WARNING: No consumption metrics after "
-                    f"{max_poll_attempts} attempts ({total_poll:.0f}s)",
+                    "  WARNING: No Neon consumption metrics for end state",
                     flush=True,
                 )
 
@@ -1067,17 +1079,31 @@ def main():
             e2e_stats["storage_before_bytes"] = storage_before
             e2e_stats["storage_after_bytes"] = storage_after
             e2e_stats["storage_delta_bytes"] = storage_after - storage_before
+        _NEON_METRICS = [
+            "root_branch_bytes_month",
+            "child_branch_bytes_month",
+            "compute_unit_seconds",
+            "public_network_transfer_bytes",
+            "private_network_transfer_bytes",
+        ]
+        if neon_before:
+            for m in _NEON_METRICS:
+                e2e_stats[f"neon_before_{m}"] = neon_before.get(m, 0)
+            before_storage = (
+                neon_before.get("root_branch_bytes_month", 0)
+                + neon_before.get("child_branch_bytes_month", 0)
+            )
+            e2e_stats["neon_before_total_bytes"] = before_storage
         if neon_consumption:
-            root_bytes = neon_consumption.get("root_branch_bytes_month", 0)
-            child_bytes = neon_consumption.get("child_branch_bytes_month", 0)
-            e2e_stats["neon_root_branch_bytes_month"] = root_bytes
-            e2e_stats["neon_child_branch_bytes_month"] = child_bytes
-            neon_total = root_bytes + child_bytes
-            e2e_stats["neon_total_bytes"] = neon_total
-            if total_estimated_bytes > 0:
-                e2e_stats["storage_amplification"] = round(
-                    neon_total / total_estimated_bytes, 2
-                )
+            for m in _NEON_METRICS:
+                e2e_stats[f"neon_after_{m}"] = neon_consumption.get(m, 0)
+            after_storage = (
+                neon_consumption.get("root_branch_bytes_month", 0)
+                + neon_consumption.get("child_branch_bytes_month", 0)
+            )
+            e2e_stats["neon_after_total_bytes"] = after_storage
+            if neon_before:
+                e2e_stats["neon_delta_bytes"] = after_storage - before_storage
         e2e_stats_path = os.path.join(
             args.outdir, f"{config.run_id}_e2e_stats.json"
         )

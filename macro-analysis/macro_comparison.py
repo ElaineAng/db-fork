@@ -128,17 +128,17 @@ def load_all_interference(indir):
 
 
 def load_all_storage(indir):
-    """Load all *_storage.json files, return {workflow_name: dict}."""
+    """Load all *_e2e_stats.json files, return {workflow_name: dict}."""
     storage = {}
     for wf in WORKFLOW_ORDER:
-        pattern = os.path.join(indir, f"macro_{wf}*_storage.json")
+        pattern = os.path.join(indir, f"macro_{wf}*_e2e_stats.json")
         matches = sorted(glob.glob(pattern))
         if matches:
             with open(matches[0]) as f:
                 storage[wf] = json.load(f)
             if len(matches) > 1:
                 print(
-                    f"  Note: multiple storage files for {wf}, using {os.path.basename(matches[0])}"
+                    f"  Note: multiple e2e_stats files for {wf}, using {os.path.basename(matches[0])}"
                 )
     return storage
 
@@ -160,7 +160,10 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
     ncols = 2
     nrows = (n + ncols - 1) // ncols
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(9 * ncols, 5 * nrows), sharey=False,
+        nrows,
+        ncols,
+        figsize=(9 * ncols, 5 * nrows),
+        sharey=False,
     )
     axes = np.atleast_2d(axes)
     axes_flat = axes.flatten()
@@ -271,20 +274,32 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
             bracket_y = -0.13
             tick_y = -0.11
             ax.plot(
-                [x_min, x_max], [bracket_y, bracket_y],
-                color="#555555", linewidth=1.2, clip_on=False,
+                [x_min, x_max],
+                [bracket_y, bracket_y],
+                color="#555555",
+                linewidth=1.2,
+                clip_on=False,
                 transform=ax.get_xaxis_transform(),
             )
             for bx in [x_min, x_max]:
                 ax.plot(
-                    [bx, bx], [tick_y, bracket_y],
-                    color="#555555", linewidth=1.2, clip_on=False,
+                    [bx, bx],
+                    [tick_y, bracket_y],
+                    color="#555555",
+                    linewidth=1.2,
+                    clip_on=False,
                     transform=ax.get_xaxis_transform(),
                 )
             ax.text(
-                mid, -0.17, cat_label,
-                ha="center", va="top", fontsize=8, fontweight="bold",
-                color="#555555", transform=ax.get_xaxis_transform(),
+                mid,
+                -0.17,
+                cat_label,
+                ha="center",
+                va="top",
+                fontsize=8,
+                fontweight="bold",
+                color="#555555",
+                transform=ax.get_xaxis_transform(),
             )
 
     # Hide unused subplots
@@ -294,18 +309,27 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
     # Shared legend
     handles = [
         Patch(
-            facecolor=BACKEND_COLORS["Dolt"], alpha=0.7,
-            edgecolor="black", linewidth=1.5, linestyle="-",
+            facecolor=BACKEND_COLORS["Dolt"],
+            alpha=0.7,
+            edgecolor="black",
+            linewidth=1.5,
+            linestyle="-",
             label="Dolt (solid)",
         ),
         Patch(
-            facecolor=BACKEND_COLORS["Neon"], alpha=0.7,
-            edgecolor="black", linewidth=1.5, linestyle="--",
+            facecolor=BACKEND_COLORS["Neon"],
+            alpha=0.7,
+            edgecolor="black",
+            linewidth=1.5,
+            linestyle="--",
             label="Neon (dashed)",
         ),
     ]
     fig.legend(
-        handles=handles, loc="upper right", fontsize=11, framealpha=0.9,
+        handles=handles,
+        loc="upper right",
+        fontsize=11,
+        framealpha=0.9,
     )
 
     fig.suptitle(
@@ -501,8 +525,9 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     import matplotlib.gridspec as gridspec
 
     fig = plt.figure(figsize=(18, 10))
-    gs = gridspec.GridSpec(2, 2, figure=fig, height_ratios=[1, 1],
-                           hspace=0.35, wspace=0.25)
+    gs = gridspec.GridSpec(
+        2, 2, figure=fig, height_ratios=[1, 1], hspace=0.35, wspace=0.25
+    )
 
     # Row 0: Ratio heatmap spanning full width
     ax_r = fig.add_subplot(gs[0, :])
@@ -527,7 +552,10 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     norm = TwoSlopeNorm(vcenter=0, vmin=-bound, vmax=bound)
 
     im_r = ax_r.imshow(
-        log10_ratio, cmap="RdBu_r", aspect="auto", norm=norm,
+        log10_ratio,
+        cmap="RdBu_r",
+        aspect="auto",
+        norm=norm,
     )
     ax_r.set_xticks(range(n_op))
     ax_r.set_xticklabels(op_labels, fontsize=9, rotation=45, ha="right")
@@ -551,18 +579,28 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
                     text = f"{r:.2g}x"
                 lr = log10_ratio[i, j]
                 text_color = (
-                    "white" if np.isfinite(lr) and abs(lr) > bound * 0.45
+                    "white"
+                    if np.isfinite(lr) and abs(lr) > bound * 0.45
                     else "black"
                 )
                 ax_r.text(
-                    j, i, text,
-                    ha="center", va="center", fontsize=8,
-                    color=text_color, fontweight="bold",
+                    j,
+                    i,
+                    text,
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=text_color,
+                    fontweight="bold",
                 )
             else:
                 ax_r.text(
-                    j, i, "--",
-                    ha="center", va="center", fontsize=8,
+                    j,
+                    i,
+                    "--",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
                     color="#cccccc",
                 )
 
@@ -571,8 +609,9 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     tick_logs = np.array([-3, -2, -1, 0, 1, 2, 3])
     tick_logs = tick_logs[(tick_logs >= -bound) & (tick_logs <= bound)]
     cbar.set_ticks(tick_logs)
-    cbar.set_ticklabels([f"{10.0**t:.0g}x" if t >= 0 else f"{10.0**t:.2g}x"
-                         for t in tick_logs])
+    cbar.set_ticklabels(
+        [f"{10.0**t:.0g}x" if t >= 0 else f"{10.0**t:.2g}x" for t in tick_logs]
+    )
 
     # --- Row 1: Dolt and Neon heatmaps ---
     for ax_idx, (ax, data, title, cmap) in enumerate(
@@ -602,21 +641,32 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
                     log_max = np.nanmax(log_data)
                     text_color = "white" if log_val > log_max * 0.6 else "black"
                     ax.text(
-                        j, i, text,
-                        ha="center", va="center", fontsize=8,
-                        color=text_color, fontweight="bold",
+                        j,
+                        i,
+                        text,
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color=text_color,
+                        fontweight="bold",
                     )
                 else:
                     ax.text(
-                        j, i, "--",
-                        ha="center", va="center", fontsize=8,
+                        j,
+                        i,
+                        "--",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
                         color="#cccccc",
                     )
 
         fig.colorbar(im, ax=ax, shrink=0.8, label="log10(ms)")
 
     fig.suptitle(
-        "Median Latency Comparison (ms)", fontsize=14, fontweight="bold",
+        "Median Latency Comparison (ms)",
+        fontsize=14,
+        fontweight="bold",
     )
     path = os.path.join(outdir, "heatmap_comparison.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -649,7 +699,9 @@ def plot_interference_comparison(dolt_intf, neon_intf, outdir):
         return
 
     fig, axes = plt.subplots(
-        n_qt, 1, figsize=(max(10, 2.5 * len(common_wfs)), 5 * n_qt),
+        n_qt,
+        1,
+        figsize=(max(10, 2.5 * len(common_wfs)), 5 * n_qt),
         squeeze=False,
     )
 
@@ -661,10 +713,12 @@ def plot_interference_comparison(dolt_intf, neon_intf, outdir):
         offsets = [-1.5, -0.5, 0.5, 1.5]
 
         for wi, wf in enumerate(common_wfs):
-            for bi, (label, data, color) in enumerate([
-                ("Dolt", dolt_intf, BACKEND_COLORS["Dolt"]),
-                ("Neon", neon_intf, BACKEND_COLORS["Neon"]),
-            ]):
+            for bi, (label, data, color) in enumerate(
+                [
+                    ("Dolt", dolt_intf, BACKEND_COLORS["Dolt"]),
+                    ("Neon", neon_intf, BACKEND_COLORS["Neon"]),
+                ]
+            ):
                 if wf not in data:
                     continue
                 df = data[wf]
@@ -673,22 +727,34 @@ def plot_interference_comparison(dolt_intf, neon_intf, outdir):
                     continue
 
                 baseline = df_qt[df_qt["phase"] == "baseline"]["latency"] * 1000
-                measurement = df_qt[df_qt["phase"] == "measurement"]["latency"] * 1000
+                measurement = (
+                    df_qt[df_qt["phase"] == "measurement"]["latency"] * 1000
+                )
                 med_base = baseline.median() if len(baseline) > 0 else 0
                 med_meas = measurement.median() if len(measurement) > 0 else 0
 
                 # Baseline bar (solid)
                 base_off = offsets[bi * 2]
                 ax.bar(
-                    x[wi] + base_off * bar_w, med_base, bar_w,
-                    color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+                    x[wi] + base_off * bar_w,
+                    med_base,
+                    bar_w,
+                    color=color,
+                    alpha=0.85,
+                    edgecolor="black",
+                    linewidth=0.8,
                     label=f"{label} baseline" if wi == 0 else None,
                 )
                 # Measurement bar (hatched)
                 meas_off = offsets[bi * 2 + 1]
                 ax.bar(
-                    x[wi] + meas_off * bar_w, med_meas, bar_w,
-                    color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+                    x[wi] + meas_off * bar_w,
+                    med_meas,
+                    bar_w,
+                    color=color,
+                    alpha=0.85,
+                    edgecolor="black",
+                    linewidth=0.8,
                     hatch="//",
                     label=f"{label} measurement" if wi == 0 else None,
                 )
@@ -697,14 +763,19 @@ def plot_interference_comparison(dolt_intf, neon_intf, outdir):
                     pct = (med_meas - med_base) / med_base * 100
                     sign = "+" if pct >= 0 else ""
                     ax.text(
-                        x[wi] + meas_off * bar_w, med_meas,
+                        x[wi] + meas_off * bar_w,
+                        med_meas,
                         f"{sign}{pct:.0f}%",
-                        ha="center", va="bottom", fontsize=8, fontweight="bold",
+                        ha="center",
+                        va="bottom",
+                        fontsize=8,
+                        fontweight="bold",
                     )
 
         ax.set_xticks(x)
         ax.set_xticklabels(
-            [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+            [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
+            fontsize=10,
         )
         ax.set_ylabel("Latency (ms)", fontsize=11)
         ax.set_yscale("log")
@@ -750,40 +821,59 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
     fig, (ax_time, ax_stor) = plt.subplots(1, 2, figsize=(18, 5))
 
     # Left: elapsed_sec
-    for bi, (label, data, color) in enumerate([
-        ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
-        ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
-    ]):
-        vals = [data[wf]["elapsed_sec"] if wf in data else 0 for wf in common_wfs]
+    for bi, (label, data, color) in enumerate(
+        [
+            ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
+            ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
+        ]
+    ):
+        vals = [
+            data[wf]["elapsed_sec"] if wf in data else 0 for wf in common_wfs
+        ]
         offset = -bar_w / 2 if bi == 0 else bar_w / 2
         bars = ax_time.bar(
-            x + offset, vals, bar_w,
-            color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+            x + offset,
+            vals,
+            bar_w,
+            color=color,
+            alpha=0.85,
+            edgecolor="black",
+            linewidth=0.8,
             label=label,
         )
         for bar, v in zip(bars, vals):
             if v > 0:
                 ax_time.text(
-                    bar.get_x() + bar.get_width() / 2, v,
-                    f"{v:.1f}s", ha="center", va="bottom", fontsize=8,
-                    fontweight="bold", clip_on=True,
+                    bar.get_x() + bar.get_width() / 2,
+                    v,
+                    f"{v:.1f}s",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                    clip_on=True,
                 )
 
     ax_time.set_xticks(x)
     ax_time.set_xticklabels(
-        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
+        fontsize=10,
     )
     ax_time.set_ylabel("Elapsed Time (s)", fontsize=11)
     ax_time.set_yscale("log")
-    ax_time.set_title("Elapsed Time per Workflow", fontsize=12, fontweight="bold")
+    ax_time.set_title(
+        "Elapsed Time per Workflow", fontsize=12, fontweight="bold"
+    )
     ax_time.grid(True, alpha=0.3, axis="y")
     ax_time.legend(fontsize=10, framealpha=0.9)
 
     # Right: storage_delta_bytes
-    for bi, (label, data, color) in enumerate([
-        ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
-        ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
-    ]):
+    for bi, (label, data, color) in enumerate(
+        [
+            ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"]),
+            ("Neon", neon_stor, BACKEND_COLORS["Neon"]),
+        ]
+    ):
         vals_bytes = [
             data[wf]["storage_delta_bytes"] if wf in data else 0
             for wf in common_wfs
@@ -791,31 +881,45 @@ def plot_storage_comparison(dolt_stor, neon_stor, outdir):
         vals_mb = [v / (1024 * 1024) for v in vals_bytes]
         offset = -bar_w / 2 if bi == 0 else bar_w / 2
         bars = ax_stor.bar(
-            x + offset, vals_mb, bar_w,
-            color=color, alpha=0.85, edgecolor="black", linewidth=0.8,
+            x + offset,
+            vals_mb,
+            bar_w,
+            color=color,
+            alpha=0.85,
+            edgecolor="black",
+            linewidth=0.8,
             label=label,
         )
         for bar, vb, vm in zip(bars, vals_bytes, vals_mb):
             if vb > 0:
                 ax_stor.text(
-                    bar.get_x() + bar.get_width() / 2, vm,
-                    _human_size(vb), ha="center", va="bottom", fontsize=8,
-                    fontweight="bold", clip_on=True,
+                    bar.get_x() + bar.get_width() / 2,
+                    vm,
+                    _human_size(vb),
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    fontweight="bold",
+                    clip_on=True,
                 )
 
     ax_stor.set_xticks(x)
     ax_stor.set_xticklabels(
-        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
+        fontsize=10,
     )
     ax_stor.set_ylabel("Storage Delta (MB)", fontsize=11)
     ax_stor.set_yscale("log")
-    ax_stor.set_title("Storage Delta per Workflow", fontsize=12, fontweight="bold")
+    ax_stor.set_title(
+        "Storage Delta per Workflow", fontsize=12, fontweight="bold"
+    )
     ax_stor.grid(True, alpha=0.3, axis="y")
     ax_stor.legend(fontsize=10, framealpha=0.9)
 
     fig.suptitle(
         "Storage & Elapsed Time: Dolt vs Neon",
-        fontsize=14, fontweight="bold",
+        fontsize=14,
+        fontweight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     path = os.path.join(outdir, "storage_elapsed_comparison.png")
@@ -838,7 +942,10 @@ def plot_storage_by_op(dolt_wfs, neon_wfs, outdir):
 
     # Check if disk_size columns exist
     sample = next(iter(dolt_wfs.values()))
-    if "disk_size_before" not in sample.columns or "disk_size_after" not in sample.columns:
+    if (
+        "disk_size_before" not in sample.columns
+        or "disk_size_after" not in sample.columns
+    ):
         print("  No disk_size columns in results data, skipping storage-by-op.")
         return
 
@@ -877,24 +984,40 @@ def plot_storage_by_op(dolt_wfs, neon_wfs, outdir):
 
     # Op colors — reuse category palette
     op_colors = {}
-    palette = ["#F5A623", "#2D8B57", "#52B788", "#95D5B2", "#D8F3DC",
-               "#B0B0B0", "#6C5CE7", "#E17055", "#00CEC9"]
+    palette = [
+        "#F5A623",
+        "#2D8B57",
+        "#52B788",
+        "#95D5B2",
+        "#D8F3DC",
+        "#B0B0B0",
+        "#6C5CE7",
+        "#E17055",
+        "#00CEC9",
+    ]
     for i, op in enumerate(all_ops):
         op_colors[op] = palette[i % len(palette)]
 
     fig, ax = plt.subplots(figsize=(max(10, 2.5 * n), 6))
 
-    for bi, (label, deltas, backend_key) in enumerate([
-        ("Dolt", dolt_deltas, "Dolt"),
-        ("Neon", neon_deltas, "Neon"),
-    ]):
+    for bi, (label, deltas, backend_key) in enumerate(
+        [
+            ("Dolt", dolt_deltas, "Dolt"),
+            ("Neon", neon_deltas, "Neon"),
+        ]
+    ):
         if bi == 1 and neon_all_zero:
             # Annotate N/A for Neon
             offset = bar_w / 2
             for wi in range(n):
                 ax.text(
-                    x[wi] + offset, 0, "N/A",
-                    ha="center", va="bottom", fontsize=9, fontstyle="italic",
+                    x[wi] + offset,
+                    0,
+                    "N/A",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontstyle="italic",
                     color="#999999",
                 )
             continue
@@ -904,31 +1027,48 @@ def plot_storage_by_op(dolt_wfs, neon_wfs, outdir):
         for op in all_ops:
             vals = [deltas[wf][op] for wf in common_wfs]
             ax.bar(
-                x + offset, vals, bar_w, bottom=bottoms,
-                color=op_colors[op], alpha=0.85, edgecolor="white",
+                x + offset,
+                vals,
+                bar_w,
+                bottom=bottoms,
+                color=op_colors[op],
+                alpha=0.85,
+                edgecolor="white",
                 linewidth=0.5,
-                label=OP_SHORT.get(int(op), str(op)).replace("\n", " ") if bi == 0 else None,
+                label=OP_SHORT.get(int(op), str(op)).replace("\n", " ")
+                if bi == 0
+                else None,
             )
             bottoms += np.array(vals)
 
     ax.set_xticks(x)
     ax.set_xticklabels(
-        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs], fontsize=10,
+        [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
+        fontsize=10,
     )
     ax.set_ylabel("Storage Delta (MB)", fontsize=11)
     ax.set_title(
         "Storage Delta by Operation Type: Dolt vs Neon",
-        fontsize=13, fontweight="bold",
+        fontsize=13,
+        fontweight="bold",
     )
     ax.grid(True, alpha=0.3, axis="y")
 
     # Build legend: op types + backend indicators
     handles, labels = ax.get_legend_handles_labels()
     # Add backend indicators
-    handles.append(Patch(facecolor="white", edgecolor="black", label="← Dolt  |  Neon →"))
+    handles.append(
+        Patch(facecolor="white", edgecolor="black", label="← Dolt  |  Neon →")
+    )
     labels.append("← Dolt  |  Neon →")
-    ax.legend(handles=handles, labels=labels, fontsize=9, framealpha=0.9,
-              loc="upper left", ncol=2)
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        fontsize=9,
+        framealpha=0.9,
+        loc="upper left",
+        ncol=2,
+    )
 
     fig.tight_layout()
     path = os.path.join(outdir, "storage_by_op_comparison.png")
@@ -1053,13 +1193,13 @@ def main():
     parser.add_argument(
         "--dolt-dir",
         type=str,
-        default="run_stats/dolt_mini",
+        default="",
         help="Directory with Dolt parquet files.",
     )
     parser.add_argument(
         "--neon-dir",
         type=str,
-        default="run_stats/neon_mini",
+        default="",
         help="Directory with Neon parquet files.",
     )
     parser.add_argument(
@@ -1091,20 +1231,12 @@ def main():
     print("\nPlot 4: Heatmap comparison with ratios")
     plot_heatmap_comparison(dolt_wfs, neon_wfs, args.outdir)
 
-    # Load interference data
-    print("\nLoading interference data...")
-    dolt_intf = load_all_interference(args.dolt_dir)
-    neon_intf = load_all_interference(args.neon_dir)
-
     # Load storage data
     print("\nLoading storage data...")
     dolt_stor = load_all_storage(args.dolt_dir)
     neon_stor = load_all_storage(args.neon_dir)
 
-    print("\nPlot 5: Interference latency comparison")
-    plot_interference_comparison(dolt_intf, neon_intf, args.outdir)
-
-    print("\nPlot 6: Storage & elapsed time comparison")
+    print("\nPlot 5: Storage & elapsed time comparison")
     plot_storage_comparison(dolt_stor, neon_stor, args.outdir)
 
     print("\nPlot 7: Storage delta by operation type")
