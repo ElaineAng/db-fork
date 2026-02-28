@@ -46,6 +46,9 @@ message Result {
   // Number of active branches at the time of this operation
   // (used by isolation overhead benchmark)
   int32 branch_count = 14;
+
+  // Step ID within the macrobenchmark workflow (-1 if not in a step)
+  int32 step_id = 15;
 }
 
 // Enum for different types of database operations

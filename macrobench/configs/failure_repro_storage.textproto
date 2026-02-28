@@ -1,5 +1,5 @@
 # Failure Reproduction workflow — storage amplification test.
-# Write-only: no eval queries, no cross-branch queries, no pruning.
+# Same as mini config but with no pruning (prune_prob: 0.0).
 
 run_id: "storage_failure_repro"
 backend: NEON
@@ -14,19 +14,19 @@ database_setup {
 }
 
 setup {
-    workers: 1              # T
-    total_steps: 10         # S
-    root_fanout: 10         # F_r
+    workers: 1              # T  (matches mini)
+    total_steps: 10         # S  (matches mini)
+    root_fanout: 10         # F_r (matches mini)
     max_depth: 1            # D
-    cross_branch_queries: 0 # C  (skip reads)
+    cross_branch_queries: 0 # C (matches mini)
     db_scale: 1
 }
 
 step {
     schema_changes: 5   # M_s
     data_mutations: 45  # M_d
-    eval_queries: 0     # Q_v (skip reads)
-    prune_prob: 0.0     # gamma (no deletion)
+    eval_queries: 0     # Q_v (skip reads - storage test)
+    prune_prob: 0.0     # gamma (no deletion - storage test)
 }
 
 autocommit: true

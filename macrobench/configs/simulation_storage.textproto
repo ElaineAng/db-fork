@@ -1,5 +1,5 @@
 # MC Simulation workflow — storage amplification test.
-# Write-only: no eval queries, no cross-branch queries, no pruning.
+# Same as mini config but with no pruning (prune_prob: 0.0).
 
 run_id: "storage_simulation"
 backend: NEON
@@ -14,19 +14,19 @@ database_setup {
 }
 
 setup {
-    workers: 5              # T
+    workers: 60             # T  (matches mini)
     total_steps: 1          # S
-    root_fanout: 5          # F_r
+    root_fanout: 60         # F_r (matches mini)
     max_depth: 1            # D
-    cross_branch_queries: 0 # C  (skip reads)
+    cross_branch_queries: 0 # C (skip reads - storage test)
     db_scale: 1
 }
 
 step {
     schema_changes: 0   # M_s
     data_mutations: 50  # M_d
-    eval_queries: 0     # Q_v (skip reads)
-    prune_prob: 0.0     # gamma (no deletion)
+    eval_queries: 0     # Q_v (skip reads - storage test)
+    prune_prob: 0.0     # gamma (no deletion - storage test)
 }
 
 autocommit: true

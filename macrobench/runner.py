@@ -425,6 +425,9 @@ def worker_fn(
     try:
         step_id = 0
         while step_id < S:
+            # Record current step ID for all operations within this step
+            result_collector.record_step_id(step_id)
+
             if stop_event and stop_event.is_set():
                 status = "stopped"
                 break
@@ -643,6 +646,9 @@ def worker_fn(
     except Exception as e:
         status = f"crashed: {type(e).__name__}: {e}"
     finally:
+        # Reset step_id to -1 after worker finishes
+        result_collector.record_step_id(-1)
+
         if completed_work is not None:
             completed_work[thread_id] = {
                 "steps": steps_finished,

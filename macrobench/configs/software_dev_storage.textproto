@@ -1,5 +1,5 @@
 # Software Development workflow — storage amplification test.
-# Write-only: no eval queries, no cross-branch queries, no pruning.
+# Same as mini config but with no pruning (prune_prob: 0.0).
 
 run_id: "storage_software_dev"
 backend: NEON
@@ -14,20 +14,20 @@ database_setup {
 }
 
 setup {
-    workers: 2              # T
-    total_steps: 5          # S
-    root_fanout: 3          # F_r
-    inner_fanout: 2         # F_i
-    max_depth: 3            # D
-    cross_branch_queries: 0 # C  (skip reads)
+    workers: 2              # T  (matches mini)
+    total_steps: 5          # S  (matches mini)
+    root_fanout: 3          # F_r (matches mini)
+    inner_fanout: 2         # F_i (matches mini)
+    max_depth: 3            # D  (matches mini)
+    cross_branch_queries: 0 # C (skip reads - storage test)
     db_scale: 1
 }
 
 step {
     schema_changes: 1   # M_s
     data_mutations: 1   # M_d
-    eval_queries: 0     # Q_v (skip reads)
-    prune_prob: 0.0     # gamma (no deletion)
+    eval_queries: 0     # Q_v (skip reads - storage test)
+    prune_prob: 0.0     # gamma (no deletion - storage test)
 }
 
 autocommit: true

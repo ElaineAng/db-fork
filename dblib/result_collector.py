@@ -121,6 +121,7 @@ class ResultCollector:
             self._thread_local.disk_size_before = 0
             self._thread_local.disk_size_after = 0
             self._thread_local.branch_count = 0
+            self._thread_local.step_id = -1
             self._thread_local.storage_fn = None
         return self._thread_local
 
@@ -208,6 +209,10 @@ class ResultCollector:
         state = self._get_thread_state()
         state.branch_count = branch_count
 
+    def record_step_id(self, step_id: int) -> None:
+        state = self._get_thread_state()
+        state.step_id = step_id
+
     def record_sql_query(self, sql_query: str) -> None:
         state = self._get_thread_state()
         state.sql_query = sql_query
@@ -238,6 +243,7 @@ class ResultCollector:
         result.disk_size_before = state.disk_size_before
         result.disk_size_after = state.disk_size_after
         result.branch_count = state.branch_count
+        result.step_id = state.step_id
 
         # Append to results (thread-safe)
         with self._lock:
@@ -278,6 +284,7 @@ class ResultCollector:
                 "disk_size_after": result.disk_size_after,
                 "sql_query": result.sql_query,
                 "branch_count": result.branch_count,
+                "step_id": result.step_id,
             }
             rows.append(row)
 

@@ -245,14 +245,18 @@ class FailureReproOps(WorkflowOps):
 
     def evaluate(self) -> list[str]:
         # Q_v=1: invariant check — order line count mismatch
+        # Filtered by item_id to scale query cost with warehouse count
+        # (order_line rows with item <= 15000 scales: 1 WH=75K, 5 WH=375K, 20 WH=1.5M)
         return [
-            """SELECT o_id FROM orders o
-               WHERE o_ol_cnt <> (
-                   SELECT COUNT(*) FROM order_line ol
-                   WHERE ol.ol_o_id = o.o_id
-                     AND ol.ol_d_id = o.o_d_id
-                     AND ol.ol_w_id = o.o_w_id
-               );""",
+            """SELECT DISTINCT o.o_id
+               FROM orders o
+               JOIN order_line ol ON ol.ol_o_id = o.o_id
+                                  AND ol.ol_d_id = o.o_d_id
+                                  AND ol.ol_w_id = o.o_w_id
+               WHERE o.o_id >= (SELECT MAX(o_id) - 100000 FROM orders)
+                 AND ol.ol_i_id <= 15000
+               GROUP BY o.o_id, o.o_ol_cnt
+               HAVING o.o_ol_cnt <> COUNT(*);""",
         ]
 
     def compare(self) -> list[str]:
@@ -433,11 +437,15 @@ class SimulationOps(WorkflowOps):
 
     def evaluate(self) -> list[str]:
         # Q_v=1: per-branch outcome metrics
+        # Filtered by item_id to scale query cost with warehouse count
+        # (stock rows with item <= 7500 scales: 1 WH=7.5K, 5 WH=37.5K, 20 WH=150K)
+        # Reduced from 15K to handle contention better with 1000 concurrent queries
         return [
             """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
                       SUM(ol.ol_amount) AS total_cost
                FROM stock s
-               JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
+               JOIN order_line ol ON s.s_i_id = ol.ol_i_id
+               WHERE s.s_i_id <= 7500;""",
         ]
 
     def compare(self) -> list[str]:
@@ -445,12 +453,15 @@ class SimulationOps(WorkflowOps):
         # Different from evaluate: computes distributional metrics
         # (avg cost, p5 cost) rather than raw sums, so cross-branch
         # comparison reveals variance across simulation branches.
+        # Filtered by item_id to scale query cost with warehouse count
+        # Reduced from 15K to handle contention better with 1000 concurrent queries
         return [
             """SELECT SUM(CASE WHEN s_quantity = 0 THEN 1 ELSE 0 END) AS stockouts,
                       AVG(ol.ol_amount) AS avg_order_cost,
                       MIN(ol.ol_amount) AS min_cost
                FROM stock s
-               JOIN order_line ol ON s.s_i_id = ol.ol_i_id;""",
+               JOIN order_line ol ON s.s_i_id = ol.ol_i_id
+               WHERE s.s_i_id <= 7500;""",
         ]
 
     def estimate_write_bytes_per_step(self, schema_changes, data_mutations):

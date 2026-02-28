@@ -14,9 +14,9 @@ database_setup {
 }
 
 setup {
-    workers: 30             # T  (full: 1000)
+    workers: 60             # T  (full: 1000)
     total_steps: 1          # S
-    root_fanout: 30         # F_r (full: 1000)
+    root_fanout: 60         # F_r (full: 1000)
     max_depth: 1            # D
     cross_branch_queries: 1 # C
     db_scale: 1

@@ -13,8 +13,8 @@ database_setup {
 }
 
 setup {
-    workers: 4              # T  (full: 10)
-    total_steps: 12         # S  (full: 100)
+    workers: 3              # T  (full: 10)
+    total_steps: 8         # S  (full: 100)
     root_fanout: 5          # F_r (full: 10)
     inner_fanout: 3         # F_i (full: 10)
     max_depth: 5            # D  (full: 25)
