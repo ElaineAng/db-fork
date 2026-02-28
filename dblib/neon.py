@@ -1,6 +1,7 @@
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import os
 import time
+import threading
 from typing import Tuple
 from dotenv import load_dotenv
 import psycopg2
@@ -35,11 +36,34 @@ class NeonToolSuite(DBToolSuite):
         return cls._request("POST", "projects", json=project_dict)
 
     @classmethod
-    def delete_project(cls, project_id: str) -> None:
+    def delete_project(cls, project_id: str, timeout: int = 30) -> None:
         """
-        Deletes a Neon project by its ID.
+        Deletes a Neon project by its ID with a timeout.
+
+        Args:
+            project_id: Neon project ID to delete.
+            timeout: Maximum seconds to wait for deletion (default: 30).
         """
-        return neon.project_delete(project_id)
+        result = {"error": None, "success": False}
+
+        def _delete():
+            try:
+                neon.project_delete(project_id)
+                result["success"] = True
+            except Exception as e:
+                result["error"] = e
+
+        thread = threading.Thread(target=_delete, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            print(f"Warning: Neon project deletion timed out after {timeout}s. "
+                  f"Project {project_id} may still be deleted in the background.")
+        elif result["error"]:
+            print(f"Warning: Neon project deletion failed: {result['error']}")
+        elif result["success"]:
+            print(f"Neon project {project_id} deleted successfully.")
 
     @classmethod
     def init_for_bench(
