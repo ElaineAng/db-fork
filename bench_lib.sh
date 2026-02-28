@@ -190,6 +190,9 @@ run_branch_sweep() {
             # Use override if provided, otherwise use default based on measure_storage
             if [ -n "$num_ops_override" ]; then
                 num_ops="$num_ops_override"
+            # For CONNECT operations, scale with number of branches (2x)
+            elif [[ "$operation" =~ ^CONNECT ]]; then
+                num_ops=$((num_branches * 2))
             elif [ "$measure_storage" = true ]; then
                 num_ops=$(get_num_ops_storage "$operation")
             else

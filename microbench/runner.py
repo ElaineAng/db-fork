@@ -1857,8 +1857,8 @@ if __name__ == "__main__":
         avg_throughput = sum(m["throughput"] for m in iteration_metrics) / len(iteration_metrics)
         summary["average_throughput"] = avg_throughput
 
-    # Write to file
-    summary_path = os.path.join(args.output_dir, f"{config.run_id}_summary.json")
+    # Write to file - include num_threads in filename to avoid overwriting
+    summary_path = os.path.join(args.output_dir, f"{config.run_id}_threads{num_threads}_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written to {summary_path}")

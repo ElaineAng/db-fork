@@ -83,7 +83,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, neon, kpg, xata, postgres transaction (txn)"
+    echo "  backend: dolt, neon, kpg, xata, postgres transaction (txn), file_copy, tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo ""
     echo "Options:"
@@ -114,8 +114,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|TXN)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, txn"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, txn, file_copy, tiger"
     exit 1
 fi
 
@@ -154,7 +154,7 @@ if [ "$SWEEP_MODE" = "threads" ]; then
     NUM_THREADS_LIST=(1 2 4 8 16 32)
 elif [ "$SWEEP_MODE" = "branches" ]; then
     # Sweep branches with fixed threads
-    NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128)
+    NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
     if [ -z "$NUM_THREADS" ]; then
         # Default: use 4 threads if sweeping branches
         NUM_THREADS_LIST=(4)
@@ -163,7 +163,7 @@ elif [ "$SWEEP_MODE" = "branches" ]; then
     fi
 else
     # Default: num_threads = num_branches (original behavior)
-    NUM_BRANCHES_LIST=(16 32 64 128)
+    NUM_BRANCHES_LIST=(2 4 8 16 32 64 128 256 512 1024)
     NUM_THREADS_LIST=()  # Will match num_branches in loop
 fi
 
@@ -177,10 +177,10 @@ fi
 # Other fixed config values
 TABLE_NAME="orders"
 DB_NAME="microbench"
-INSERTS_PER_BRANCH=100
-UPDATES_PER_BRANCH=20
-DELETES_PER_BRANCH=10
-RANGE_SIZE=20
+INSERTS_PER_BRANCH=0
+UPDATES_PER_BRANCH=0
+DELETES_PER_BRANCH=0
+RANGE_SIZE=100
 
 # Create temporary config file
 TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_multithread_bench_config_XXXXXX)
@@ -256,6 +256,9 @@ for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
         # Use override if provided, otherwise use default
         if [ -n "$NUM_OPS_OVERRIDE" ]; then
             NUM_OPS="$NUM_OPS_OVERRIDE"
+        # For CONNECT operations, scale with number of threads (2x)
+        elif [[ "$OPERATION" =~ ^CONNECT ]]; then
+            NUM_OPS=$((NUM_THREADS * 2))
         else
             NUM_OPS=$(get_num_ops "$OPERATION")
         fi
