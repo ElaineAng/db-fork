@@ -1,4 +1,5 @@
 import os
+import threading
 
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
@@ -7,10 +8,10 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
-PGSQL_USER = os.environ.get("PGSQL_USER", "postgres")
-PGSQL_PASSWORD = os.environ.get("PGSQL_PASSWORD", "password")
+PGSQL_USER = os.environ.get("PGSQL_USER", "elaineang")
+PGSQL_PASSWORD = os.environ.get("PGSQL_PASSWORD", "")
 PGSQL_HOST = os.environ.get("PGSQL_HOST", "localhost")
-PGSQL_PORT = int(os.environ.get("PGSQL_PORT", "5432"))
+PGSQL_PORT = int(os.environ.get("PGSQL_PORT", "5433"))
 PGSQL_DATA_DIR = os.environ.get("PGSQL_DATA_DIR", "")
 
 
@@ -43,7 +44,10 @@ class FileCopyToolSuite(DBToolSuite):
         autocommit: bool,
         default_branch_name: str,
         shared_branches: set,
+        shared_branches_lock: threading.Lock,
+        create_db_lock: threading.Lock,
     ):
+        # Connect to the actual database for initial setup (loading SQL dump, etc.)
         uri = cls.get_branch_uri(db_name)
 
         conn = psycopg2.connect(uri)
@@ -57,6 +61,8 @@ class FileCopyToolSuite(DBToolSuite):
             autocommit=autocommit,
             default_branch_name=default_branch_name,
             shared_branches=shared_branches,
+            shared_branches_lock=shared_branches_lock,
+            create_db_lock=create_db_lock,
         )
 
     def __init__(
@@ -68,22 +74,26 @@ class FileCopyToolSuite(DBToolSuite):
         autocommit: bool,
         default_branch_name: str,
         shared_branches: set,
+        shared_branches_lock: threading.Lock,
+        create_db_lock: threading.Lock,
     ):
         super().__init__(connection, result_collector=collector)
         self._connection_uri = connection_uri
         self.autocommit = autocommit
         self.shared_branches = shared_branches
-        shared_branches.add(db_name)
-        self._all_branches = dict()
-        self.current_branch_name = ""
+        self._shared_branches_lock = shared_branches_lock
+        self._create_db_lock = create_db_lock
+        self._all_branches_lock = threading.Lock()  # Per-instance lock for _all_branches
 
-        # Initial connection is to template db (e.g. "microbench")
-        # Switch to main
-        if default_branch_name in self.shared_branches:
-            self._connect_branch_impl(default_branch_name)
-        else:
-            self._create_branch_impl(default_branch_name, db_name)
-            self._connect_branch_impl(default_branch_name)
+        # Thread-safe add to shared branches
+        with self._shared_branches_lock:
+            shared_branches.add(db_name)
+
+        self._all_branches = dict()
+        self._template_db = db_name  # Track the template database for creating branches
+
+        # Set current branch to db_name since we're connected to it for setup
+        self.current_branch_name = db_name
 
     def get_total_storage_bytes(self) -> int:
         """Get total physical storage across all branch databases.
@@ -105,7 +115,8 @@ class FileCopyToolSuite(DBToolSuite):
         Would overcount on btrfs or XFS with reflinks — use PGSQL_DATA_DIR
         with an isolated volume in that case.
         """
-        branch_names = list(self.shared_branches)
+        with self._shared_branches_lock:
+            branch_names = list(self.shared_branches)
         if not branch_names:
             return 0
 
@@ -129,31 +140,68 @@ class FileCopyToolSuite(DBToolSuite):
         return total
 
     def list_branches(self) -> list[str]:
-        return list(self.shared_branches)
+        with self._shared_branches_lock:
+            return list(self.shared_branches)
 
     def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
-        if parent_name:
-            cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
-        else:
-            cmd = f"CREATE DATABASE {branch_name}"
+        # CREATE DATABASE ... TEMPLATE requires no active connections to the template database.
+        # Close current connection if it's connected to the parent we want to use as template.
+        temp_conn = None
         try:
-            super().execute_sql(cmd)
+            # Use template database as parent if no parent specified
+            if not parent_name:
+                parent_name = self._template_db
+
+            # If we're currently connected to the parent database, disconnect first
+            # (PostgreSQL requirement: template database must have 0 active connections)
+            if self.current_branch_name == parent_name and self.conn and not self.conn.closed:
+                self.conn.close()
+                # Reconnect to neutral "postgres" database to maintain valid connection
+                neutral_uri = self.__class__.get_default_connection_uri()
+                self.conn = psycopg2.connect(neutral_uri)
+                if self.autocommit:
+                    self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+
+            cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
+
+            # Serialize CREATE DATABASE operations to avoid PostgreSQL contention
+            with self._create_db_lock:
+                # Create temporary connection to neutral database
+                temp_uri = self.__class__.get_default_connection_uri()
+                temp_conn = psycopg2.connect(temp_uri)
+                temp_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+
+                # Execute CREATE DATABASE on temporary connection
+                cur = temp_conn.cursor()
+                cur.execute(cmd)
+                cur.close()
+
         except psycopg2.errors.DuplicateDatabase as e:
             raise Exception(
                 f"Cannot create branch {branch_name}, already exists: {e}"
             )
+        finally:
+            if temp_conn:
+                temp_conn.close()
+
         self.current_branch_name = branch_name
-        self._all_branches[branch_name] = self.__class__.get_branch_uri(
-            branch_name
-        )
-        self.shared_branches.add(branch_name)
+
+        # Thread-safe updates to shared state
+        with self._all_branches_lock:
+            self._all_branches[branch_name] = self.__class__.get_branch_uri(
+                branch_name
+            )
+
+        with self._shared_branches_lock:
+            self.shared_branches.add(branch_name)
 
     def _connect_branch_impl(self, branch_name: str) -> None:
-        if branch_name in self._all_branches:
-            uri = self._all_branches[branch_name]
-        else:
-            uri = self.__class__.get_branch_uri(branch_name)
-            self._all_branches[branch_name] = uri
+        with self._all_branches_lock:
+            if branch_name in self._all_branches:
+                uri = self._all_branches[branch_name]
+            else:
+                uri = self.__class__.get_branch_uri(branch_name)
+                self._all_branches[branch_name] = uri
 
         self.conn.close()
         self.conn = psycopg2.connect(uri)
@@ -215,6 +263,11 @@ class FileCopyToolSuite(DBToolSuite):
             self.branches = set()  # enforces unique name on branches
             self.db_name = db_name
             self.prev_method = ""
+
+            # Thread synchronization locks for multi-threaded scenarios
+            self.branches_lock = threading.Lock()  # Protects self.branches set
+            self.create_db_lock = threading.Lock()  # Serializes CREATE DATABASE operations
+
             self.change_file_copy_method("clone")
 
         def change_file_copy_method(self, method: str) -> None:

@@ -90,6 +90,7 @@ class BackendInfo:
     tiger: Optional[dict] = None
     file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
     txn_conn: Optional[psycopg2.extensions.connection] = None
+    txn_branch_state: Optional[dict] = None  # TXN branch state for sharing across instances
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
@@ -130,7 +131,8 @@ def create_backend_project(config: tp.TaskConfig, output_dir: str = "/tmp/run_st
     elif backend == tp.Backend.FILE_COPY:
         info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
         info.default_uri = FileCopyToolSuite.get_default_connection_uri()
-        info.default_branch_name = "main"
+        # For FILE_COPY, the default branch is the template database itself
+        info.default_branch_name = db_name
         print(f"Default FILE_COPY connection URI: {info.default_uri}")
 
     elif backend == tp.Backend.NEON:
@@ -356,6 +358,11 @@ def cleanup_backend(
         cur = None
         try:
             if backend_info.txn_conn:
+                # For TXN backend, rollback the transaction before closing
+                try:
+                    backend_info.txn_conn.rollback()
+                except Exception:
+                    pass  # Ignore errors if already closed
                 backend_info.txn_conn.close()
             conn = psycopg2.connect(backend_info.default_uri)
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -429,6 +436,10 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo, outpu
         )
         if config.backend == tp.Backend.TIGER:
             backend_info.tiger["services"] = setup_bench.db_tools._services
+
+        # For TXN backend, store branch state to share with worker instances
+        if config.backend == tp.Backend.TXN:
+            backend_info.txn_branch_state = setup_bench.db_tools.get_branch_state()
 
     # Store the last branch info in BackendInfo for measurement phase.
     backend_info.default_branch_name = last_branch_name
@@ -623,6 +634,7 @@ class BenchmarkSuite:
                     self._backend_info.default_branch_name,
                     self._backend_info.setup_branches,
                     self._backend_info.txn_conn,
+                    self._backend_info.txn_branch_state,
                 )
             elif self._config.backend == tp.Backend.FILE_COPY:
                 db_tools = FileCopyToolSuite.init_for_bench(
@@ -631,7 +643,20 @@ class BenchmarkSuite:
                     self._config.autocommit,
                     self._backend_info.default_branch_name,
                     self._backend_info.file_copy_info.branches,
+                    self._backend_info.file_copy_info.branches_lock,
+                    self._backend_info.file_copy_info.create_db_lock,
                 )
+                # For FILE_COPY backend in multi-threaded scenarios:
+                # - Setup thread (thread_id == 0) stays connected to template to query
+                #   schema and perform setup ops, then switches in setup_nth_op_branches()
+                # - Worker threads (thread_id > 0) need access to a database with tables:
+                #   - If setup branches exist, connect to one
+                if self._config.num_threads > 1 and self._thread_id > 0:
+                    if self._backend_info.setup_branches:
+                        # Connect to first setup branch
+                        db_tools.connect_branch(
+                            self._backend_info.setup_branches[0], timed=False
+                        )
             elif self._config.backend == tp.Backend.NEON:
                 print(
                     f"Default Neon branch name: {self._root_branch_name}, "
@@ -674,7 +699,11 @@ class BenchmarkSuite:
             else:
                 raise ValueError(f"Unsupported backend: {self._config.backend}")
 
-            self._add_branch(self._root_branch_name)
+            # For FILE_COPY, don't add the template database to the branch manager
+            # as it should only be used as a TEMPLATE for CREATE DATABASE, not connected to
+            if self._config.backend != tp.Backend.FILE_COPY:
+                self._add_branch(self._root_branch_name)
+
             self.db_tools = db_tools
             if self._measure_storage:
                 db_tools.result_collector.set_storage_fn(
@@ -1260,8 +1289,18 @@ class BenchmarkSuite:
 
             self._add_branch(branch_name)
 
-        # Get the last branch info to return.
-        last_branch_name, last_branch_id = db_tools.get_current_branch()
+        # Get the last branch info to return
+        if self._config.backend == tp.Backend.FILE_COPY:
+            if num_branches > 0:
+                # Return the last created branch
+                last_branch_name = f"setup_branch_{num_branches}"
+                last_branch_id = last_branch_name  # FILE_COPY uses name as ID
+            else:
+                # No branches created, return root branch
+                last_branch_name = self._root_branch_name
+                last_branch_id = root_branch_id
+        else:
+            last_branch_name, last_branch_id = db_tools.get_current_branch()
 
         print(
             f"Setup complete: {num_branches} branches created, "
@@ -1440,37 +1479,33 @@ class BenchmarkSuite:
         # Use shared progress if available (multi-threaded), else use local tqdm
         use_shared_progress = self._shared_progress is not None
 
-        if (
-            op == tp.OperationType.CONNECT_FIRST
-            or op == tp.OperationType.CONNECT_MID
-            or op == tp.OperationType.CONNECT_LAST
-        ):
-            self.db_tools.connect_specific_branch(op)
-            self._existing_pks = []
+        for i in range(num_ops):
+            if op == tp.OperationType.BRANCH:
+                next_bid = self._shared_branch_manager.get_next_branch_id()
+                self.branch_and_connect(next_bid)
+            elif op == tp.OperationType.READ:
+                self.read_op(rnd, benchmark_table)
+            elif op == tp.OperationType.INSERT:
+                self.insert_op(benchmark_table)
+            elif op == tp.OperationType.UPDATE:
+                self.update_op(rnd, benchmark_table)
+            elif op == tp.OperationType.RANGE_UPDATE:
+                self.range_update_op(rnd, benchmark_table)
+            elif op == tp.OperationType.RANGE_READ:
+                self.range_read_op(rnd, benchmark_table)
+            elif op == tp.OperationType.CONNECT:
+                self.connect_to_branch(rnd)
+            elif (
+                op == tp.OperationType.CONNECT_FIRST
+                or op == tp.OperationType.CONNECT_MID
+                or op == tp.OperationType.CONNECT_LAST
+            ):
+                self.db_tools.connect_specific_branch(op)
+                self._existing_pks = []
+
+            # Update progress
             if use_shared_progress:
                 self._shared_progress.update(1)
-
-        else:
-            for i in range(num_ops):
-                if op == tp.OperationType.BRANCH:
-                    next_bid = self._shared_branch_manager.get_next_branch_id()
-                    self.branch_and_connect(next_bid)
-                elif op == tp.OperationType.READ:
-                    self.read_op(rnd, benchmark_table)
-                elif op == tp.OperationType.INSERT:
-                    self.insert_op(benchmark_table)
-                elif op == tp.OperationType.UPDATE:
-                    self.update_op(rnd, benchmark_table)
-                elif op == tp.OperationType.RANGE_UPDATE:
-                    self.range_update_op(rnd, benchmark_table)
-                elif op == tp.OperationType.RANGE_READ:
-                    self.range_read_op(rnd, benchmark_table)
-                elif op == tp.OperationType.CONNECT:
-                    self.connect_to_branch(rnd)
-
-                # Update progress
-                if use_shared_progress:
-                    self._shared_progress.update(1)
 
     def run_randomized_avg_benchmark(self):
         # Get the benchmark table and load the data generator for the table.
