@@ -64,6 +64,12 @@ enum BranchShape {
     BUSHY = 2;    // Random parent: each branch from a random existing branch
 }
 
+// Strategy for selecting which branch to operate on during Nth operation benchmark
+enum BranchSelectionStrategy {
+    LAST_CREATED = 0;  // Use the last branch created during setup (default)
+    RANDOM = 1;        // Randomly select a branch from setup branches
+}
+
 // Configuration for pre-benchmark setup (used with NthOperationBenchmark)
 message BenchmarkSetup {
     int32 num_branches = 1;        // Number of branches to create during setup
@@ -75,9 +81,10 @@ message BenchmarkSetup {
 
 // Configuration for measuring the Nth operation deterministically
 message NthOperationBenchmark {
-    OperationType operation = 1;   // The specific operation to measure (BRANCH, READ, INSERT, UPDATE, RANGE_UPDATE)
-    BenchmarkSetup setup = 2;      // Setup configuration for creating state before measurement
-    int32 num_ops = 3;             // Number of operations to perform and record (default: 1)
+    OperationType operation = 1;                    // The specific operation to measure (BRANCH, READ, INSERT, UPDATE, RANGE_UPDATE)
+    BenchmarkSetup setup = 2;                       // Setup configuration for creating state before measurement
+    int32 num_ops = 3;                              // Number of operations to perform and record (default: 1)
+    BranchSelectionStrategy branch_selection = 4;  // Which branch to operate on (default: LAST_CREATED)
 }
 
 // Configuration for randomized average-cost benchmark mode

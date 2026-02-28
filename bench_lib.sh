@@ -23,8 +23,8 @@ load_env() {
 validate_backend() {
     local backend="$1"
     BACKEND_UPPER=$(echo "$backend" | tr '[:lower:]' '[:upper:]')
-    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TIGER)$ ]]; then
-        echo "Error: Invalid backend '$backend'. Must be one of: dolt, neon, kpg, xata, file_copy, tiger"
+    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TIGER|TXN)$ ]]; then
+        echo "Error: Invalid backend '$backend'. Must be one of: dolt, neon, kpg, xata, file_copy, tiger, txn"
         return 1
     fi
 }
@@ -44,7 +44,7 @@ validate_shape() {
 # Echoes reduced op count for storage measurement mode.
 get_num_ops_storage() {
     case "$1" in
-        BRANCH)            echo 1    ;;
+        BRANCH|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST) echo 1    ;;
         RANGE_UPDATE)      echo 20   ;;
         UPDATE)            echo 50   ;;
         CONNECT|READ|RANGE_READ) echo 1000 ;;
@@ -56,7 +56,7 @@ get_num_ops_storage() {
 # Echoes standard op count.
 get_num_ops_default() {
     case "$1" in
-        BRANCH)            echo 1    ;;
+        BRANCH|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST) echo 1    ;;
         RANGE_UPDATE)      echo 200  ;;
         CONNECT|READ|UPDATE|RANGE_READ) echo 1000 ;;
         *)                 echo 1000 ;;
@@ -64,7 +64,7 @@ get_num_ops_default() {
 }
 
 # generate_textproto CONFIG_FILE BACKEND_UPPER SHAPE_UPPER NUM_BRANCHES OPERATION NUM_OPS \
-#                    MEASURE_STORAGE SQL_DUMP_PATH RUN_ID
+#                    MEASURE_STORAGE SQL_DUMP_PATH RUN_ID BRANCH_SELECTION
 # Writes a textproto config to CONFIG_FILE.
 generate_textproto() {
     local config_file="$1"
@@ -76,6 +76,7 @@ generate_textproto() {
     local measure_storage="$7"
     local sql_dump_path="$8"
     local run_id="$9"
+    local branch_selection="${10:-LAST_CREATED}"  # Default to LAST_CREATED if not provided
 
     cat > "$config_file" << EOF
 # Auto-generated config for single-thread benchmark
@@ -104,6 +105,7 @@ $([ "$measure_storage" = true ] && echo "measure_storage: true")
 nth_op_benchmark {
   operation: ${operation}
   num_ops: ${num_ops}
+  branch_selection: ${branch_selection}
   setup {
     num_branches: ${num_branches}
     branch_shape: ${shape_upper}
@@ -115,24 +117,25 @@ nth_op_benchmark {
 EOF
 }
 
-# run_one_benchmark CONFIG_FILE SEED
+# run_one_benchmark CONFIG_FILE SEED OUTPUT_DIR
 # Runs the python benchmark runner and cleans up dropped Dolt databases.
 run_one_benchmark() {
     local config_file="$1"
     local seed="$2"
+    local output_dir="${3:-/tmp/run_stats}"
 
     echo "Config generated at: $config_file"
     cat "$config_file"
     echo ""
 
     echo "Starting benchmark..."
-    python -m microbench.runner --config "$config_file" --seed "$seed"
+    python -m microbench.runner --config "$config_file" --seed "$seed" --output-dir "$output_dir"
 
     # Clean up dropped databases to prevent disk space explosion
     rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/*
 }
 
-# run_branch_sweep BACKEND SQL_DUMP_PATH SHAPE SEED MAX_BRANCHES MEASURE_STORAGE OPERATION [OPERATION...]
+# run_branch_sweep BACKEND SQL_DUMP_PATH SHAPE SEED MAX_BRANCHES MEASURE_STORAGE BRANCH_SELECTION NUM_OPS_OVERRIDE OUTPUT_DIR OPERATION [OPERATION...]
 # Loops over NUM_BRANCHES_LIST, generates config + runs for each branch count and operation.
 run_branch_sweep() {
     local backend="$1"
@@ -141,7 +144,10 @@ run_branch_sweep() {
     local seed="$4"
     local max_branches="$5"
     local measure_storage="$6"
-    shift 6
+    local branch_selection="$7"
+    local num_ops_override="$8"
+    local output_dir="$9"
+    shift 9
     local operations=("$@")
 
     validate_backend "$backend"
@@ -160,7 +166,7 @@ run_branch_sweep() {
 
     # Create temporary config file
     local temp_config
-    temp_config=$(mktemp /tmp/${backend}_bench_config.XXXXXX.textproto)
+    temp_config=$(mktemp /tmp/${backend}_bench_config_XXXXXX)
 
     local shape_lower
     shape_lower=$(echo "$shape" | tr '[:upper:]' '[:lower:]')
@@ -181,7 +187,10 @@ run_branch_sweep() {
 
         for operation in "${operations[@]}"; do
             local num_ops
-            if [ "$measure_storage" = true ]; then
+            # Use override if provided, otherwise use default based on measure_storage
+            if [ -n "$num_ops_override" ]; then
+                num_ops="$num_ops_override"
+            elif [ "$measure_storage" = true ]; then
                 num_ops=$(get_num_ops_storage "$operation")
             else
                 num_ops=$(get_num_ops_default "$operation")
@@ -202,9 +211,9 @@ run_branch_sweep() {
 
             generate_textproto "$temp_config" "$BACKEND_UPPER" "$SHAPE_UPPER" \
                 "$num_branches" "$operation" "$num_ops" "$measure_storage" \
-                "$sql_dump_path" "$run_id"
+                "$sql_dump_path" "$run_id" "$branch_selection"
 
-            run_one_benchmark "$temp_config" "$seed"
+            run_one_benchmark "$temp_config" "$seed" "$output_dir"
 
             echo "Completed: $run_id"
         done

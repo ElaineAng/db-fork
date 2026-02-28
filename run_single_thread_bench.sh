@@ -21,6 +21,9 @@ MAX_BRANCHES=1024
 SHAPE="spine"
 MEASURE_STORAGE=false
 OPS_STRING=""
+BRANCH_SELECTION="last"
+NUM_OPS_OVERRIDE=""
+OUTPUT_DIR="/tmp/run_stats"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -48,6 +51,18 @@ while [[ $# -gt 0 ]]; do
             RANGE_SIZE="$2"
             shift 2
             ;;
+        --branch-selection)
+            BRANCH_SELECTION="$2"
+            shift 2
+            ;;
+        --num-ops)
+            NUM_OPS_OVERRIDE="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
         *)
             if [ -z "$BACKEND" ]; then
                 BACKEND="$1"
@@ -64,12 +79,27 @@ done
 
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>] [--measure-storage]"
+    echo "Usage: $0 <backend> <sql_dump_path> [options]"
+    echo ""
+    echo "Required:"
     echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
-    echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
-    echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
-    echo "  --shape: (optional) Branch tree shape: spine, bushy, or fan_out (default: spine)"
+    echo ""
+    echo "Options:"
+    echo "  --seed <seed>: Random seed for reproducibility (default: random)"
+    echo "  --max-branches <max>: Maximum number of branches to test (default: 1024)"
+    echo "  --shape <shape>: Branch tree shape: spine, bushy, or fan_out (default: spine)"
+    echo "  --measure-storage: Measure disk_size_before/after for each update (reduces num_ops)"
+    echo "  --operations <ops>: Comma-separated list (e.g., UPDATE,RANGE_UPDATE)"
+    echo "  --range-size <n>: Range size for RANGE_UPDATE operation (default: 20)"
+    echo "  --branch-selection <last|random>: Which branch to operate on (default: last)"
+    echo "  --num-ops <n>: Number of operations to perform (overrides defaults)"
+    echo "  --output-dir <dir>: Output directory for results (default: /tmp/run_stats)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 dolt db.sql                                    # Default: 1000 ops per operation"
+    echo "  $0 dolt db.sql --operations READ --num-ops 1      # Single read per branch count"
+    echo "  $0 dolt db.sql --operations READ,RANGE_READ --num-ops 10  # 10 of each"
     exit 1
 fi
 
@@ -77,8 +107,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TXN)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, txn"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, txn, tiger"
     exit 1
 fi
 
@@ -92,6 +122,17 @@ fi
 if [[ "$BACKEND" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
     echo "Error: PostgreSQL Save Point only works with spine shape"
     exit 1
+fi
+
+# Convert branch_selection to uppercase and validate
+BRANCH_SELECTION_UPPER=$(echo "$BRANCH_SELECTION" | tr '[:lower:]' '[:upper:]')
+if [[ ! "$BRANCH_SELECTION_UPPER" =~ ^(LAST|RANDOM)$ ]]; then
+    echo "Error: Invalid branch selection '$BRANCH_SELECTION'. Must be one of: last, random"
+    exit 1
+fi
+# Map "LAST" to "LAST_CREATED" for proto compatibility
+if [[ "$BRANCH_SELECTION_UPPER" == "LAST" ]]; then
+    BRANCH_SELECTION_UPPER="LAST_CREATED"
 fi
 
 # Check if SQL dump file exists
@@ -123,13 +164,13 @@ fi
 # Other fixed config values
 TABLE_NAME="orders"
 DB_NAME="microbench"
-INSERTS_PER_BRANCH=100
-UPDATES_PER_BRANCH=20
-DELETES_PER_BRANCH=10
-RANGE_SIZE=20
+INSERTS_PER_BRANCH=0
+UPDATES_PER_BRANCH=0
+DELETES_PER_BRANCH=0
+RANGE_SIZE=200
 
 # Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_bench_config.XXXXXX.textproto)
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_bench_config_XXXXXX)
 
 cleanup() {
     rm -f "$TEMP_CONFIG"
@@ -167,14 +208,18 @@ echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPERATIONS[*]}"
 echo "Num Branches: max=$MAX_BRANCHES"
 echo "Branch Shape: $SHAPE"
+echo "Branch Selection: $BRANCH_SELECTION"
 echo "Random Seed: $SEED"
 echo "Measure Storage: $MEASURE_STORAGE"
+if [ -n "$NUM_OPS_OVERRIDE" ]; then
+    echo "Num Ops (override): $NUM_OPS_OVERRIDE"
+fi
 echo "==================================================="
 
-run_branch_sweep "$BACKEND" "$SQL_DUMP_PATH" "$SHAPE" "$SEED" "$MAX_BRANCHES" "$MEASURE_STORAGE" "${OPERATIONS[@]}"
+run_branch_sweep "$BACKEND" "$SQL_DUMP_PATH" "$SHAPE" "$SEED" "$MAX_BRANCHES" "$MEASURE_STORAGE" "$BRANCH_SELECTION_UPPER" "$NUM_OPS_OVERRIDE" "$OUTPUT_DIR" "${OPERATIONS[@]}"
 
 echo ""
 echo "==================================================="
 echo "All benchmarks completed!"
-echo "Results are in /tmp/run_stats/"
+echo "Results are in $OUTPUT_DIR/"
 echo "==================================================="

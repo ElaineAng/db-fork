@@ -15,6 +15,11 @@ SQL_DUMP_PATH=""
 SEED=""
 MAX_BRANCHES=1024
 SHAPE="spine"
+NUM_THREADS=""
+SWEEP_MODE=""  # Can be "threads" or "branches"
+NUM_OPS_OVERRIDE=""
+OPS_STRING=""
+OUTPUT_DIR="/tmp/run_stats"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,6 +33,35 @@ while [[ $# -gt 0 ]]; do
             ;;
         --shape)
             SHAPE="$2"
+            shift 2
+            ;;
+        --threads)
+            NUM_THREADS="$2"
+            shift 2
+            ;;
+        --sweep-threads)
+            SWEEP_MODE="threads"
+            shift
+            ;;
+        --sweep-branches)
+            SWEEP_MODE="branches"
+            shift
+            ;;
+        --branches)
+            # For sweep-threads mode: set fixed branch count
+            MAX_BRANCHES="$2"
+            shift 2
+            ;;
+        --num-ops)
+            NUM_OPS_OVERRIDE="$2"
+            shift 2
+            ;;
+        --operations)
+            OPS_STRING="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
             shift 2
             ;;
         *)
@@ -46,14 +80,33 @@ done
 
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]"
+    echo "Usage: $0 <backend> <sql_dump_path> [options]"
+    echo ""
+    echo "Required arguments:"
     echo "  backend: dolt, neon, kpg, xata, postgres transaction (txn)"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
-    echo "  --seed: (optional) Random seed for reproducibility. If not provided, a random one is generated."
-    echo "  --max-branches: (optional) Maximum number of branches to test (default: 1024)"
-    echo "  --shape: (optional) Branch tree shape: spine, bushy, or fan_out (default: spine)"
     echo ""
-    echo "Note: Number of threads always matches number of branches."
+    echo "Options:"
+    echo "  --seed <seed>: Random seed for reproducibility (default: random)"
+    echo "  --max-branches <max>: Maximum number of branches (default: 1024)"
+    echo "  --shape <shape>: Branch tree shape: spine, bushy, or fan_out (default: spine)"
+    echo "  --threads <num>: Custom thread count (decouples threads from branches)"
+    echo "  --branches <num>: Fixed branch count (for use with --sweep-threads)"
+    echo "  --sweep-threads: Sweep thread counts with fixed branches"
+    echo "  --sweep-branches: Sweep branch counts with fixed threads"
+    echo "  --num-ops <n>: Number of operations to perform (overrides defaults)"
+    echo "  --operations <ops>: Comma-separated list (e.g., READ,UPDATE; default: all)"
+    echo "  --output-dir <dir>: Output directory for results (default: /tmp/run_stats)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 dolt db.sql                           # Default: threads = branches"
+    echo "  $0 dolt db.sql --threads 8               # 8 threads distributed across branches"
+    echo "  $0 dolt db.sql --sweep-threads           # Sweep threads 1,2,4,8,16,32 on 1 branch"
+    echo "  $0 dolt db.sql --sweep-threads --branches 16  # Sweep threads on 16 branches"
+    echo "  $0 dolt db.sql --sweep-branches --threads 4    # Sweep branches with 4 threads"
+    echo "  $0 dolt db.sql --num-ops 1               # Just 1 operation per test (fast)"
+    echo "  $0 dolt db.sql --sweep-branches --threads 4 --operations READ  # Only READ ops"
+    echo "  $0 dolt db.sql --operations READ,UPDATE  # Only READ and UPDATE (all branch counts)"
     exit 1
 fi
 
@@ -89,12 +142,37 @@ if [ -z "$SEED" ]; then
     SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 fi
 
-# Configuration parameters
-#NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
-NUM_BRANCHES_LIST=(16 32 64 128)
-# NUM_BRANCHES_LIST=(16)
+# Configuration parameters based on sweep mode
+if [ "$SWEEP_MODE" = "threads" ]; then
+    # Sweep threads with fixed branches
+    # Use --branches value if set, otherwise default to 1
+    if [ -n "$MAX_BRANCHES" ] && [ "$MAX_BRANCHES" -ne 1024 ]; then
+        NUM_BRANCHES_LIST=($MAX_BRANCHES)
+    else
+        NUM_BRANCHES_LIST=(1)
+    fi
+    NUM_THREADS_LIST=(1 2 4 8 16 32)
+elif [ "$SWEEP_MODE" = "branches" ]; then
+    # Sweep branches with fixed threads
+    NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128)
+    if [ -z "$NUM_THREADS" ]; then
+        # Default: use 4 threads if sweeping branches
+        NUM_THREADS_LIST=(4)
+    else
+        NUM_THREADS_LIST=($NUM_THREADS)
+    fi
+else
+    # Default: num_threads = num_branches (original behavior)
+    NUM_BRANCHES_LIST=(16 32 64 128)
+    NUM_THREADS_LIST=()  # Will match num_branches in loop
+fi
+
 OPERATIONS=(BRANCH CONNECT READ UPDATE RANGE_READ RANGE_UPDATE)
-# OPERATIONS=(BRANCH)
+
+# Override OPERATIONS if --operations was provided
+if [ -n "$OPS_STRING" ]; then
+    IFS=',' read -ra OPERATIONS <<< "$OPS_STRING"
+fi
 
 # Other fixed config values
 TABLE_NAME="orders"
@@ -105,7 +183,7 @@ DELETES_PER_BRANCH=10
 RANGE_SIZE=20
 
 # Create temporary config file
-TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_multithread_bench_config.XXXXXX.textproto)
+TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_multithread_bench_config_XXXXXX)
 
 cleanup() {
     rm -f "$TEMP_CONFIG"
@@ -140,9 +218,18 @@ echo "Multi-Thread Benchmark Script"
 echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH (prefix: $SQL_PREFIX)"
 echo "Operations: ${OPERATIONS[*]}"
-echo "Num Branches/Threads: ${NUM_BRANCHES_LIST[*]} (max: $MAX_BRANCHES)"
+if [ -n "$SWEEP_MODE" ]; then
+    echo "Sweep Mode: $SWEEP_MODE"
+    echo "Num Branches: ${NUM_BRANCHES_LIST[*]}"
+    echo "Num Threads: ${NUM_THREADS_LIST[*]}"
+else
+    echo "Num Branches/Threads: ${NUM_BRANCHES_LIST[*]} (max: $MAX_BRANCHES)"
+fi
 echo "Branch Shape: $SHAPE_UPPER"
 echo "Random Seed: $SEED"
+if [ -n "$NUM_OPS_OVERRIDE" ]; then
+    echo "Num Ops (override): $NUM_OPS_OVERRIDE"
+fi
 echo "==================================================="
 
 # Loop through all combinations
@@ -152,12 +239,26 @@ for NUM_BRANCHES in "${NUM_BRANCHES_LIST[@]}"; do
         echo "Skipping num_branches=$NUM_BRANCHES (exceeds max_branches=$MAX_BRANCHES)"
         continue
     fi
-    
-    # Number of threads matches number of branches
-    NUM_THREADS=$NUM_BRANCHES
+
+    # Determine thread count(s) for this branch count
+    if [ ${#NUM_THREADS_LIST[@]} -gt 0 ]; then
+        # Use specified thread list
+        THREADS_FOR_THIS_RUN=("${NUM_THREADS_LIST[@]}")
+    else
+        # Default: num_threads = num_branches
+        THREADS_FOR_THIS_RUN=($NUM_BRANCHES)
+    fi
+
+    # Loop through thread counts
+    for NUM_THREADS in "${THREADS_FOR_THIS_RUN[@]}"; do
     
     for OPERATION in "${OPERATIONS[@]}"; do
-        NUM_OPS=$(get_num_ops "$OPERATION")
+        # Use override if provided, otherwise use default
+        if [ -n "$NUM_OPS_OVERRIDE" ]; then
+            NUM_OPS="$NUM_OPS_OVERRIDE"
+        else
+            NUM_OPS=$(get_num_ops "$OPERATION")
+        fi
         SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
         RUN_ID="${BACKEND}_${SQL_PREFIX}_multitrd_${NUM_BRANCHES}_${SHAPE_LOWER}"
         
@@ -218,17 +319,18 @@ EOF
         
         # Run the benchmark
         echo "Starting benchmark..."
-        python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress
+        python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
         
         # Clean up dropped databases to prevent disk space explosion
         rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/*
-        
+
         echo "Completed: $RUN_ID"
-    done
-done
+    done  # OPERATION loop
+    done  # NUM_THREADS loop
+done  # NUM_BRANCHES loop
 
 echo ""
 echo "==================================================="
 echo "All benchmarks completed!"
-echo "Results are in /tmp/run_stats/"
+echo "Results are in $OUTPUT_DIR/"
 echo "==================================================="

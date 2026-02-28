@@ -100,7 +100,7 @@ fi
 
 # Build a temporary config by patching the base config
 # Use PID in the temp file name to avoid conflicts with concurrent runs
-TMP_CONFIG=$(mktemp /tmp/macrobench_$$_XXXXXX.textproto)
+TMP_CONFIG=$(mktemp /tmp/macrobench_$$_XXXXXX)
 trap 'rm -f "$TMP_CONFIG"' EXIT
 
 sed \

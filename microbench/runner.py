@@ -1,6 +1,8 @@
 from tqdm import tqdm
 from util.import_db import load_sql_file
 import argparse
+import json
+import os
 import random
 import sys
 import time
@@ -91,7 +93,7 @@ class BackendInfo:
     setup_branches: list = None  # Branches created during Nth-op setup
 
 
-def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
+def create_backend_project(config: tp.TaskConfig, output_dir: str = "/tmp/run_stats") -> BackendInfo:
     """Create backend-specific project and return connection info.
 
     This is a standalone function that can be called before creating any
@@ -100,6 +102,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
 
     Args:
         config: Task configuration containing backend type and database setup.
+        output_dir: Directory to write parquet output files (default: /tmp/run_stats).
 
     Returns:
         BackendInfo containing connection URI, branch info, and project IDs.
@@ -235,7 +238,7 @@ def create_backend_project(config: tp.TaskConfig) -> BackendInfo:
 
     # Perform Nth operation setup if configured (create branches + insert data).
     if config.HasField("nth_op_benchmark"):
-        setup_branches = perform_nth_op_setup(config, info)
+        setup_branches = perform_nth_op_setup(config, info, output_dir)
         info.setup_branches = setup_branches
 
     return info
@@ -374,7 +377,7 @@ def cleanup_backend(
         XataToolSuite.delete_project(backend_info.xata_project_id)
 
 
-def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
+def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo, output_dir: str = "/tmp/run_stats"):
     """Create branches and perform setup operations for Nth operation benchmark.
 
     This function is called during the setup phase (before measurement) to
@@ -385,6 +388,7 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
     Args:
         config: Task configuration containing nth_op_benchmark settings.
         backend_info: Backend info from create_backend_project().
+        output_dir: Directory to write parquet output files (default: /tmp/run_stats).
     """
     setup = config.nth_op_benchmark.setup
     num_branches = setup.num_branches
@@ -404,6 +408,7 @@ def perform_nth_op_setup(config: tp.TaskConfig, backend_info: BackendInfo):
     # Branch creation is timed and saved to a separate _setup.parquet file.
     setup_result_collector = rc.ResultCollector(
         run_id=f"{config.run_id}_setup",
+        output_dir=output_dir,
     )
     setup_branch_manager = SharedBranchManager()
 
@@ -1409,6 +1414,25 @@ class BenchmarkSuite:
             seed=seed,
         )
 
+        # Handle branch selection strategy.
+        # By default, we're already connected to the last created branch from setup.
+        # If RANDOM is specified, switch to a random branch.
+        branch_selection = self._config.nth_op_benchmark.branch_selection
+        if branch_selection == tp.BranchSelectionStrategy.RANDOM:
+            random_branch = self._get_random_branch(rnd)
+            if random_branch:
+                if self._thread_id == 0:
+                    print(f"Branch selection: RANDOM - connecting to '{random_branch}'")
+                self.db_tools.connect_branch(random_branch, timed=False)
+                # Clear existing pks cache since we switched branches
+                self._existing_pks = []
+            else:
+                if self._thread_id == 0:
+                    print("Warning: No branches available for RANDOM selection, using current branch")
+        elif self._thread_id == 0:
+            cur_branch, _ = self.db_tools.get_current_branch()
+            print(f"Branch selection: LAST_CREATED - using '{cur_branch}'")
+
         # Execute timed operation(s).
         op = self._config.nth_op_benchmark.operation
         num_ops = self._config.nth_op_benchmark.num_ops or 1
@@ -1579,6 +1603,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable progress bar (useful for running in background/tmux).",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="/tmp/run_stats",
+        help="Directory to write parquet output files (default: /tmp/run_stats).",
+    )
     args = parser.parse_args()
 
     # Load and parse the textproto config file
@@ -1592,6 +1622,7 @@ if __name__ == "__main__":
         print(f"Backend: {tp.Backend.Name(config.backend)}")
         print(f"Benchmark mode: {config.WhichOneof('benchmark_mode')}")
         print(f"Table name: {config.table_name}")
+        print(f"Output directory: {args.output_dir}")
 
     except FileNotFoundError:
         print(f"Error: Config file not found: {args.config}")
@@ -1621,12 +1652,15 @@ if __name__ == "__main__":
         print(f"Running {num_iterations} iterations for averaging")
 
     # Shared result collector across all runs (appends to same parquet)
-    shared_result_collector = rc.ResultCollector(run_id=config.run_id)
+    shared_result_collector = rc.ResultCollector(run_id=config.run_id, output_dir=args.output_dir)
 
     # Generate a fixed seed once to use across all iterations for reproducibility.
     # If args.seed is provided, use it; otherwise generate one from time.
     fixed_seed = args.seed if args.seed is not None else int(time.time())
     print(f"Using fixed seed across all iterations: {fixed_seed}")
+
+    # Track throughput metrics per iteration for summary JSON
+    iteration_metrics = []
 
     for run_idx in range(num_iterations):
         if num_iterations > 1:
@@ -1635,7 +1669,7 @@ if __name__ == "__main__":
             print(f"{'=' * 60}")
 
         # Setup backend project, database, and schema for this run.
-        backend_info = create_backend_project(config)
+        backend_info = create_backend_project(config, args.output_dir)
 
         # Get branches created during setup (if nth_op_benchmark mode).
         setup_branches = backend_info.setup_branches or []
@@ -1661,22 +1695,23 @@ if __name__ == "__main__":
             disable=args.no_progress,
         )
 
-        # Partition setup branches among threads
-        # Each thread gets exclusive branches to work with
+        # Partition setup branches among threads using round-robin distribution.
+        # This allows threads < branches (e.g., 4 threads on 16 branches)
+        # and threads > branches (e.g., 16 threads on 4 branches).
         thread_branch_assignments = {}
         if setup_branches and num_threads > 1:
-            # Distribute branches evenly among threads
-            branches_per_thread = len(setup_branches) // num_threads
+            # Round-robin: thread i gets branches [i, i+num_threads, i+2*num_threads, ...]
             for tid in range(num_threads):
-                start_idx = tid * branches_per_thread
-                end_idx = start_idx + branches_per_thread
-                # Last thread gets any remainder
-                if tid == num_threads - 1:
-                    end_idx = len(setup_branches)
-                thread_branch_assignments[tid] = setup_branches[
-                    start_idx:end_idx
+                thread_branch_assignments[tid] = [
+                    setup_branches[idx]
+                    for idx in range(tid, len(setup_branches), num_threads)
                 ]
-            print(f"{branches_per_thread}+ branches assigned per thread")
+
+            # Print distribution summary
+            branches_per_thread = [len(thread_branch_assignments[tid]) for tid in range(num_threads)]
+            min_branches = min(branches_per_thread) if branches_per_thread else 0
+            max_branches = max(branches_per_thread) if branches_per_thread else 0
+            print(f"Branch distribution: {min_branches}-{max_branches} branches per thread (round-robin)")
 
         def worker_benchmark(
             thread_id: int, backend_info: BackendInfo, assigned_branches: list
@@ -1704,6 +1739,9 @@ if __name__ == "__main__":
                 worker_bench.run_benchmark()
 
         try:
+            # Track start time for throughput calculation
+            benchmark_start_time = time.time()
+
             # Spawn worker threads.
             with ThreadPoolExecutor(max_workers=num_threads) as executor:
                 futures = [
@@ -1722,6 +1760,27 @@ if __name__ == "__main__":
                     except Exception as e:
                         print(f"Worker thread failed: {e}")
 
+            # Calculate and print throughput
+            benchmark_end_time = time.time()
+            elapsed_time = benchmark_end_time - benchmark_start_time
+            throughput = total_ops / elapsed_time if elapsed_time > 0 else 0
+
+            print(f"\n{'=' * 60}")
+            print(f"Benchmark completed:")
+            print(f"  Total operations: {total_ops}")
+            print(f"  Total time: {elapsed_time:.2f}s")
+            print(f"  Throughput: {throughput:.2f} ops/sec")
+            print(f"{'=' * 60}")
+
+            # Capture metrics for this iteration
+            iteration_metrics.append({
+                "iteration": run_idx + 1,
+                "total_ops": total_ops,
+                "elapsed_time": elapsed_time,
+                "throughput": throughput,
+                "num_threads": num_threads,
+            })
+
             # Close shared progress bar
             shared_progress.close()
 
@@ -1734,3 +1793,37 @@ if __name__ == "__main__":
 
     # Write all collected results to parquet (appends across runs).
     shared_result_collector.write_to_parquet()
+
+    # Write summary JSON with throughput metrics
+    summary = {
+        "run_id": config.run_id,
+        "backend": tp.Backend.Name(config.backend),
+        "benchmark_mode": benchmark_mode,
+        "num_threads": num_threads,
+        "num_iterations": num_iterations,
+        "seed": fixed_seed,
+    }
+
+    # Add benchmark-specific info
+    if benchmark_mode == "nth_op_benchmark":
+        summary["operation"] = tp.OperationType.Name(config.nth_op_benchmark.operation)
+        summary["num_ops"] = config.nth_op_benchmark.num_ops
+        if backend_info.setup_branches:
+            summary["branch_count"] = len(backend_info.setup_branches)
+    elif benchmark_mode == "randomized_benchmark":
+        summary["num_ops"] = config.randomized_benchmark.num_ops
+        summary["operations"] = [
+            tp.OperationType.Name(op) for op in config.randomized_benchmark.operations
+        ]
+
+    # Add iteration metrics and compute average throughput
+    summary["iterations"] = iteration_metrics
+    if iteration_metrics:
+        avg_throughput = sum(m["throughput"] for m in iteration_metrics) / len(iteration_metrics)
+        summary["average_throughput"] = avg_throughput
+
+    # Write to file
+    summary_path = os.path.join(args.output_dir, f"{config.run_id}_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary written to {summary_path}")

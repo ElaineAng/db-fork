@@ -130,9 +130,18 @@ def load_all_interference(indir):
 def load_all_storage(indir):
     """Load all *_e2e_stats.json files, return {workflow_name: dict}.
 
-    If ``storage_delta_bytes`` is absent, estimate it from
-    ``neon_after_total_bytes - 104325120`` (the approximate size of the
-    seed database before the workflow).
+    For Neon backends (new format):
+      - Uses ``neon_root_branch_bytes_month`` + ``neon_child_branch_bytes_month``
+        as the total storage (no "before" measurement, so this is the delta)
+
+    For Neon backends (legacy format with before/after):
+      - Prefers ``neon_delta_bytes`` if available
+
+    For Dolt backends:
+      - Uses ``storage_delta_bytes`` directly
+
+    The canonical storage delta is stored in ``storage_delta_bytes`` for
+    consistent access across both backends.
     """
     SEED_SIZE_BYTES = 104325120
     storage = {}
@@ -142,12 +151,24 @@ def load_all_storage(indir):
         if matches:
             with open(matches[0]) as f:
                 data = json.load(f)
-            if "storage_delta_bytes" not in data:
+
+            # For Neon: compute storage delta from available metrics
+            if "neon_root_branch_bytes_month" in data:
+                # New format: use current storage as delta (no before measurement)
+                root = data.get("neon_root_branch_bytes_month", 0)
+                child = data.get("neon_child_branch_bytes_month", 0)
+                data["storage_delta_bytes"] = root + child
+            elif "neon_delta_bytes" in data:
+                # Legacy format with before/after: use computed delta
+                data["storage_delta_bytes"] = data["neon_delta_bytes"]
+            elif "storage_delta_bytes" not in data:
+                # Fallback: estimate from neon_after_total_bytes (old old format)
                 after = data.get("neon_after_total_bytes", 0)
                 if after > 0:
                     data["storage_delta_bytes"] = after - SEED_SIZE_BYTES
                 else:
                     data["storage_delta_bytes"] = 0
+
             storage[wf] = data
             if len(matches) > 1:
                 print(
@@ -181,14 +202,15 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
     axes = np.atleast_2d(axes)
     axes_flat = axes.flatten()
 
-    # Canonical display order: branch ops first, then data ops, then overhead
-    OP_ORDER = [1, 2, 8, 3, 4, 5, 7, 6, 9]
+    # Canonical display order: branch ops first, then data ops
+    # Note: API_RETRY_WAIT (9) is excluded from all plots
+    OP_ORDER = [1, 2, 8, 3, 4, 5, 7, 6]
 
     # Category grouping for bracket labels
     cat_groups = [
         ("Branch Ops", BRANCH_OPS),
         ("Data Ops", DATA_OPS | {6}),  # include commit with data
-        ("Overhead", OVERHEAD_OPS),
+        # Overhead (API Retry) excluded from all plots
     ]
 
     for idx, wf in enumerate(common_wfs):
@@ -197,8 +219,10 @@ def plot_latency_boxplots(dolt_wfs, neon_wfs, outdir):
         df_n = neon_wfs[wf]
 
         # Ops present in either backend, sorted by canonical order
+        # Exclude UNSPECIFIED (0) and API_RETRY_WAIT (9)
         present = set(df_d.op_type.unique()) | set(df_n.op_type.unique())
         present.discard(0)
+        present.discard(9)
         all_ops = [op for op in OP_ORDER if op in present]
 
         positions_d = []
@@ -377,7 +401,7 @@ def plot_time_breakdown(dolt_wfs, neon_wfs, outdir):
         ("Insert", {4}, "#52B788"),
         ("Update", {5}, "#95D5B2"),
         ("DDL", {7}, "#D8F3DC"),
-        ("API Retry", OVERHEAD_OPS, "#B0B0B0"),
+        # API Retry excluded from all plots
     ]
 
     n = len(common_wfs)
@@ -513,7 +537,8 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     for wf in common_wfs:
         all_ops |= set(dolt_wfs[wf].op_type.unique())
         all_ops |= set(neon_wfs[wf].op_type.unique())
-    all_ops = sorted(op for op in all_ops if op != 0)
+    # Exclude UNSPECIFIED (0) and API_RETRY_WAIT (9)
+    all_ops = sorted(op for op in all_ops if op not in [0, 9])
 
     n_wf = len(common_wfs)
     n_op = len(all_ops)
@@ -849,7 +874,7 @@ def plot_storage_comparison(
             DATA_OPS | {6},
             "#2D8B57",
         ),  # Read/Insert/Update/DDL/Commit
-        ("API Retry", OVERHEAD_OPS, "#B0B0B0"),
+        # API Retry excluded from all plots
     ]
 
     n = len(common_wfs)
@@ -1109,6 +1134,170 @@ def plot_storage_comparison(
     plt.close(fig)
 
 
+# ── Plot 7: Steps completion over time ──────────────────────────────
+
+
+def plot_steps_over_time(dolt_wfs, neon_wfs, outdir, dolt_stor=None, neon_stor=None):
+    """Line plot showing total completed steps over time for each workflow,
+    Dolt vs Neon overlaid.
+
+    A step is considered "completed" when the last operation for that
+    (thread_id, step_id) pair finishes. Time is reconstructed by cumulative
+    sum of operation latencies.
+
+    Args:
+        dolt_wfs: Dict of workflow DataFrames for Dolt
+        neon_wfs: Dict of workflow DataFrames for Neon
+        outdir: Output directory for figures
+        dolt_stor: Dict of e2e_stats for Dolt (optional)
+        neon_stor: Dict of e2e_stats for Neon (optional)
+    """
+    # Include workflows that have step_id in at least one backend
+    included_wfs = []
+    for wf in WORKFLOW_ORDER:
+        dolt_has = wf in dolt_wfs and "step_id" in dolt_wfs[wf].columns
+        neon_has = wf in neon_wfs and "step_id" in neon_wfs[wf].columns
+        if dolt_has or neon_has:
+            included_wfs.append(wf)
+            if dolt_has and not neon_has:
+                print(f"  Note: {wf} only in Dolt")
+            elif neon_has and not dolt_has:
+                print(f"  Note: {wf} only in Neon")
+
+    if not included_wfs:
+        print("  No workflows with step_id found, skipping steps over time plot.")
+        return
+
+    ncols = 2
+    nrows = (len(included_wfs) + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(9 * ncols, 5 * nrows),
+        squeeze=False,
+    )
+    axes_flat = axes.flatten()
+
+    for idx, wf in enumerate(included_wfs):
+        ax = axes_flat[idx]
+
+        # Get total expected steps from e2e_stats (same for both backends)
+        total_steps = None
+        if dolt_stor and wf in dolt_stor:
+            total_steps = _total_steps(dolt_stor[wf])
+        elif neon_stor and wf in neon_stor:
+            total_steps = _total_steps(neon_stor[wf])
+
+        for backend_label, wfs, color, linestyle in [
+            ("Dolt", dolt_wfs, BACKEND_COLORS["Dolt"], "-"),
+            ("Neon", neon_wfs, BACKEND_COLORS["Neon"], "--"),
+        ]:
+            # Skip if workflow doesn't exist in this backend
+            if wf not in wfs:
+                continue
+
+            df = wfs[wf]
+
+            # Skip if workflow doesn't have step_id column
+            if "step_id" not in df.columns:
+                continue
+
+            # Only include operations that are part of a step (step_id >= 0)
+            df_steps = df[df["step_id"] >= 0].copy()
+
+            if len(df_steps) == 0:
+                print(f"  Warning: {backend_label} {wf} has no operations with step_id >= 0")
+                continue
+
+            # Sort by iteration_number to get chronological order
+            df_steps = df_steps.sort_values("iteration_number").copy()
+
+            # Find the last operation for each (thread_id, step_id) pair
+            # Group by (thread_id, step_id) and get the index of the last row
+            last_ops = (
+                df_steps.groupby(["thread_id", "step_id"])
+                .tail(1)
+                .sort_values("iteration_number")
+            )
+
+            # Compute cumulative time for step operations only
+            df_steps["cumulative_time"] = df_steps["latency"].cumsum()
+
+            # Extract step completion times
+            completion_times = []
+            for _, row in last_ops.iterrows():
+                # Get cumulative time at this operation
+                cumul_time = df_steps.loc[df_steps["iteration_number"] == row["iteration_number"], "cumulative_time"].values[0]
+                completion_times.append(cumul_time)
+
+            completion_times = sorted(completion_times)
+
+            # Debug output
+            num_steps = len(completion_times)
+            if num_steps > 0:
+                print(f"  {wf} ({backend_label}): {num_steps} steps, max time = {max(completion_times):.2f}s")
+            else:
+                print(f"  Warning: {wf} ({backend_label}) has 0 completed steps")
+
+            # Build step function: (time, count)
+            times = [0] + completion_times
+            counts = list(range(len(completion_times) + 1))
+
+            ax.plot(
+                times,
+                counts,
+                color=color,
+                linestyle=linestyle,
+                linewidth=2.5,
+                label=backend_label,
+                drawstyle="steps-post",
+            )
+
+            # Add text label at end of line showing "completed/total steps"
+            if len(times) > 1 and total_steps is not None:
+                final_time = times[-1]
+                final_steps = counts[-1]
+                label_text = f"{final_steps}/{total_steps}"
+                ax.text(
+                    final_time,
+                    final_steps,
+                    label_text,
+                    fontsize=9,
+                    color=color,
+                    fontweight="bold",
+                    ha="left",
+                    va="center",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor=color, alpha=0.8)
+                )
+
+        ax.set_xlabel("Time Elapsed (s)", fontsize=10)
+        ax.set_ylabel("Total Completed Steps", fontsize=10)
+        ax.set_title(
+            WORKFLOW_LABELS.get(wf, wf), fontsize=12, fontweight="bold"
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10, framealpha=0.9)
+
+        # Set integer ticks on y-axis
+        ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+    # Hide unused subplots
+    for idx in range(len(included_wfs), len(axes_flat)):
+        axes_flat[idx].axis("off")
+
+    fig.suptitle(
+        "Step Completion Progress Over Time: Dolt vs Neon",
+        fontsize=14,
+        fontweight="bold",
+        y=1.01,
+    )
+    fig.tight_layout()
+    path = os.path.join(outdir, "steps_over_time.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"  Saved {path}")
+    plt.close(fig)
+
+
 # ── Summary table ────────────────────────────────────────────────────
 
 
@@ -1125,7 +1314,8 @@ def print_summary(dolt_wfs, neon_wfs):
     for wf in common_wfs:
         all_ops |= set(dolt_wfs[wf].op_type.unique())
         all_ops |= set(neon_wfs[wf].op_type.unique())
-    all_ops = sorted(op for op in all_ops if op != 0)
+    # Exclude UNSPECIFIED (0) and API_RETRY_WAIT (9)
+    all_ops = sorted(op for op in all_ops if op not in [0, 9])
 
     print("\n" + "=" * 120)
     print("Macrobenchmark Backend Comparison: Dolt vs Neon")
@@ -1272,6 +1462,9 @@ def main():
     plot_storage_comparison(
         dolt_stor, neon_stor, args.outdir, dolt_wfs=dolt_wfs, neon_wfs=neon_wfs
     )
+
+    print("\nPlot 6: Steps completion over time")
+    plot_steps_over_time(dolt_wfs, neon_wfs, args.outdir, dolt_stor, neon_stor)
 
     print_summary(dolt_wfs, neon_wfs)
 
