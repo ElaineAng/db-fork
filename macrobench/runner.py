@@ -664,16 +664,18 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
 
     Args:
         project_id: Neon project ID.
-        label: Human-readable label for log messages (e.g. "before", "after").
+        label: Human-readable label for log messages (e.g. "after").
         wait_min: Minutes to sleep before the first API call.
         max_retries: Number of 60s retry attempts if the API returns nothing.
 
     Returns:
-        Dict with consumption metrics, or None if all retries exhausted.
+        Dict with ``all_metrics`` (list of all consumption entries),
+        ``count`` (number of entries), and ``summary`` (most recent metrics),
+        or None if all retries exhausted.
     """
     print(
         f"Waiting {wait_min} min for Neon consumption metrics "
-        f"to reflect {label} state...",
+        f"({label})...",
         flush=True,
     )
     for elapsed_min in range(wait_min):
@@ -686,11 +688,10 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
 
     for attempt in range(max_retries):
         result = NeonToolSuite.get_consumption_metrics(project_id)
-        if result:
+        if result and result.get("all_metrics"):
             print(
-                f"  Neon storage {label}: "
-                f"root={result.get('root_branch_bytes_month', 0)}, "
-                f"child={result.get('child_branch_bytes_month', 0)}",
+                f"  Neon metrics {label}: "
+                f"collected {result.get('count', 0)} entries from 2-day window",
                 flush=True,
             )
             return result
@@ -703,7 +704,7 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
             time.sleep(60)
 
     print(
-        f"  WARNING: No Neon consumption metrics for {label} state",
+        f"  WARNING: No Neon consumption metrics for {label}",
         flush=True,
     )
     return None
@@ -897,7 +898,6 @@ def main():
     # Measure total storage before the workflow (single branch, cheap).
     storage_before = 0
     storage_db_tools = None
-    neon_before = None
     if config.measure_storage:
         try:
             storage_db_tools = _create_db_tools(
@@ -908,13 +908,6 @@ def main():
             print(f"Storage before workflow: {storage_before} bytes")
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
-
-    # For Neon with storage measurement: wait for consumption metrics
-    # to reflect the initial state (data just loaded).
-    if config.measure_storage and config.backend == tp.Backend.NEON:
-        neon_before = _fetch_neon_consumption(
-            backend_info.neon_project_id, label="before"
-        )
 
     # --- Background main-branch load (interference monitor) ---
     monitor = None
@@ -1081,31 +1074,16 @@ def main():
             e2e_stats["storage_before_bytes"] = storage_before
             e2e_stats["storage_after_bytes"] = storage_after
             e2e_stats["storage_delta_bytes"] = storage_after - storage_before
-        _NEON_METRICS = [
-            "root_branch_bytes_month",
-            "child_branch_bytes_month",
-            "compute_unit_seconds",
-            "public_network_transfer_bytes",
-            "private_network_transfer_bytes",
-        ]
-        if neon_before:
-            for m in _NEON_METRICS:
-                e2e_stats[f"neon_before_{m}"] = neon_before.get(m, 0)
-            before_storage = (
-                neon_before.get("root_branch_bytes_month", 0)
-                + neon_before.get("child_branch_bytes_month", 0)
-            )
-            e2e_stats["neon_before_total_bytes"] = before_storage
+
+        # Dump all Neon consumption metrics from the 2-day window
         if neon_consumption:
-            for m in _NEON_METRICS:
-                e2e_stats[f"neon_after_{m}"] = neon_consumption.get(m, 0)
-            after_storage = (
-                neon_consumption.get("root_branch_bytes_month", 0)
-                + neon_consumption.get("child_branch_bytes_month", 0)
-            )
-            e2e_stats["neon_after_total_bytes"] = after_storage
-            if neon_before:
-                e2e_stats["neon_delta_bytes"] = after_storage - before_storage
+            e2e_stats["neon_metrics_count"] = neon_consumption.get("count", 0)
+            e2e_stats["neon_all_metrics"] = neon_consumption.get("all_metrics", [])
+
+            # Also include summary metrics from most recent entry for convenience
+            summary = neon_consumption.get("summary", {})
+            for metric_name, value in summary.items():
+                e2e_stats[f"neon_{metric_name}"] = value
         e2e_stats_path = os.path.join(
             args.outdir, f"{config.run_id}_e2e_stats.json"
         )

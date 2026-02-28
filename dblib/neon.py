@@ -366,7 +366,8 @@ class NeonToolSuite(DBToolSuite):
         """Fetch storage consumption metrics for a project from the Neon API.
 
         Uses the ``consumption_history/v2/projects`` endpoint to retrieve
-        ``root_branch_bytes_month`` and ``child_branch_bytes_month``.
+        all available metrics within a 2-day window (current time - 1 day to
+        current time + 1 day).
 
         Args:
             project_id: Neon project ID.
@@ -374,8 +375,9 @@ class NeonToolSuite(DBToolSuite):
                      ``NEON_ORG_ID`` environment variable.
 
         Returns:
-            Dict with ``root_branch_bytes_month`` and
-            ``child_branch_bytes_month``, or ``None`` on failure.
+            Dict with ``metrics`` (list of all consumption entries) and
+            ``summary`` (dict with aggregated metrics from the most recent
+            entry), or ``None`` on failure.
         """
         from datetime import datetime, timezone, timedelta
 
@@ -385,10 +387,9 @@ class NeonToolSuite(DBToolSuite):
             return None
 
         now = datetime.now(timezone.utc)
-        # Use a 24-hour window — newly created projects may not appear
-        # in consumption history until the next hourly aggregation.
-        start = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        end = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Use a 2-day window centered on current time to capture all metrics
+        start = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end = (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         endpoint = (
             f"consumption_history/v2/projects"
@@ -411,7 +412,7 @@ class NeonToolSuite(DBToolSuite):
             print(f"Warning: consumption metrics request failed: {e}")
             return None
 
-        # Walk the response to find the most recent non-empty data point.
+        # Collect ALL metrics from ALL consumption entries in the window.
         try:
             projects = resp.get("projects", [])
             if not projects:
@@ -426,33 +427,66 @@ class NeonToolSuite(DBToolSuite):
                     f"0 periods in response"
                 )
                 return None
+
+            # Collect all consumption entries across all periods
+            all_entries = []
+            for period in periods:
+                period_start = period.get("period_id", "")
+                for entry in period.get("consumption", []):
+                    metrics = entry.get("metrics", [])
+                    if metrics:
+                        # Convert metrics list to dict and add timestamp info
+                        entry_dict = {
+                            "period_id": period_start,
+                            "timestamp": entry.get("timestamp", ""),
+                        }
+                        for m in metrics:
+                            entry_dict[m["metric_name"]] = m["value"]
+                        all_entries.append(entry_dict)
+
             # Summarize what we got
             total_entries = sum(
                 len(p.get("consumption", [])) for p in periods
             )
             print(
                 f"  API returned {len(periods)} period(s), "
-                f"{total_entries} consumption entries"
+                f"{total_entries} consumption entries, "
+                f"{len(all_entries)} with metrics"
             )
-            for period in reversed(periods):
-                for entry in reversed(period.get("consumption", [])):
-                    metrics = entry.get("metrics", [])
-                    if metrics:
-                        result = {}
-                        for m in metrics:
-                            result[m["metric_name"]] = m["value"]
-                        return result
-            # If we reach here, all entries had empty metrics
-            print("Warning: all consumption entries have empty metrics")
-            # Log the last entry for debugging
-            last_period = periods[-1]
-            last_consumption = last_period.get("consumption", [])
-            if last_consumption:
-                print(f"  Last entry: {last_consumption[-1]}")
-            else:
-                print(f"  Last period has no consumption entries")
-                print(f"  Period keys: {list(last_period.keys())}")
-            return None
+
+            if not all_entries:
+                print("Warning: all consumption entries have empty metrics")
+                # Log the last entry for debugging
+                last_period = periods[-1]
+                last_consumption = last_period.get("consumption", [])
+                if last_consumption:
+                    print(f"  Last entry: {last_consumption[-1]}")
+                else:
+                    print("  Last period has no consumption entries")
+                    print(f"  Period keys: {list(last_period.keys())}")
+                return None
+
+            # Return all entries plus a summary from the most recent entry
+            result = {
+                "all_metrics": all_entries,
+                "count": len(all_entries),
+            }
+
+            # Add summary metrics from most recent entry (for backward compat)
+            if all_entries:
+                most_recent = all_entries[-1]
+                result["summary"] = {
+                    k: v for k, v in most_recent.items()
+                    if k not in ["period_id", "timestamp"]
+                }
+                print(
+                    f"  Most recent entry: "
+                    f"root={most_recent.get('root_branch_bytes_month', 0)}, "
+                    f"child={most_recent.get('child_branch_bytes_month', 0)}"
+                )
+
+            return result
+
         except (KeyError, IndexError) as e:
             print(f"Warning: could not parse consumption metrics: {e}")
             return None
