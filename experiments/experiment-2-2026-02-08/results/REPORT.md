@@ -140,45 +140,94 @@ Xata MB-scale values are concentrated near approximately `7.8 MB`, `15.6 MB`, `2
 
 ### 4.2 Point UPDATE vs branch count (Figure 2a)
 
-![Point UPDATE Storage Delta](figures/fig2a_update_storage_delta.png)
+Shaded region = mean ± 1 standard deviation.
 
-Observed from plotted data:
+<table>
+<tr>
+<td><img src="figures/fig2a_dolt.png" width="400"/></td>
+<td><img src="figures/fig2a_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig2a_neon.png" width="400"/></td>
+<td><img src="figures/fig2a_xata.png" width="400"/></td>
+</tr>
+</table>
+
+Observed:
 - Dolt and file_copy are near-zero across N with sparse non-zero events.
 - Neon has low-magnitude page-sized non-zero values.
 - Xata shows high variance and missing/filtered high-N UPDATE rows (`N=16` UPDATE has no valid rows).
 
 ### 4.3 RANGE_UPDATE (`r=20`) vs branch count (Figure 2b)
 
-![RANGE_UPDATE Storage Delta](figures/fig2b_range_update_storage_delta.png)
+Shaded region = mean ± 1 standard deviation.
 
-Observed from plotted data:
+<table>
+<tr>
+<td><img src="figures/fig2b_dolt.png" width="400"/></td>
+<td><img src="figures/fig2b_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig2b_neon.png" width="400"/></td>
+<td><img src="figures/fig2b_xata.png" width="400"/></td>
+</tr>
+</table>
+
+Observed:
 - Dolt and file_copy remain mostly zero.
 - Neon remains low-magnitude and page-quantized.
 - Xata has sparse but large jumps; at `N=16`, valid rows are bushy-only.
 
 ### 4.4 Per-key delta vs range size (Figure 2c)
 
-![Per-Key Delta vs Range Size](figures/fig2c_per_key_delta_vs_range_size.png)
+<table>
+<tr>
+<td><img src="figures/fig2c_dolt.png" width="400"/></td>
+<td><img src="figures/fig2c_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig2c_neon.png" width="400"/></td>
+<td><img src="figures/fig2c_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed from plotted data:
+Observed:
 - Dolt/file_copy are dominated by zeros with occasional outliers.
 - Neon per-key means decrease as range size grows.
 - Xata per-key means are non-monotonic and high-variance.
 
 ### 4.5 Zero-delta by topology (Figure 2f)
 
-![Zero-Delta by Topology](figures/fig2f_zero_delta_by_topology.png)
+<table>
+<tr>
+<td><img src="figures/fig2f_dolt.png" width="400"/></td>
+<td><img src="figures/fig2f_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig2f_neon.png" width="400"/></td>
+<td><img src="figures/fig2f_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed from plotted data:
+Observed:
 - All backends have high zero-delta rates.
 - Neon has the largest topology spread (~1.4 pp).
 - Xata topology percentages are similar but based on uneven valid-row coverage at higher N.
 
 ### 4.6 Non-zero quantization (Figure 2g)
 
-![Non-Zero Delta Quantization](figures/fig2g_nonzero_delta_quantization.png)
+<table>
+<tr>
+<td><img src="figures/fig2g_dolt.png" width="400"/></td>
+<td><img src="figures/fig2g_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig2g_neon.png" width="400"/></td>
+<td><img src="figures/fig2g_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed from plotted data:
+Observed:
 - Dolt and Neon occupy a few discrete bins.
 - file_copy has a small finite set of 4KB/8KB-aligned values.
 - Xata includes both page-scale and large MB-scale positive/negative jumps.

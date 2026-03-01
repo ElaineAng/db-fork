@@ -164,14 +164,20 @@ At N=1024, file_copy spine is **17x** fan-out and **13x** bushy.
 
 ### 4.2 Per-Branch Delta Trajectory (Figure 1)
 
-![Marginal Storage Delta per Branch](figures/fig1_marginal_storage_by_topology.png)
-*Figure 1: Per-branch storage delta trajectory with one panel per backend
-(Dolt/file_copy at N=1024, Neon at N=8, Xata at N=8 where all three topologies
-are present). Each line is the mean across repetitions at each branch index;
-shaded band = ±1 std.*
+Shaded region = mean ± 1 standard deviation across repetitions.
 
-Figure 1 has one panel per backend. The y-axis is storage delta and the x-axis is branch index. Lines represent spine, bushy, and fan-out where data exists for that panel.
+<table>
+<tr>
+<td><img src="figures/fig1_dolt.png" width="400"/></td>
+<td><img src="figures/fig1_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig1_neon.png" width="400"/></td>
+<td><img src="figures/fig1_xata.png" width="400"/></td>
+</tr>
+</table>
 
+Observed:
 - **Dolt**: all three topologies cluster near zero across the full 1024-branch range. No visible separation between topologies.
 - **file_copy**: bushy and fan-out stay flat near 120–165 KB. Spine diverges upward with large spikes, particularly in the second half of the range.
 - **Neon**: all three lines overlap at ~7.3 MB with negligible separation.
