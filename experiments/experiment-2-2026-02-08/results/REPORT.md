@@ -33,7 +33,7 @@ One repetition for a given backend, N, topology, and operation:
 | Range sizes | Exp 2a: `r=20`; Exp 2b: `r=1,10,50,100` (plus `r=20` from Exp 2a for per-key comparison) |
 | Measurement data | 310 measurement parquets, 8,554 measurement rows |
 
-### Measured row counts (recomputed from parquet)
+### Measured row counts
 
 | Sub-experiment | Dolt | file_copy | Neon | Xata |
 | --- | ---: | ---: | ---: | ---: |
@@ -79,15 +79,7 @@ Why these rows are dropped for delta analysis:
 
 ## 3. Research Questions
 
-### 3.1 RQ-to-Evidence Mapping
-
-| RQ | Primary evidence | Role |
-| --- | --- | --- |
-| **RQ1**: Does per-operation storage overhead grow with branch count? | Exp 2a means vs N + Figure 2a/2b + Table 4.1 | Primary answer |
-| **RQ2**: Is overhead topology-dependent? | Exp 2a zero-delta-by-topology table + Figure 2f | Primary answer |
-| **RQ3**: Is per-key storage overhead constant across range sizes? | Spine per-key table (`r=1,10,20,50,100`) + Figure 2c | Primary answer |
-
-### 3.2 RQ1 — Growth with branch count
+### 3.1 RQ1 — Growth with branch count
 
 **RQ1: Does per-operation storage overhead grow with branch count?**
 
@@ -100,7 +92,7 @@ Why these rows are dropped for delta analysis:
 
 Conclusion: no backend shows a clean monotonic growth curve across available N; Neon shows small low-N increases, and Xata is noisy with sparse high-N valid rows.
 
-### 3.3 RQ2 — Topology dependence
+### 3.2 RQ2 — Topology dependence
 
 **RQ2: Is the growth rate backend-dependent or topology-dependent?**
 
@@ -115,7 +107,8 @@ Evidence metric: Exp 2a zero-delta fraction by topology (Xata filtered).
 
 Conclusion: topology effect is weak for Dolt, file_copy, and Xata in this dataset; Neon shows the largest spread (~1.4 pp), still modest.
 
-Coverage caveat for Xata Exp 2a: after filtering, common topology coverage is effectively strong only up to `N=4`; `N=8` and `N=16` are sparse/partial.
+Coverage caveat for Xata Exp 2a: 
+Because many data points at N=8, N=16 filtered out, N=8 and N=16 data should be treated with sekptism.
 
 ### 3.4 RQ3 — Per-key constancy across range sizes
 
