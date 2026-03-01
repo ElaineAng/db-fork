@@ -13,7 +13,16 @@
 
 ## 1. Experiment Procedure
 
-Each run point is backend × topology × mode × thread-count (`T`) with a 30s benchmark window.
+One run point for a given backend, topology, mode, and thread count (`T`):
+
+1. Create fresh database from scratch.
+2. Run branch setup: create `T` branches using the specified topology rule (`spine`, `bushy`, or `fan_out`), writing TPC-C seed data on each branch.
+3. Start a 30-second benchmark window with `T` concurrent threads.
+4. Each thread executes operations in a loop for the full 30 s:
+   - **Branch mode**: each operation is a `BRANCH_CREATE`.
+   - **CRUD mode**: each operation is one of `READ`, `UPDATE`, `RANGE_READ`, or `RANGE_UPDATE`.
+5. For every operation, record `thread_id`, `op_type`, `latency`, `outcome_success`, `failure_reason`, and disk sizes to one parquet row.
+6. After the window closes, compute throughput (`successful_ops / 30 s`) and failure metrics from the collected rows.
 
 ### Configurations
 
@@ -22,16 +31,9 @@ Each run point is backend × topology × mode × thread-count (`T`) with a 30s b
 | Backends | `dolt`, `file_copy`, `neon`, `xata` |
 | Topologies | `spine`, `bushy`, `fan_out` |
 | Modes | `branch` (branch creation), `crud` (READ/UPDATE/RANGE_READ/RANGE_UPDATE mix) |
-| Threads (Dolt, file_copy) | `1,2,4,8,16,32,64,128,256,512,1024` |
-| Threads (Neon, Xata) | `1,2,4,8,16` |
-| Duration per point | `30s` |
-
-### Data sources used in this report
-
-| Backend scope | Source files |
-| --- | --- |
-| Dolt, file_copy, Neon | `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-3-throughput/results/data/exp3_<backend>_<topology>_<T>t_<mode>_tpcc.parquet` |
-| Xata | `/Users/garfield/PycharmProjects/db-fork/experiments/xata_consolidated/20260226_114337/rq/exp3_rq3a_branch_throughput.parquet`, `/Users/garfield/PycharmProjects/db-fork/experiments/xata_consolidated/20260226_114337/rq/exp3_rq3b_crud_aggregate_goodput.parquet`, `/Users/garfield/PycharmProjects/db-fork/experiments/xata_consolidated/20260226_114337/rq/exp3_rq3c_per_thread_fairness.parquet`, `/Users/garfield/PycharmProjects/db-fork/experiments/xata_consolidated/20260226_114337/rq/exp3_rq3d_failure_composition.parquet` |
+| Threads (Dolt, file_copy) | `1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024` |
+| Threads (Neon, Xata) | `1, 2, 4, 8, 16` |
+| Duration per point | `30 s` |
 
 ## 2. Metrics
 
@@ -69,10 +71,10 @@ failed_ops = attempted_ops - successful_ops
 
 | RQ | Evidence | Answer style |
 | --- | --- | --- |
-| `RQ3a` Branch-create throughput vs threads | Table 3.2 + Table 4.2 | Direct numeric trend |
-| `RQ3b` CRUD aggregate goodput vs threads | Table 3.3 + Table 4.3 + Figure 4.7.2/4.7.3 | Direct numeric trend |
-| `RQ3c` Per-thread fairness at scale | Table 3.4 + Table 4.5 + Figure 4.7.4/4.7.5/4.7.6/4.7.7 | Direct numeric trend |
-| `RQ3d` Failure rate and composition | Table 3.5 + Table 4.6 + Figure 4.7.8 | Direct numeric trend |
+| `RQ3a` Branch-create throughput vs threads | Table 3.2 + Table 4.2 + Figure 4.7.1 | Direct numeric trend |
+| `RQ3b` CRUD aggregate goodput vs threads | Table 3.3 + Table 4.3 + Figure 4.7.2 | Direct numeric trend |
+| `RQ3c` Per-thread fairness at scale | Table 3.4 + Table 4.5 + Figures 4.7.3/4.7.4/4.7.5 | Direct numeric trend |
+| `RQ3d` Failure rate and composition | Table 3.5 + Table 4.6 + Figure 4.7.6 | Direct numeric trend |
 
 ### 3.2 RQ3a — Branch-create throughput vs threads
 
@@ -218,55 +220,97 @@ Coverage notes:
 | `xata` | `branch` | 200 | 0 | 200 | 22 | 178 | 100.00% | `FAILURE_TIMEOUT (200)` |
 | `xata` | `crud` | 24,887 | 24,853 | 34 | 0 | 34 | 0.14% | `FAILURE_TIMEOUT (34)` |
 
-### 4.7 Figures and direct observations
+### 4.7 Figures
 
-#### 4.7.1 Xata branch throughput
+#### 4.7.1 Branch-create throughput (RQ3a)
 
-![Xata branch throughput vs threads](figures/fig3a_xata_branch_throughput_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3a_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3a_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3a_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3a_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: all plotted Xata branch points are at `0.00 ops/s`.
+Observed: Dolt peaks at `T=4` then degrades; file_copy collapses from `T>=2`; Neon and Xata are `0.00 ops/s` across all T.
 
-#### 4.7.2 Non-Xata CRUD aggregate goodput
+#### 4.7.2 CRUD aggregate goodput (RQ3b)
 
-![CRUD aggregate goodput vs threads](figures/fig3b_crud_aggregate_goodput_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3b_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3b_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3b_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3b_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: Dolt and file_copy rise then decline; Neon drops to zero at `T=16`.
+Observed: Dolt and file_copy rise then decline; Neon drops to zero at `T=16`; Xata bushy rises to `122.53 ops/s` at `T=16` while spine/fan_out collapse.
 
-#### 4.7.3 Xata CRUD aggregate goodput
+#### 4.7.3 Mean per-thread goodput (RQ3c)
 
-![Xata CRUD aggregate goodput vs threads](figures/fig3b_xata_crud_aggregate_goodput_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3c_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3c_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3c_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3c_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: bushy rises to `122.53 ops/s` at `T=16`; spine and fan_out are zero at `T=16` in consolidated outputs.
+Observed: per-thread throughput collapses at high T for all backends.
 
-#### 4.7.4 Non-Xata mean per-thread goodput
+#### 4.7.4 Fairness CV (RQ3c)
 
-![Mean per-thread goodput vs threads](figures/fig3c_rq3_mean_per_thread_goodput_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3d_cv_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3d_cv_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3d_cv_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3d_cv_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: high-thread per-thread throughput collapses for all non-Xata backends.
+Observed: CV increases sharply for file_copy at high T; Xata bushy shows moderate CV (`~1.3`) at `T=16`.
 
-#### 4.7.5 Non-Xata fairness CV
+#### 4.7.5 Zero-throughput threads (RQ3c)
 
-![Fairness CV vs threads](figures/fig3d_rq3_fairness_cv_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3d_zero_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3d_zero_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3d_zero_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3d_zero_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: CV increases sharply for file_copy at high T.
+Observed: file_copy reaches `1000+` zero-throughput threads at `T=1024`; Neon has all 16 threads at zero at `T=16`.
 
-#### 4.7.6 Non-Xata zero-throughput threads
+#### 4.7.6 Failure rate (RQ3d)
 
-![Zero-throughput threads vs threads](figures/fig3e_rq3_zero_threads_vs_threads.png)
+<table>
+<tr>
+<td><img src="figures/fig_unified_rq3e_dolt.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3e_file_copy.png" width="400"/></td>
+</tr>
+<tr>
+<td><img src="figures/fig_unified_rq3e_neon.png" width="400"/></td>
+<td><img src="figures/fig_unified_rq3e_xata.png" width="400"/></td>
+</tr>
+</table>
 
-Observed: file_copy reaches `1000+` zero-throughput threads at `T=1024`.
-
-#### 4.7.7 Xata fairness metrics
-
-![Xata fairness metrics vs threads](figures/fig3cde_xata_fairness_vs_threads.png)
-
-Observed: only bushy has measurable fairness at `T=16` because spine/fan_out lack main CRUD parquet at `T=16`.
-
-#### 4.7.8 Xata failure rate
-
-![Xata failure rate vs threads](figures/fig3f_xata_failure_rate_vs_threads.png)
-
-Observed: Xata branch failure rate is 100%; CRUD failure rate remains low.
+Observed: Dolt failures rise steadily with T in both modes; file_copy branch mode is dominated by `BACKEND_STATE_CONFLICT`; Neon branch is 100% failure; Xata branch is 100% failure with low CRUD failure rate.
 
 ## 5. Notable Observations
 
@@ -276,69 +320,3 @@ Observed: Xata branch failure rate is 100%; CRUD failure rate remains low.
 - `fairness_cv` is reported as `0.000` for Neon at `T=16` by current implementation because mean per-thread goodput is zero; interpret this as degenerate/all-zero throughput.
 - These artifacts were collected with the older outcome policy (`threshold_latency_seconds=0.1` in recorded rows), not the newer 10-minute threshold configuration.
 
-## 6. Hypotheses for Analysis
-
-[//]: # ()
-[//]: # (### 6.1 Branch-mode collapse surfaces)
-
-[//]: # ()
-[//]: # (**Observed**:)
-
-[//]: # (- `file_copy` branch-create throughput is `0.00` from `T>=2`.)
-
-[//]: # (- `neon` and `xata` branch-create throughput are `0.00` across measured T.)
-
-[//]: # ()
-[//]: # (**Hypothesis**:)
-
-[//]: # (- These patterns are consistent with branch-creation control-plane contention/limits being the dominant bottleneck under this run configuration.)
-
-[//]: # ()
-[//]: # (### 6.2 CRUD resilience differs from branch creation)
-
-[//]: # ()
-[//]: # (**Observed**:)
-
-[//]: # (- `file_copy` and `xata` can still produce non-trivial CRUD goodput where branch throughput is zero.)
-
-[//]: # (- `xata` bushy reaches `122.53 ops/s` at `T=16`, while xata branch remains `0.00`.)
-
-[//]: # ()
-[//]: # (**Hypothesis**:)
-
-[//]: # (- CRUD data-plane execution is less constrained than branch-management paths in this dataset.)
-
-[//]: # ()
-[//]: # (### 6.3 High-thread fairness collapse)
-
-[//]: # ()
-[//]: # (**Observed**:)
-
-[//]: # (- At max T, file_copy has `1002-1004` zero-throughput threads and CV `~7.1-7.5`.)
-
-[//]: # (- Dolt has non-zero throughput with lower CV &#40;`~1.24-1.35`&#41; and fewer zero threads &#40;`90-155`&#41;.)
-
-[//]: # ()
-[//]: # (**Hypothesis**:)
-
-[//]: # (- Backend scheduling and lock/contention behavior produce very different starvation profiles at extreme concurrency.)
-
-[//]: # ()
-[//]: # (### 6.4 Xata partial-point caveat)
-
-[//]: # ()
-[//]: # (**Observed**:)
-
-[//]: # (- Xata spine/fan_out `T=16` CRUD points are represented via summary/manifest with missing main parquet.)
-
-[//]: # ()
-[//]: # (**Hypothesis**:)
-
-[//]: # (- Any topology comparison at Xata `T=16` is under-constrained and should be treated as provisional until complete main parquet coverage exists.)
-
-## 7. Traceability references
-
-- Non-Xata table computations: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-3-throughput/results/scripts/04_generate_report_tables.py` (with manifest override to avoid stale local xata-only manifest).
-- Xata table computations: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-3-throughput/results/scripts/06_generate_xata_report_assets.py` using consolidated RQ parquet.
-- Raw non-Xata run files: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-3-throughput/results/data`.
-- Consolidated Xata files: `/Users/garfield/PycharmProjects/db-fork/experiments/xata_consolidated/20260226_114337/rq`.
