@@ -154,7 +154,8 @@ Shaded region = mean ± 1 standard deviation.
 </table>
 
 Observed:
-- Dolt and file_copy are near-zero across N with sparse non-zero events.
+- Dolt is near-zero across N with sparse non-zero events.
+- file_copy is exactly zero for UPDATE across all N and topologies (all non-zero file_copy deltas occur in RANGE_UPDATE, not UPDATE).
 - Neon has low-magnitude page-sized non-zero values.
 - Xata shows high variance and missing/filtered high-N UPDATE rows (`N=16` UPDATE has no valid rows).
 
@@ -233,49 +234,9 @@ Observed:
 - Xata includes both page-scale and large MB-scale positive/negative jumps.
 
 ## 5. Notable Observations
-
+- Dolt also quantized non-zero deltas 16kb, 64kb, 1mb
 - Xata filtering is material: **32/1,014** rows dropped due to zero disk metrics from the API.
 - Xata zero-metric rows are treated as missing metric samples (not true zero storage): kept in raw coverage counts, excluded from `storage_delta` math.
-- Xata Exp 2a high-N coverage is partial after filtering (`N=8` and `N=16` are sparse across topologies/ops).
 - Medians of per-key delta are 0 B for all backends/ranges; mean values are driven by sparse non-zero outliers.
 - file_copy Exp 2a non-zero rate is much lower than aggregate Exp 2 (0.13% in Exp 2a vs 0.69% overall) because most file_copy non-zero events appear in Exp 2b range sweeps.
-- Neon and Xata numbers are logical metrics, not direct physical CoW byte attribution.
-
-## 6. Hypotheses for Analysis
-
-### 6.1 Dolt power-of-2 quantization
-
-**Observed**:
-- Exp 2 non-zero deltas are only `{16 KB, 64 KB, 1 MB}` (21 events).
-- Exp 1 showed a broader Dolt set `{4 KB, 16 KB, 64 KB, 1 MB, 16 MB}`.
-
-**Hypothesis**:
-- Exp 2 is consistent with the same quantized allocation behavior seen in Exp 1, but this workload/sampling window did not hit Dolt’s smaller (`4 KB`) or larger (`16 MB`) jumps.
-
-TBD
-
-## 7. Traceability references
-
-### Data and scripts
-
-- **[S1]** Raw data: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-2-2026-02-08/results/data/*.parquet`
-- **[S2]** Numeric analysis script: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-2-2026-02-08/results/scripts/01_analyze.py`
-- **[S3]** Zero-delta/quantization script: `/Users/garfield/PycharmProjects/db-fork/experiments/experiment-2-2026-02-08/results/scripts/04_zero_delta_and_quantization.py`
-
-### Measurement implementation
-
-- **[S5]** Per-op before/after storage wrapper and runner flow:
-  - `/Users/garfield/PycharmProjects/db-fork/dblib/storage.py`
-  - `/Users/garfield/PycharmProjects/db-fork/microbench/runner.py`
-  - `/Users/garfield/PycharmProjects/db-fork/bench_lib.sh`
-- **[S6]** Dolt storage implementation: `/Users/garfield/PycharmProjects/db-fork/dblib/dolt.py`, `/Users/garfield/PycharmProjects/db-fork/dblib/util.py`
-- **[S7]** file_copy storage implementation: `/Users/garfield/PycharmProjects/db-fork/dblib/file_copy.py`, `/Users/garfield/PycharmProjects/db-fork/dblib/util.py`
-- **[S8]** Neon storage implementation: `/Users/garfield/PycharmProjects/db-fork/dblib/neon.py`
-- **[S9]** Xata storage implementation: `/Users/garfield/PycharmProjects/db-fork/dblib/xata.py`
-
-### External docs
-
-- **[S10]** Dolt maintainer guidance on disk sizing: <https://github.com/dolthub/dolt/issues/6624>
-- **[S11]** Neon glossary on logical vs physical branch size: <https://github.com/neondatabase/neon/blob/main/docs/glossary.md>
-- **[S12]** PostgreSQL `file_copy_method`: <https://postgresqlco.nf/doc/en/param/file_copy_method/>
-- **[S13]** Xata branch metrics API: <https://docs.xata.io/reference/post-branch-metrics>
+- Neon and Xata numbers are logical metrics
