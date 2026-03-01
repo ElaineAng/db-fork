@@ -238,6 +238,10 @@ venv.bak/
 
 # Spyder project settings
 .spyderproject
+
+# Consolidated (derived) Xata outputs; keep raw run data only.
+experiments/xata_consolidated/
+experiments/xata_11proc_runs/
 .spyproject
 
 # Rope project settings
