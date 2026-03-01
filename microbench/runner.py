@@ -1730,23 +1730,41 @@ if __name__ == "__main__":
             disable=args.no_progress,
         )
 
-        # Partition setup branches among threads using round-robin distribution.
-        # This allows threads < branches (e.g., 4 threads on 16 branches)
-        # and threads > branches (e.g., 16 threads on 4 branches).
+        # Partition setup branches among threads.
+        # - If threads <= branches: each thread gets one or more branches (round-robin)
+        # - If threads > branches: multiple threads share the same branches (cyclic assignment)
         thread_branch_assignments = {}
         if setup_branches and num_threads > 1:
-            # Round-robin: thread i gets branches [i, i+num_threads, i+2*num_threads, ...]
-            for tid in range(num_threads):
-                thread_branch_assignments[tid] = [
-                    setup_branches[idx]
-                    for idx in range(tid, len(setup_branches), num_threads)
-                ]
+            num_branches = len(setup_branches)
+
+            if num_threads <= num_branches:
+                # Round-robin: thread i gets branches [i, i+num_threads, i+2*num_threads, ...]
+                for tid in range(num_threads):
+                    thread_branch_assignments[tid] = [
+                        setup_branches[idx]
+                        for idx in range(tid, num_branches, num_threads)
+                    ]
+            else:
+                # More threads than branches: assign branches cyclically
+                # Thread i gets branch (i % num_branches)
+                for tid in range(num_threads):
+                    assigned_branch = setup_branches[tid % num_branches]
+                    thread_branch_assignments[tid] = [assigned_branch]
 
             # Print distribution summary
             branches_per_thread = [len(thread_branch_assignments[tid]) for tid in range(num_threads)]
             min_branches = min(branches_per_thread) if branches_per_thread else 0
             max_branches = max(branches_per_thread) if branches_per_thread else 0
-            print(f"Branch distribution: {min_branches}-{max_branches} branches per thread (round-robin)")
+            threads_per_unique_branch = {}
+            for tid, branches in thread_branch_assignments.items():
+                for branch in branches:
+                    threads_per_unique_branch[branch] = threads_per_unique_branch.get(branch, 0) + 1
+
+            if num_threads <= num_branches:
+                print(f"Branch distribution: {min_branches}-{max_branches} branches per thread (round-robin)")
+            else:
+                avg_threads_per_branch = sum(threads_per_unique_branch.values()) / len(threads_per_unique_branch)
+                print(f"Branch distribution: {num_threads} threads on {num_branches} branches (avg {avg_threads_per_branch:.1f} threads/branch)")
 
         def worker_benchmark(
             thread_id: int, backend_info: BackendInfo, assigned_branches: list

@@ -151,7 +151,7 @@ if [ "$SWEEP_MODE" = "threads" ]; then
     else
         NUM_BRANCHES_LIST=(1)
     fi
-    NUM_THREADS_LIST=(1 2 4 8 16 32)
+    NUM_THREADS_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
 elif [ "$SWEEP_MODE" = "branches" ]; then
     # Sweep branches with fixed threads
     NUM_BRANCHES_LIST=(1 2 4 8 16 32 64 128 256 512 1024)
