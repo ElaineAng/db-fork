@@ -24,7 +24,7 @@ setup {
 }
 
 step {
-    schema_changes: 1   # M_s
+    schema_changes: 2   # M_s
     data_mutations: 1   # M_d
     eval_queries: 0     # Q_v (skip reads - storage test)
     prune_prob: 0.0     # gamma (no deletion - storage test)

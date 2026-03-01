@@ -215,13 +215,15 @@ def _run_cross_branch_queries(
     measure_storage: bool = False,
 ):
     """Execute cross-branch compare queries on pre-committed leaf branches."""
-    compare_queries = workflow_ops.compare()
-    if not compare_queries:
-        return
-
     leaves = branch_tree.get_pre_committed_leaves()
     for node in leaves:
         if not node.alive:
+            continue
+        # Get compare queries for this node's thread_id and step_id
+        compare_queries = workflow_ops.compare(
+            step_id=node.step_id, thread_id=node.thread_id
+        )
+        if not compare_queries:
             continue
         try:
             connect_fn = lambda: db_tools.connect_branch(
@@ -503,7 +505,11 @@ def worker_fn(
                 new_branch_id = branch_name
 
             child_node = branch_tree.add_child(
-                parent_node, branch_name, new_branch_id
+                parent_node,
+                branch_name,
+                new_branch_id,
+                thread_id=thread_id,
+                step_id=step_id,
             )
 
             # --- Mutate (DDL: M_s schema changes) ---
@@ -551,7 +557,9 @@ def worker_fn(
                         )
 
             # --- Evaluate (Q_v queries) ---
-            eval_queries = workflow_ops.evaluate()
+            eval_queries = workflow_ops.evaluate(
+                step_id=step_id, thread_id=thread_id
+            )
             for i, query in enumerate(eval_queries):
                 if i >= config.step.eval_queries:
                     break
@@ -565,8 +573,7 @@ def worker_fn(
                         raise _WorkerStopped()
                     if verbose:
                         progress.write(
-                            f"[T{thread_id}] Eval failed at step "
-                            f"{step_id}: {type(e).__name__}"
+                            f"[T{thread_id}] Eval failed at step {step_id}: {e}"
                         )
 
             # --- Mark pre-committed (eligible for cross-branch reads) ---
@@ -674,8 +681,7 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
         or None if all retries exhausted.
     """
     print(
-        f"Waiting {wait_min} min for Neon consumption metrics "
-        f"({label})...",
+        f"Waiting {wait_min} min for Neon consumption metrics ({label})...",
         flush=True,
     )
     for elapsed_min in range(wait_min):
@@ -1078,7 +1084,9 @@ def main():
         # Dump all Neon consumption metrics from the 2-day window
         if neon_consumption:
             e2e_stats["neon_metrics_count"] = neon_consumption.get("count", 0)
-            e2e_stats["neon_all_metrics"] = neon_consumption.get("all_metrics", [])
+            e2e_stats["neon_all_metrics"] = neon_consumption.get(
+                "all_metrics", []
+            )
 
             # Also include summary metrics from most recent entry for convenience
             summary = neon_consumption.get("summary", {})

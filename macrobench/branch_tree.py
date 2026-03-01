@@ -25,6 +25,8 @@ class BranchNode:
     alive: bool = True
     pre_committed: bool = False  # finished DDL/DML/eval, eligible for cross-branch reads
     committed: bool = False      # survived pruning, eligible as parent
+    thread_id: int = 0  # Thread that created this branch
+    step_id: int = 0    # Step when this branch was created
 
 
 class BranchTree:
@@ -127,7 +129,8 @@ class BranchTree:
             return rng.choice(eligible)
 
     def add_child(
-        self, parent: BranchNode, name: str, branch_id: str
+        self, parent: BranchNode, name: str, branch_id: str,
+        thread_id: int = 0, step_id: int = 0
     ) -> BranchNode:
         """Add a new child node under the given parent.
 
@@ -135,6 +138,8 @@ class BranchTree:
             parent: The parent node (must have been returned by assign_parent).
             name: Branch name for the new node.
             branch_id: Backend-specific branch identifier.
+            thread_id: Thread that created this branch.
+            step_id: Step when this branch was created.
 
         Returns:
             The newly created BranchNode.
@@ -145,6 +150,8 @@ class BranchTree:
                 branch_id=branch_id,
                 parent=parent,
                 depth=parent.depth + 1,
+                thread_id=thread_id,
+                step_id=step_id,
             )
             parent.children.append(child)
             self._all_nodes.append(child)

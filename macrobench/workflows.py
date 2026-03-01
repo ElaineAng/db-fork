@@ -75,20 +75,28 @@ class WorkflowOps(ABC):
         """
 
     @abstractmethod
-    def evaluate(self) -> list[str]:
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         """Return per-branch evaluation queries for this step.
+
+        Args:
+            step_id: Step number within this thread.
+            thread_id: Worker thread ID for generating column suffix.
 
         Returns:
             List of SQL SELECT strings.
         """
 
     @abstractmethod
-    def compare(self) -> list[str]:
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         """Return cross-branch comparison queries.
 
         These queries are executed on each committed leaf branch
         individually (the runner connects to each branch in turn)
         during cross-branch query passes.
+
+        Args:
+            step_id: Step number within this thread.
+            thread_id: Worker thread ID for generating column suffix.
 
         Returns:
             List of SQL SELECT strings.  Empty list if C=--- for
@@ -131,29 +139,33 @@ class SoftwareDevOps(WorkflowOps):
         ]
 
     def mutate_dml(self, step_id: int, rng, thread_id: int = 0) -> list[str]:
-        # M_d=1 DML per step: backfill the loyalty_tier column for this branch.
+        # M_d=1 DML per step: backfill the loyalty_tier and credit_lim columns for this branch.
         suffix = f"t{thread_id}_s{step_id}"
         return [
-            f"""UPDATE customer SET loyalty_tier_{suffix} = CASE
-                   WHEN c_ytd_payment > 9000 THEN 'Gold'
-                   WHEN c_ytd_payment > 5000 THEN 'Silver'
-                   ELSE 'Bronze'
-               END;""",
+            f"""UPDATE customer SET
+                   loyalty_tier_{suffix} = CASE
+                       WHEN c_ytd_payment > 9000 THEN 'Gold'
+                       WHEN c_ytd_payment > 5000 THEN 'Silver'
+                       ELSE 'Bronze'
+                   END,
+                   credit_lim_{suffix} = c_credit_lim;""",
         ]
 
-    def evaluate(self) -> list[str]:
-        # Q_v=2: use existing columns that are always present
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
+        # Q_v=2: query the newly added columns with suffix
+        suffix = f"t{thread_id}_s{step_id}"
         return [
-            "SELECT COUNT(*) FROM customer WHERE c_credit = 'BC';",
-            """SELECT c_credit, COUNT(*), AVG(c_ytd_payment)
-               FROM customer GROUP BY c_credit;""",
+            f"SELECT COUNT(*) FROM customer WHERE loyalty_tier_{suffix} IS NULL;",
+            f"""SELECT loyalty_tier_{suffix}, COUNT(*), AVG(credit_lim_{suffix})
+               FROM customer GROUP BY loyalty_tier_{suffix};""",
         ]
 
-    def compare(self) -> list[str]:
-        # C=1 cross-branch query
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
+        # C=1 cross-branch query on newly added columns
+        suffix = f"t{thread_id}_s{step_id}"
         return [
-            """SELECT c_credit, COUNT(*), AVG(c_ytd_payment)
-               FROM customer GROUP BY c_credit;""",
+            f"""SELECT loyalty_tier_{suffix}, COUNT(*), AVG(credit_lim_{suffix})
+               FROM customer GROUP BY loyalty_tier_{suffix};""",
         ]
 
     def estimate_write_bytes_per_step(self, schema_changes, data_mutations):
@@ -243,7 +255,7 @@ class FailureReproOps(WorkflowOps):
 
         return stmts
 
-    def evaluate(self) -> list[str]:
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # Q_v=1: invariant check — order line count mismatch
         # Filtered by item_id to scale query cost with warehouse count
         # (order_line rows with item <= 15000 scales: 1 WH=75K, 5 WH=375K, 20 WH=1.5M)
@@ -259,7 +271,7 @@ class FailureReproOps(WorkflowOps):
                HAVING o.o_ol_cnt <> COUNT(*);""",
         ]
 
-    def compare(self) -> list[str]:
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # C=--- (no cross-branch queries for failure repro)
         return []
 
@@ -303,14 +315,14 @@ class DataCleaningOps(WorkflowOps):
                 "DELETE FROM customer WHERE c_balance IS NULL;",
             ]
 
-    def evaluate(self) -> list[str]:
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # Q_v=1: per-branch correctness check
         return [
             """SELECT COUNT(CASE WHEN c_balance < 0 THEN 1 END) AS invalid
                FROM customer;""",
         ]
 
-    def compare(self) -> list[str]:
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # C=2: cross-branch quality ranking
         return [
             """SELECT COUNT(CASE WHEN c_balance IS NULL THEN 1 END) AS nulls,
@@ -349,7 +361,7 @@ class MctsOps(WorkflowOps):
                 AND s_quantity >= {qty};""",
         ]
 
-    def evaluate(self) -> list[str]:
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # Q_v=1: reward query — total fulfillment cost
         return [
             """SELECT SUM(ol_amount) AS total_cost
@@ -357,7 +369,7 @@ class MctsOps(WorkflowOps):
                JOIN warehouse w ON ol.ol_supply_w_id = w.w_id;""",
         ]
 
-    def compare(self) -> list[str]:
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # C=--- (no cross-branch queries)
         return []
 
@@ -435,7 +447,7 @@ class SimulationOps(WorkflowOps):
 
         return stmts
 
-    def evaluate(self) -> list[str]:
+    def evaluate(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # Q_v=1: per-branch outcome metrics
         # Filtered by item_id to scale query cost with warehouse count
         # (stock rows with item <= 7500 scales: 1 WH=7.5K, 5 WH=37.5K, 20 WH=150K)
@@ -448,7 +460,7 @@ class SimulationOps(WorkflowOps):
                WHERE s.s_i_id <= 7500;""",
         ]
 
-    def compare(self) -> list[str]:
+    def compare(self, step_id: int = 0, thread_id: int = 0) -> list[str]:
         # C=1: cross-branch aggregation (per-branch portion)
         # Different from evaluate: computes distributional metrics
         # (avg cost, p5 cost) rather than raw sums, so cross-branch

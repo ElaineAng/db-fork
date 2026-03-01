@@ -25,7 +25,7 @@ setup {
 }
 
 step {
-    schema_changes: 1   # M_s
+    schema_changes: 2   # M_s
     data_mutations: 1   # M_d
     eval_queries: 2     # Q_v
     prune_prob: 0.1     # gamma
