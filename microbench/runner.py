@@ -1453,24 +1453,10 @@ class BenchmarkSuite:
             seed=seed,
         )
 
-        # Handle branch selection strategy.
-        # By default, we're already connected to the last created branch from setup.
-        # If RANDOM is specified, switch to a random branch.
-        branch_selection = self._config.nth_op_benchmark.branch_selection
-        if branch_selection == tp.BranchSelectionStrategy.RANDOM:
-            random_branch = self._get_random_branch(rnd)
-            if random_branch:
-                if self._thread_id == 0:
-                    print(f"Branch selection: RANDOM - connecting to '{random_branch}'")
-                self.db_tools.connect_branch(random_branch, timed=False)
-                # Clear existing pks cache since we switched branches
-                self._existing_pks = []
-            else:
-                if self._thread_id == 0:
-                    print("Warning: No branches available for RANDOM selection, using current branch")
-        elif self._thread_id == 0:
-            cur_branch, _ = self.db_tools.get_current_branch()
-            print(f"Branch selection: LAST_CREATED - using '{cur_branch}'")
+        # Branch selection behavior:
+        # - Multi-threaded: Each thread already connected to assigned_branches[0] during __enter__
+        # - Single-threaded: Already connected to last created branch from setup
+        # No action needed here.
 
         # Execute timed operation(s).
         op = self._config.nth_op_benchmark.operation
