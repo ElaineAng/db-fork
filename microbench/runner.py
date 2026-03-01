@@ -21,6 +21,7 @@ from microbench.datagen import DynamicDataGenerator
 from util import db_helpers as dbh
 
 from dblib import result_collector as rc
+from dblib import result_pb2 as rslt
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
@@ -1804,11 +1805,25 @@ if __name__ == "__main__":
             elapsed_time = benchmark_end_time - benchmark_start_time
             throughput = total_ops / elapsed_time if elapsed_time > 0 else 0
 
+            # Calculate throughput excluding branch operations
+            # Filter out BRANCH_CREATE (1) and BRANCH_CONNECT (2) operations
+            data_ops = [
+                r for r in shared_result_collector.results
+                if r.op_type not in [rslt.OpType.BRANCH_CREATE, rslt.OpType.BRANCH_CONNECT]
+            ]
+            data_ops_count = len(data_ops)
+            data_ops_time = sum(r.latency for r in data_ops) if data_ops else 0
+            data_throughput = data_ops_count / data_ops_time if data_ops_time > 0 else 0
+
             print(f"\n{'=' * 60}")
             print(f"Benchmark completed:")
             print(f"  Total operations: {total_ops}")
             print(f"  Total time: {elapsed_time:.2f}s")
             print(f"  Throughput: {throughput:.2f} ops/sec")
+            print(f"\n  Data operations only (excluding branch ops):")
+            print(f"    Count: {data_ops_count}")
+            print(f"    Time: {data_ops_time:.2f}s")
+            print(f"    Throughput: {data_throughput:.2f} ops/sec")
             print(f"{'=' * 60}")
 
             # Capture metrics for this iteration
@@ -1818,6 +1833,9 @@ if __name__ == "__main__":
                 "elapsed_time": elapsed_time,
                 "throughput": throughput,
                 "num_threads": num_threads,
+                "data_ops_count": data_ops_count,
+                "data_ops_time": data_ops_time,
+                "data_throughput": data_throughput,
             })
 
             # Close shared progress bar
@@ -1858,8 +1876,13 @@ if __name__ == "__main__":
     # Add iteration metrics and compute average throughput
     summary["iterations"] = iteration_metrics
     if iteration_metrics:
-        avg_throughput = sum(m["throughput"] for m in iteration_metrics) / len(iteration_metrics)
-        summary["average_throughput"] = avg_throughput
+        # Use data_throughput (excluding branch ops) as the primary metric
+        avg_data_throughput = sum(m["data_throughput"] for m in iteration_metrics) / len(iteration_metrics)
+        summary["average_throughput"] = avg_data_throughput
+
+        # Also include wall clock throughput for reference
+        avg_wall_throughput = sum(m["throughput"] for m in iteration_metrics) / len(iteration_metrics)
+        summary["average_wall_clock_throughput"] = avg_wall_throughput
 
     # Write to file - include num_threads and operation type to avoid overwriting
     # Build filename with relevant identifiers

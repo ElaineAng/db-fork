@@ -171,7 +171,7 @@ fi
 
 # Default operation lists
 if [ -z "$OPERATIONS" ]; then
-    OPERATIONS="READ,UPDATE,RANGE_READ,RANGE_UPDATE"
+    OPERATIONS="READ,RANGE_READ"
 fi
 
 # Convert operations to array
