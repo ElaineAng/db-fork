@@ -212,3 +212,9 @@ __marimo__/
 # Experiment data (parquet files are compressed into zip for version control)
 experiments/*/results/data/*.parquet
 
+# Potentially large DB setup files.
+db_setup/*.sql
+db_setup/BIRD-Critic-sol
+
+# MacOS specific files
+*.DS_Store

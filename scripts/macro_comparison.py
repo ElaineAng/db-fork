@@ -10,7 +10,7 @@ Reads parquet files from two backend directories and produces:
      one group per backend.
   4. Text summary table with per-op median latencies for both backends.
   5. Interference latency comparison (baseline vs measurement).
-  6. Storage & elapsed time comparison.
+  6. Elapsed time comparison.
   7. Storage delta by operation type.
 
 Usage:
@@ -891,8 +891,7 @@ def _total_steps(e2e: dict) -> int:
 def plot_storage_comparison(
     dolt_stor, neon_stor, outdir, dolt_wfs=None, neon_wfs=None
 ):
-    """Side-by-side bar charts: elapsed time (stacked by op category) and
-    storage delta per workflow."""
+    """Elapsed time comparison (stacked by op category) per workflow."""
     common_wfs = [
         wf for wf in WORKFLOW_ORDER if wf in dolt_stor or wf in neon_stor
     ]
@@ -920,7 +919,7 @@ def plot_storage_comparison(
     dolt_positions = np.arange(n)
     neon_positions = np.arange(n) + n + gap
 
-    fig, (ax_time, ax_stor) = plt.subplots(1, 2, figsize=(18, 7))
+    fig, ax_time = plt.subplots(1, 1, figsize=(12, 7))
 
     # Left: elapsed_sec broken down by op category (stacked), grouped by system
     for bi, (label, stor_data, wfs, base_color, positions) in enumerate(
@@ -1112,77 +1111,8 @@ def plot_storage_comparison(
     ax_time.tick_params(axis="both", which="major", labelsize=14)
     ax_time.grid(True, alpha=0.3, axis="y")
 
-    # Right: storage_delta_bytes (same grouping as elapsed time)
-    for bi, (label, data, color, positions) in enumerate(
-        [
-            ("Dolt", dolt_stor, BACKEND_COLORS["Dolt"], dolt_positions),
-            ("Neon", neon_stor, BACKEND_COLORS["Neon"], neon_positions),
-        ]
-    ):
-        vals_bytes = [
-            data[wf]["storage_delta_bytes"] if wf in data else 0
-            for wf in common_wfs
-        ]
-        vals_mb = [v / (1024 * 1024) for v in vals_bytes]
-        # Use consistent blue/red colors (dark shades for storage)
-        stor_color = dolt_colors[1] if bi == 0 else neon_colors[1]
-        bars = ax_stor.bar(
-            positions,
-            vals_mb,
-            bar_w,
-            color=stor_color,
-            alpha=0.9,
-            edgecolor="white",
-            linewidth=0.5,
-            label=label,
-        )
-        for bar, vb, vm in zip(bars, vals_bytes, vals_mb):
-            if vb > 0:
-                ax_stor.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    vm,
-                    _human_size(vb),
-                    ha="center",
-                    va="bottom",
-                    fontsize=13,
-                    fontweight="bold",
-                    clip_on=True,
-                )
-
-    # X-axis: two groups (Dolt and Neon) with workflow labels
-    ax_stor.set_xticks(all_positions)
-    ax_stor.set_xticklabels(all_labels, fontsize=16, rotation=30, ha="right")
-
-    # Add system labels (Dolt, Neon) outside plot, below x-axis labels
-    ax_stor.text(
-        dolt_center,
-        -0.18,
-        "Dolt",
-        ha="center",
-        va="top",
-        fontsize=24,
-        fontweight="bold",
-        transform=ax_stor.get_xaxis_transform(),
-    )
-    ax_stor.text(
-        neon_center,
-        -0.18,
-        "Neon",
-        ha="center",
-        va="top",
-        fontsize=24,
-        fontweight="bold",
-        transform=ax_stor.get_xaxis_transform(),
-    )
-
-    ax_stor.set_ylabel("Storage Delta (MB)", fontsize=16)
-    ax_stor.set_yscale("log")
-    ax_stor.tick_params(axis="both", which="major", labelsize=14)
-    ax_stor.grid(True, alpha=0.3, axis="y")
-    ax_stor.legend(fontsize=14, framealpha=0.9)
-
     fig.tight_layout()
-    path = os.path.join(outdir, "storage_elapsed_comparison.png")
+    path = os.path.join(outdir, "elapsed_time_comparison.png")
     fig.savefig(path, dpi=150)
     print(f"  Saved {path}")
     plt.close(fig)
@@ -1572,7 +1502,7 @@ def main():
     dolt_stor = load_all_storage(args.dolt_dir)
     neon_stor = load_all_storage(args.neon_dir)
 
-    print("\nPlot 5: Storage & elapsed time comparison")
+    print("\nPlot 5: Elapsed time comparison")
     plot_storage_comparison(
         dolt_stor, neon_stor, args.outdir, dolt_wfs=dolt_wfs, neon_wfs=neon_wfs
     )
