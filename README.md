@@ -13,10 +13,10 @@ pip3 install .
 # 2. Run a macrobenchmark 
 ```
 # Mini config, always start with this
-./run_macrobench.sh --mini --outdir <path_to_output> <workflow_name> <backend> 1 db_setup/ch-w1.sql
+./run_macrobench.sh --mini --outdir run_stats software_dev dolt 1 db_setup/ch-w1.sql
 
 # Full config with 2hr timeout
-./run_macrobench.sh --outdir <path_to_output> <workflow_name> --max-runtime-sec 7200 5 db_setup/ch-w5.sql
+./run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
 ```
 # 3. Run a microbenchmark (latency)
 ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
@@ -77,7 +77,7 @@ Use the `run_macrobench.sh` script in the root directory:
 # Run software development workflow on Dolt with 5 warehouses
 ./run_macrobench.sh software_dev dolt 5 db_setup/ch-w5.sql
 
-# Run MCTS workflow on Neon with mini config (for testing)
+# Run MCTS workflow on Neon with mini config
 ./run_macrobench.sh --mini mcts neon 1 db_setup/ch-w1.sql
 
 # Run simulation workflow on Neon with custom output directory
@@ -86,7 +86,7 @@ Use the `run_macrobench.sh` script in the root directory:
 # Run with runtime limit (10 minutes)
 ./run_macrobench.sh --max-runtime-sec 600 data_cleaning dolt 5 db_setup/ch-w5.sql
 
-# Run with storage measurement (Neon only)
+# Run with storage measurement for Neon
 ./run_macrobench.sh --measure-storage mcts neon 5 db_setup/ch-w5.sql
 ```
 
