@@ -1,6 +1,6 @@
 # Database Benchmarking Framework
 
-A comprehensive benchmarking framework for testing PostgreSQL-compatible database backends (Dolt, Neon, etc.) with support for branching, reads, inserts, updates, and range operations. Includes both macrobenchmark and microbenchmark workloads.
+A benchmarking framework for testing PostgreSQL-compatible branchable database backends (Dolt, Neon, etc.) with support for branching, schema, and data related operations. Includes both macrobenchmark and microbenchmark workloads.
 
 ## Quick Start
 
@@ -10,9 +10,14 @@ python3 -m venv venv
 source venv/bin/activate
 pip3 install .
 
-# 2. Run a macrobenchmark
-./run_macrobench.sh software_dev dolt 5 db_setup/ch-w5.sql
+# 2. Run a macrobenchmark 
+```
+# Mini config, always start with this
+./run_macrobench.sh --mini --outdir <path_to_output> <workflow_name> <backend> 1 db_setup/ch-w1.sql
 
+# Full config with 2hr timeout
+./run_macrobench.sh --outdir <path_to_output> <workflow_name> --max-runtime-sec 7200 5 db_setup/ch-w5.sql
+```
 # 3. Run a microbenchmark (latency)
 ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
 
@@ -92,8 +97,7 @@ Macrobenchmark results are saved to the output directory (default: `run_stats/`)
 ```
 run_stats/
 ├── macro_<workflow>_<backend>_<scale>.parquet           # Operation-level latency data
-├── macro_<workflow>_<backend>_<scale>_e2e_stats.json    # End-to-end statistics
-└── macro_<workflow>_<backend>_<scale>_interference.parquet  # Interference measurements
+└── macro_<workflow>_<backend>_<scale>_e2e_stats.json    # End-to-end statistics
 ```
 
 ---
@@ -337,7 +341,6 @@ The script generates the following figures in the output directory:
 - `latency_boxplot_comparison.png` - Box plots of latency by operation type
 - `time_breakdown_comparison.png` - Stacked bar chart of time breakdown by operation
 - `heatmap_comparison.png` - Heatmap showing latency comparison with ratios
-- `interference_comparison.png` - Interference latency comparison
 - `elapsed_time_comparison.png` - Elapsed time comparison by workflow
 - `steps_over_time.png` - Steps completion over time
 
@@ -443,7 +446,6 @@ run_stats_final/macro/
 ├── dolt_full/          # Full-scale Dolt runs
 │   ├── macro_software_dev_dolt_5.parquet
 │   ├── macro_software_dev_dolt_5_e2e_stats.json
-│   ├── macro_software_dev_dolt_5_interference.parquet
 │   ├── macro_failure_repro_dolt_5.parquet
 │   ├── macro_data_cleaning_dolt_5.parquet
 │   └── macro_mcts_dolt_5.parquet

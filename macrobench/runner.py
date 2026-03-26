@@ -777,30 +777,6 @@ def main():
         help="Measure disk_size_before/after around each timed operation.",
     )
     parser.add_argument(
-        "--measure-interference",
-        action="store_true",
-        help="Run background queries on the main branch during the benchmark.",
-    )
-    parser.add_argument(
-        "--monitor-threads",
-        type=int,
-        default=1,
-        help="Number of background interference monitor threads (default: 1).",
-    )
-    parser.add_argument(
-        "--monitor-queries",
-        type=str,
-        default="oltp_read,oltp_write,olap_light",
-        help="Comma-separated query types for interference monitor "
-        "(default: oltp_read,oltp_write,olap_light).",
-    )
-    parser.add_argument(
-        "--monitor-interval-ms",
-        type=int,
-        default=1000,
-        help="Sleep between monitor queries in ms (default: 0, no delay).",
-    )
-    parser.add_argument(
         "--max-runtime-sec",
         type=int,
         default=0,
@@ -848,11 +824,6 @@ def main():
         print("Storage measurement: enabled")
     if args.max_runtime_sec:
         print(f"Runtime cap: {args.max_runtime_sec}s")
-    if args.measure_interference:
-        print(
-            f"Background main-branch load: enabled "
-            f"(threads={args.monitor_threads})"
-        )
 
     # Set up backend and database
     micro_config = _build_microbench_config(config)
@@ -915,32 +886,6 @@ def main():
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
 
-    # --- Background main-branch load (interference monitor) ---
-    monitor = None
-    if args.measure_interference:
-        from macrobench.interference_monitor import (
-            InterferenceMonitor,
-            _make_connection_factory,
-            MEASUREMENT,
-        )
-
-        conn_factory = _make_connection_factory(config, backend_info)
-        query_types = [
-            q.strip() for q in args.monitor_queries.split(",") if q.strip()
-        ]
-        monitor = InterferenceMonitor(
-            num_threads=args.monitor_threads,
-            connection_factory=conn_factory,
-            num_warehouses=workflow_ops.num_warehouses,
-            query_types=query_types,
-            interval_sec=args.monitor_interval_ms / 1000.0,
-            run_id=config.run_id,
-            output_dir=args.outdir,
-        )
-        monitor.start()
-        monitor.set_phase(MEASUREMENT)
-        print("Background main-branch load started.")
-
     print(f"\nStarting macrobenchmark with {num_workers} worker(s)...")
     start_time = time.time()
     deadline = (
@@ -999,10 +944,6 @@ def main():
         if deadline_timer is not None:
             deadline_timer.cancel()
 
-        # Stop interference monitor before any cleanup
-        if monitor:
-            monitor.stop()
-
         elapsed = time.time() - start_time
         timed_out = deadline is not None and time.time() > deadline
         print(f"\nCompleted in {elapsed:.1f}s")
@@ -1021,10 +962,6 @@ def main():
                 f"  Total: {total_steps}/{total_possible} steps, "
                 f"{total_ops} ops across {num_workers} worker(s)"
             )
-
-        # Write interference results
-        if monitor:
-            monitor.write_parquet()
 
         # Measure total storage after the workflow
         storage_after = 0

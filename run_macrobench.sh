@@ -80,10 +80,7 @@ fi
 
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
-if $STORAGE; then
-    SUFFIX="_storage"
-    RUN_ID="storage_${WORKFLOW}_${BACKEND}_${DB_SCALE}"
-elif $MINI; then
+if $MINI; then
     SUFFIX="_mini"
     RUN_ID="macro_${WORKFLOW}_mini_${BACKEND}_${DB_SCALE}"
 else
@@ -129,7 +126,5 @@ fi
 python -m macrobench.runner \
     --config "$TMP_CONFIG" \
     --outdir "$OUTDIR" \
-    --measure-interference \
-    --monitor-queries olap_heavy,olap_light \
     --max-runtime-sec "$MAX_RUNTIME_SEC" \
     ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"}

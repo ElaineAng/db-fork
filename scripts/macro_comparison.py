@@ -9,12 +9,11 @@ Reads parquet files from two backend directories and produces:
   3. Stacked bar chart: total time breakdown by op type per workflow,
      one group per backend.
   4. Text summary table with per-op median latencies for both backends.
-  5. Interference latency comparison (baseline vs measurement).
-  6. Elapsed time comparison.
-  7. Storage delta by operation type.
+  5. Elapsed time comparison.
+  6. Steps completion over time.
 
 Usage:
-    python macro-analysis/macro_comparison.py \
+    python scripts/macro_comparison.py \
         --dolt-dir run_stats/dolt_mini \
         --neon-dir run_stats/neon_mini \
         --outdir macro-analysis/figures_comparison
@@ -109,22 +108,6 @@ def load_all_workflows(indir):
         else:
             print(f"  Warning: no macro_{wf}*.parquet in {indir}, skipping.")
     return workflows
-
-
-def load_all_interference(indir):
-    """Load all *_interference.parquet files, return {workflow_name: DataFrame}."""
-    interference = {}
-    for wf in WORKFLOW_ORDER:
-        pattern = os.path.join(indir, f"macro_{wf}*_interference.parquet")
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            df = pq.read_table(matches[0]).to_pandas()
-            interference[wf] = df
-            if len(matches) > 1:
-                print(
-                    f"  Note: multiple interference files for {wf}, using {os.path.basename(matches[0])}"
-                )
-    return interference
 
 
 def load_all_storage(indir):
@@ -750,122 +733,7 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
     plt.close(fig)
 
 
-# ── Plot 5: Interference latency comparison ──────────────────────────
-
-
-def plot_interference_comparison(dolt_intf, neon_intf, outdir):
-    """Grouped bar chart: baseline vs measurement latency per workflow per backend."""
-    common_wfs = [
-        wf for wf in WORKFLOW_ORDER if wf in dolt_intf or wf in neon_intf
-    ]
-    if not common_wfs:
-        print("  No interference data found, skipping.")
-        return
-
-    # Discover query types across all data
-    query_types = set()
-    for data in (dolt_intf, neon_intf):
-        for df in data.values():
-            query_types |= set(df["query_type"].unique())
-    query_types = sorted(query_types)
-
-    n_qt = len(query_types)
-    if n_qt == 0:
-        print("  No query types in interference data, skipping.")
-        return
-
-    fig, axes = plt.subplots(
-        n_qt,
-        1,
-        figsize=(max(10, 2.5 * len(common_wfs)), 5 * n_qt),
-        squeeze=False,
-    )
-
-    for qt_idx, qt in enumerate(query_types):
-        ax = axes[qt_idx, 0]
-        n = len(common_wfs)
-        x = np.arange(n)
-        bar_w = 0.18
-        offsets = [-1.5, -0.5, 0.5, 1.5]
-
-        for wi, wf in enumerate(common_wfs):
-            for bi, (label, data, color) in enumerate(
-                [
-                    ("Dolt", dolt_intf, BACKEND_COLORS["Dolt"]),
-                    ("Neon", neon_intf, BACKEND_COLORS["Neon"]),
-                ]
-            ):
-                if wf not in data:
-                    continue
-                df = data[wf]
-                df_qt = df[df["query_type"] == qt]
-                if df_qt.empty:
-                    continue
-
-                baseline = df_qt[df_qt["phase"] == "baseline"]["latency"] * 1000
-                measurement = (
-                    df_qt[df_qt["phase"] == "measurement"]["latency"] * 1000
-                )
-                med_base = baseline.median() if len(baseline) > 0 else 0
-                med_meas = measurement.median() if len(measurement) > 0 else 0
-
-                # Baseline bar (solid)
-                base_off = offsets[bi * 2]
-                ax.bar(
-                    x[wi] + base_off * bar_w,
-                    med_base,
-                    bar_w,
-                    color=color,
-                    alpha=0.85,
-                    edgecolor="black",
-                    linewidth=0.8,
-                    label=f"{label} baseline" if wi == 0 else None,
-                )
-                # Measurement bar (hatched)
-                meas_off = offsets[bi * 2 + 1]
-                ax.bar(
-                    x[wi] + meas_off * bar_w,
-                    med_meas,
-                    bar_w,
-                    color=color,
-                    alpha=0.85,
-                    edgecolor="black",
-                    linewidth=0.8,
-                    hatch="//",
-                    label=f"{label} measurement" if wi == 0 else None,
-                )
-                # Annotate % change
-                if med_base > 0:
-                    pct = (med_meas - med_base) / med_base * 100
-                    sign = "+" if pct >= 0 else ""
-                    ax.text(
-                        x[wi] + meas_off * bar_w,
-                        med_meas,
-                        f"{sign}{pct:.0f}%",
-                        ha="center",
-                        va="bottom",
-                        fontsize=8,
-                        fontweight="bold",
-                    )
-
-        ax.set_xticks(x)
-        ax.set_xticklabels(
-            [WORKFLOW_LABELS.get(wf, wf) for wf in common_wfs],
-            fontsize=10,
-        )
-        ax.set_ylabel("Latency (ms)", fontsize=11)
-        ax.set_yscale("log")
-        ax.grid(True, alpha=0.3, axis="y")
-        ax.legend(fontsize=9, framealpha=0.9)
-
-    fig.tight_layout()
-    path = os.path.join(outdir, "interference_comparison.png")
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    print(f"  Saved {path}")
-    plt.close(fig)
-
-
-# ── Plot 6: Storage & elapsed time comparison ────────────────────────
+# ── Plot 5: Elapsed time comparison ──────────────────────────────────
 
 
 def _human_size(nbytes):
@@ -1118,7 +986,7 @@ def plot_storage_comparison(
     plt.close(fig)
 
 
-# ── Plot 7: Steps completion over time ──────────────────────────────
+# ── Plot 6: Steps completion over time ──────────────────────────────
 
 
 def plot_steps_over_time(

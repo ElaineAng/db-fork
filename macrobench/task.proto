@@ -78,21 +78,3 @@ message MacroBenchConfig {
     // Whether to measure storage (disk_size_before/after) around each timed operation.
     bool measure_storage = 9;
 }
-
-// Isolation overhead benchmark configuration
-message IsolationBenchConfig {
-    string run_id = 1;
-    Backend backend = 2;
-    DatabaseSetup database_setup = 3;
-    bool autocommit = 4;
-
-    // Phase A: branch-count scaling
-    repeated int32 branch_counts = 5;       // e.g. [0, 10, 25, 50, 100, 200]
-    int32 queries_per_step = 6;             // repetitions of each query per branch count (default 3)
-    int32 mutations_per_branch = 7;         // DML ops on each new branch for divergence
-
-    // Phase B: OLTP/OLAP interference
-    repeated int32 olap_thread_counts = 8;  // e.g. [1, 2, 4]
-    int32 interference_duration_sec = 9;    // seconds per config (default 60)
-    int32 warmup_sec = 10;                  // warmup period before measurement (default 5)
-}
