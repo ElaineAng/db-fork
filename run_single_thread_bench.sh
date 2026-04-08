@@ -1,11 +1,27 @@
 #!/bin/bash
-# run_single_thread_bench.sh - Single-threaded benchmark script for nth-op measurements
+# run_single_thread_bench.sh - Single-threaded benchmark script using runner2.py
 #
-# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> <num_branches> [--seed <seed>] [--shape <shape>] [--measure-storage] [--operations <ops>]
-# Example: ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
-#          ./run_single_thread_bench.sh neon db_setup/tpcc_schema.sql 32 --seed 12345 --shape bushy
-#          ./run_single_thread_bench.sh dolt data/tpcc.sql 8 --measure-storage
-#          ./run_single_thread_bench.sh dolt data/tpcc.sql 16 --operations UPDATE,RANGE_UPDATE
+# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
+#
+# Required Arguments:
+#   backend:        dolt, neon, kpg, xata, file_copy, txn, tiger
+#   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql)
+#   branch_counts:  Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)
+#
+# Options:
+#   --seed <seed>         Random seed for reproducibility
+#   --shape <shape>       Branch tree shape: spine, bushy, or fan_out (default: spine)
+#   --measure-storage     Measure disk size before/after each update
+#   --operations <ops>    Comma-separated list (e.g., READ,UPDATE; default: all)
+#   --range-size <n>      Range size for RANGE_UPDATE operation (default: 200)
+#   --num-ops <n>         Number of operations to perform (overrides defaults)
+#   --output-dir <dir>    Output directory for results (default: ./run_stats)
+#
+# Examples:
+#   ./run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 16
+#   ./run_single_thread_bench.sh neon schemas/tpcc_mini.sql 8,16,32
+#   ./run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 8 --measure-storage
+#   ./run_single_thread_bench.sh neon schemas/tpcc_mini.sql 16,32 --operations READ,UPDATE
 
 set -e
 
@@ -18,7 +34,7 @@ SHAPE="spine"
 MEASURE_STORAGE=false
 OPS_STRING=""
 NUM_OPS_OVERRIDE=""
-OUTPUT_DIR="/tmp/run_stats"
+OUTPUT_DIR="./run_stats"
 RANGE_SIZE=200
 
 while [[ $# -gt 0 ]]; do
@@ -69,30 +85,27 @@ done
 
 # Validate required arguments
 if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$NUM_BRANCHES" ]; then
-    echo "Usage: $0 <backend> <sql_dump_path> <num_branches> [options]"
+    echo "Usage: $0 <backend> <sql_dump_path> <branch_counts> [options]"
     echo ""
     echo "Required:"
     echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
-    echo "  num_branches: Number of branches to create for testing (e.g., 16)"
+    echo "  branch_counts: Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)"
     echo ""
     echo "Options:"
     echo "  --seed <seed>: Random seed for reproducibility (default: random)"
     echo "  --shape <shape>: Branch tree shape: spine, bushy, or fan_out (default: spine)"
-    echo "  --measure-storage: Measure disk_size_before/after for each update (reduces num_ops)"
-    echo "  --operations <ops>: Comma-separated list (e.g., UPDATE,RANGE_UPDATE; default: all)"
+    echo "  --measure-storage: Measure disk_size_before/after for each update"
+    echo "  --operations <ops>: Comma-separated list (e.g., READ,UPDATE; default: all)"
     echo "  --range-size <n>: Range size for RANGE_UPDATE operation (default: 200)"
-    echo "  --num-ops <n>: Number of operations to perform (overrides defaults)"
-    echo "  --output-dir <dir>: Output directory for results (default: /tmp/run_stats)"
+    echo "  --num-ops <n>: Number of operations (overrides defaults)"
+    echo "  --output-dir <dir>: Output directory for results (default: ./run_stats)"
     echo ""
     echo "Examples:"
-    echo "  $0 dolt db.sql 16                                 # 16 branches, default ops"
-    echo "  $0 dolt db.sql 32 --operations READ --num-ops 10  # 32 branches, 10 reads"
-    echo "  $0 dolt db.sql 8 --measure-storage                # 8 branches with storage measurement"
-    echo ""
-    echo "Note: For sweeping across multiple branch counts, use the dedicated scripts:"
-    echo "  - For single-threaded sweeps: Use bench_lib.sh functions directly"
-    echo "  - For throughput analysis: Use run_throughput_bench.sh"
+    echo "  $0 dolt schemas/tpcc_mini.sql 8                      # Single branch count"
+    echo "  $0 neon schemas/tpcc_mini.sql 8,16,32                # Multiple branch counts"
+    echo "  $0 dolt schemas/tpcc_mini.sql 16 --operations READ   # Only READ operations"
+    echo "  $0 dolt schemas/tpcc_mini.sql 8 --measure-storage    # Storage measurement"
     exit 1
 fi
 
@@ -128,16 +141,19 @@ if [ -z "$SEED" ]; then
     SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 fi
 
-# Default operations
-OPERATIONS=(BRANCH READ CONNECT INSERT UPDATE RANGE_READ RANGE_UPDATE)
+# Default operations (using runner2 operation names)
+OPERATIONS=(BRANCH_CREATE READ BRANCH_CONNECT INSERT UPDATE RANGE_READ RANGE_UPDATE)
 if [[ "$BACKEND" == "TXN" ]]; then
-    OPERATIONS=(BRANCH READ INSERT UPDATE RANGE_READ RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
+    OPERATIONS=(BRANCH_CREATE READ INSERT UPDATE RANGE_READ RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
 fi
 
 # Override OPERATIONS if --operations was provided
 if [ -n "$OPS_STRING" ]; then
     IFS=',' read -ra OPERATIONS <<< "$OPS_STRING"
 fi
+
+# Parse branch counts into array
+IFS=',' read -ra BRANCH_COUNTS <<< "$NUM_BRANCHES"
 
 # Other fixed config values
 TABLE_NAME="orders"
@@ -162,14 +178,17 @@ SQL_PREFIX=${SQL_BASENAME:0:4}
 get_num_ops() {
     local op=$1
     case $op in
-        BRANCH|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
+        BRANCH_CREATE|BRANCH_DELETE|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
             echo 1
             ;;
         RANGE_UPDATE)
             echo 200
             ;;
-        CONNECT|READ|UPDATE|RANGE_READ)
+        BRANCH_CONNECT|READ|INSERT|UPDATE|DELETE|RANGE_READ)
             echo 1000
+            ;;
+        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM)
+            echo 10
             ;;
         *)
             echo 1000
@@ -178,11 +197,11 @@ get_num_ops() {
 }
 
 echo "==================================================="
-echo "Single-Thread Benchmark"
+echo "Single-Threaded Microbenchmark (runner2.py)"
 echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPERATIONS[*]}"
-echo "Num Branches: $NUM_BRANCHES"
+echo "Branch Counts: ${BRANCH_COUNTS[*]}"
 echo "Branch Shape: $SHAPE"
 echo "Random Seed: $SEED"
 echo "Measure Storage: $MEASURE_STORAGE"
@@ -191,7 +210,7 @@ if [ -n "$NUM_OPS_OVERRIDE" ]; then
 fi
 echo "==================================================="
 
-# Loop through all operations
+# Loop through all operations, then all branch counts
 for OPERATION in "${OPERATIONS[@]}"; do
     # Use override if provided
     if [ -n "$NUM_OPS_OVERRIDE" ]; then
@@ -200,31 +219,31 @@ for OPERATION in "${OPERATIONS[@]}"; do
         NUM_OPS=$(get_num_ops "$OPERATION")
     fi
 
-    SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
-    RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_${SHAPE_LOWER}"
+    for NUM_BRANCHES in "${BRANCH_COUNTS[@]}"; do
+        SHAPE_LOWER=$(echo "$SHAPE" | tr '[:upper:]' '[:lower:]')
+        RUN_ID="${BACKEND}_${SQL_PREFIX}_${NUM_BRANCHES}_${SHAPE_LOWER}"
 
-    # For BRANCH operation, num_branches in setup should be 0
-    # For all other operations, num_branches matches target
-    if [ "$OPERATION" = "BRANCH" ]; then
-        SETUP_NUM_BRANCHES=0
-    else
-        SETUP_NUM_BRANCHES=$NUM_BRANCHES
-    fi
+        # For BRANCH_CREATE operation, num_branches in setup should be 0
+        # For all other operations, num_branches matches target
+        if [ "$OPERATION" = "BRANCH_CREATE" ]; then
+            SETUP_NUM_BRANCHES=0
+        else
+            SETUP_NUM_BRANCHES=$NUM_BRANCHES
+        fi
 
-    echo ""
-    echo "---------------------------------------------------"
-    echo "Running: $RUN_ID"
-    echo "  Operation: $OPERATION, Num Ops: $NUM_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
-    echo "---------------------------------------------------"
+        echo ""
+        echo "---------------------------------------------------"
+        echo "Running: $RUN_ID"
+        echo "  Operation: $OPERATION, Num Ops: $NUM_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
+        echo "---------------------------------------------------"
 
-    # Generate config file
+    # Generate config file (task2.proto format for runner2.py)
     cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for single-thread benchmark
+# Auto-generated config for runner2.py
 run_id: "${RUN_ID}"
 backend: ${BACKEND_UPPER}
-
 table_name: "${TABLE_NAME}"
-starting_branch: ""
+scale_factor: 1
 
 database_setup {
   db_name: "${DB_NAME}"
@@ -234,23 +253,24 @@ database_setup {
   }
 }
 
-range_update_config {
-  range_size: ${RANGE_SIZE}
-}
-
 autocommit: true
 num_threads: 1
 measure_storage: ${MEASURE_STORAGE}
 
-nth_op_benchmark {
+operation_benchmark {
   operation: ${OPERATION}
   num_ops: ${NUM_OPS}
+
   setup {
     num_branches: ${SETUP_NUM_BRANCHES}
     branch_shape: ${SHAPE_UPPER}
     inserts_per_branch: ${INSERTS_PER_BRANCH}
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
+  }
+
+  range_config {
+    range_size: ${RANGE_SIZE}
   }
 }
 EOF
@@ -261,16 +281,23 @@ EOF
 
     # Run the benchmark
     echo "Starting benchmark..."
-    python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
+    python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
-    # Clean up dropped databases to prevent disk space explosion
-    DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-    if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-        echo "Cleaning up dropped databases in $DOLT_DIR/.dolt_dropped_databases"
-        rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
-    fi
+        # Clean up dropped databases to prevent disk space explosion (Dolt only)
+        if [ "$BACKEND" = "dolt" ]; then
+            DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+            if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
+                DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
+                if [ "$DROPPED_COUNT" -gt 0 ]; then
+                    echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
+                    rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
+                    echo "Cleanup complete"
+                fi
+            fi
+        fi
 
-    echo "Completed: $RUN_ID"
+        echo "Completed: $RUN_ID"
+    done  # BRANCH_COUNT loop
 done  # OPERATION loop
 
 echo ""

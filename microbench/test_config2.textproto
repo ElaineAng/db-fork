@@ -1,0 +1,36 @@
+# Sample configuration for runner2.py
+# This demonstrates a simple READ operation benchmark with branch setup
+
+run_id: "test_read_benchmark"
+backend: DOLT
+table_name: "customer"
+scale_factor: 1
+
+# Database setup: use existing tpcc schema
+database_setup {
+  db_name: "tpcc_test"
+  cleanup: true
+  sql_dump {
+    sql_dump_path: "schemas/tpcc_mini.sql"
+  }
+}
+
+# Benchmark settings
+autocommit: true
+num_threads: 1
+measure_storage: false
+
+# Single operation benchmark
+operation_benchmark {
+  operation: READ
+  num_ops: 100
+
+  # Setup phase: create branches with data
+  setup {
+    num_branches: 10
+    branch_shape: FAN_OUT
+    inserts_per_branch: 50
+    updates_per_branch: 20
+    deletes_per_branch: 10
+  }
+}

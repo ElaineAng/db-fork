@@ -34,6 +34,8 @@ BRANCH_LIST=""
 THREADS_PER_BRANCH="4"  # Default ratio for proportional mode
 OPERATIONS=""
 NUM_OPS_OVERRIDE=""
+WARMUP_OPS=""
+WARMUP_FRACTION=""
 OUTPUT_DIR="/tmp/run_stats"
 
 while [[ $# -gt 0 ]]; do
@@ -78,6 +80,14 @@ while [[ $# -gt 0 ]]; do
             NUM_OPS_OVERRIDE="$2"
             shift 2
             ;;
+        --warmup-ops)
+            WARMUP_OPS="$2"
+            shift 2
+            ;;
+        --warmup-fraction)
+            WARMUP_FRACTION="$2"
+            shift 2
+            ;;
         --operations)
             OPERATIONS="$2"
             shift 2
@@ -118,7 +128,9 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  --thread-list <list>: Comma-separated thread counts (e.g., '1,2,4,8,16')"
     echo "  --branch-list <list>: Comma-separated branch counts (e.g., '1,2,4,8,16')"
     echo "  --seed <seed>: Random seed for reproducibility"
-    echo "  --num-ops <n>: Number of operations per test"
+    echo "  --num-ops <n>: Number of operations per test (default: 5000 for point ops, 1000 for range ops)"
+    echo "  --warmup-ops <n>: Number of warm-up operations per thread (not counted in throughput)"
+    echo "  --warmup-fraction <f>: Warm-up as fraction of num-ops (e.g., 0.2 for 20%)"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,RANGE_READ)"
     echo "  --output-dir <dir>: Output directory (default: /tmp/run_stats)"
     echo ""
@@ -272,14 +284,14 @@ get_num_ops() {
         BRANCH)
             echo 1
             ;;
-        RANGE_UPDATE)
-            echo 200
-            ;;
-        CONNECT|READ|UPDATE|RANGE_READ)
+        RANGE_UPDATE|RANGE_READ)
             echo 1000
+            ;;
+        CONNECT|READ|INSERT|UPDATE|DELETE)
+            echo 5000
             ;;
         *)
-            echo 1000
+            echo 5000
             ;;
     esac
 }
@@ -312,6 +324,14 @@ if [ "$SWEEP_MODE" = "proportional" ]; then
                 NUM_OPS=$(get_num_ops "$OPERATION")
             fi
 
+            # Calculate warmup_ops
+            CALCULATED_WARMUP_OPS=0
+            if [ -n "$WARMUP_OPS" ]; then
+                CALCULATED_WARMUP_OPS=$WARMUP_OPS
+            elif [ -n "$WARMUP_FRACTION" ]; then
+                CALCULATED_WARMUP_OPS=$(awk "BEGIN {print int($NUM_OPS * $WARMUP_FRACTION)}")
+            fi
+
             # For BRANCH operation, num_branches in setup should be 0
             # For all other operations, setup num_branches matches the target
             if [ "$OPERATION" = "BRANCH" ]; then
@@ -323,18 +343,17 @@ if [ "$SWEEP_MODE" = "proportional" ]; then
             echo ""
             echo "---------------------------------------------------"
             echo "Running: $RUN_ID, Operation: $OPERATION"
-            echo "  Num Ops: $NUM_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
+            echo "  Num Ops: $NUM_OPS, Warmup Ops: $CALCULATED_WARMUP_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
             echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES"
             echo "---------------------------------------------------"
 
-            # Generate config file
+            # Generate config file (task2.proto format for runner2.py)
             cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for throughput benchmark
+# Auto-generated config for throughput benchmark (task2.proto)
 run_id: "${RUN_ID}"
 backend: ${BACKEND_UPPER}
-
 table_name: "${TABLE_NAME}"
-starting_branch: ""
+scale_factor: 1
 
 database_setup {
   db_name: "${DB_NAME}"
@@ -344,16 +363,15 @@ database_setup {
   }
 }
 
-range_update_config {
-  range_size: ${RANGE_SIZE}
-}
-
 autocommit: true
 num_threads: ${NUM_THREADS}
+measure_storage: false
 
-nth_op_benchmark {
+operation_benchmark {
   operation: ${OPERATION}
   num_ops: ${NUM_OPS}
+  warmup_ops: ${CALCULATED_WARMUP_OPS}
+
   setup {
     num_branches: ${SETUP_NUM_BRANCHES}
     branch_shape: ${SHAPE_UPPER}
@@ -361,18 +379,28 @@ nth_op_benchmark {
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
   }
+
+  range_config {
+    range_size: ${RANGE_SIZE}
+  }
 }
 EOF
 
             # Run the benchmark
             echo "Starting benchmark..."
-            python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
+            python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
-            # Clean up dropped databases to prevent disk space explosion
-            DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-            if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-                echo "Cleaning up dropped databases in $DOLT_DIR/.dolt_dropped_databases"
-                rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
+            # Clean up dropped databases to prevent disk space explosion (Dolt only)
+            if [ "$BACKEND" = "dolt" ]; then
+                DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+                if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
+                    DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
+                    if [ "$DROPPED_COUNT" -gt 0 ]; then
+                        echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
+                        rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
+                        echo "Cleanup complete"
+                    fi
+                fi
             fi
 
             echo "Completed: $RUN_ID, Operation: $OPERATION"
@@ -410,6 +438,14 @@ else
                     NUM_OPS=$(get_num_ops "$OPERATION")
                 fi
 
+                # Calculate warmup_ops
+                CALCULATED_WARMUP_OPS=0
+                if [ -n "$WARMUP_OPS" ]; then
+                    CALCULATED_WARMUP_OPS=$WARMUP_OPS
+                elif [ -n "$WARMUP_FRACTION" ]; then
+                    CALCULATED_WARMUP_OPS=$(awk "BEGIN {print int($NUM_OPS * $WARMUP_FRACTION)}")
+                fi
+
                 # For BRANCH operation, num_branches in setup should be 0
                 # For all other operations, setup num_branches matches the target
                 if [ "$OPERATION" = "BRANCH" ]; then
@@ -421,18 +457,17 @@ else
                 echo ""
                 echo "---------------------------------------------------"
                 echo "Running: $RUN_ID, Operation: $OPERATION"
-                echo "  Num Ops: $NUM_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
+                echo "  Num Ops: $NUM_OPS, Warmup Ops: $CALCULATED_WARMUP_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
                 echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES"
                 echo "---------------------------------------------------"
 
-                # Generate config file
+                # Generate config file (task2.proto format for runner2.py)
                 cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for throughput benchmark
+# Auto-generated config for throughput benchmark (task2.proto)
 run_id: "${RUN_ID}"
 backend: ${BACKEND_UPPER}
-
 table_name: "${TABLE_NAME}"
-starting_branch: ""
+scale_factor: 1
 
 database_setup {
   db_name: "${DB_NAME}"
@@ -442,16 +477,15 @@ database_setup {
   }
 }
 
-range_update_config {
-  range_size: ${RANGE_SIZE}
-}
-
 autocommit: true
 num_threads: ${NUM_THREADS}
+measure_storage: false
 
-nth_op_benchmark {
+operation_benchmark {
   operation: ${OPERATION}
   num_ops: ${NUM_OPS}
+  warmup_ops: ${CALCULATED_WARMUP_OPS}
+
   setup {
     num_branches: ${SETUP_NUM_BRANCHES}
     branch_shape: ${SHAPE_UPPER}
@@ -459,18 +493,28 @@ nth_op_benchmark {
     updates_per_branch: ${UPDATES_PER_BRANCH}
     deletes_per_branch: ${DELETES_PER_BRANCH}
   }
+
+  range_config {
+    range_size: ${RANGE_SIZE}
+  }
 }
 EOF
 
                 # Run the benchmark
                 echo "Starting benchmark..."
-                python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
+                python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
-                # Clean up dropped databases to prevent disk space explosion
-                DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-                if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-                    echo "Cleaning up dropped databases in $DOLT_DIR/.dolt_dropped_databases"
-                    rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
+                # Clean up dropped databases to prevent disk space explosion (Dolt only)
+                if [ "$BACKEND" = "dolt" ]; then
+                    DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+                    if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
+                        DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
+                        if [ "$DROPPED_COUNT" -gt 0 ]; then
+                            echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
+                            rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
+                            echo "Cleanup complete"
+                        fi
+                    fi
                 fi
 
                 echo "Completed: $RUN_ID, Operation: $OPERATION"

@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package microbench2;
+
+// Backend database systems
+enum Backend {
+  NEON = 0;
+  DOLT = 1;
+  KPG = 2;
+  XATA = 3;
+  FILE_COPY = 4;
+  TIGER = 5;
+  TXN = 6;
+}
+
+// Operation types for benchmarking
+enum OperationType {
+  // CRUD operations
+  READ = 0;
+  INSERT = 1;
+  UPDATE = 2;
+  DELETE = 3;
+  RANGE_READ = 4;
+  RANGE_UPDATE = 5;
+
+  // Branch operations
+  BRANCH_CREATE = 10;
+  BRANCH_CONNECT = 11;
+  BRANCH_DELETE = 12;
+  CONNECT_FIRST = 13;
+  CONNECT_MID = 14;
+  CONNECT_LAST = 15;
+
+  // DDL operations (extensible)
+  DDL_ADD_INDEX = 20;
+  DDL_REMOVE_INDEX = 21;
+  DDL_ADD_COLUMN = 22;
+  DDL_REMOVE_COLUMN = 23;
+  DDL_VACUUM = 24;
+}
+
+// Branch tree shapes for setup phase
+enum BranchShape {
+  SPINE = 0;    // Linear chain: each branch from previous
+  FAN_OUT = 1;  // All branches from root
+  BUSHY = 2;    // Random parent selection
+}
+
+// Existing database reference (for reusing pre-created databases)
+message ExistingDatabase {
+  string branch_id = 1;
+  string neon_project_id = 2;
+  string tiger_service_id = 3;
+}
+
+// SQL dump file for database initialization
+message SqlDump {
+  string sql_dump_path = 1;
+}
+
+// Database setup configuration
+message DatabaseSetup {
+  string db_name = 1;
+  bool cleanup = 2;  // Whether to cleanup after benchmark
+
+  // Source: either existing database or SQL dump
+  oneof source {
+    ExistingDatabase existing_db = 3;
+    SqlDump sql_dump = 4;
+  }
+}
+
+// Range operation configuration (for RANGE_READ, RANGE_UPDATE)
+message RangeConfig {
+  int32 range_size = 1;  // Number of rows in range
+}
+
+// Setup phase configuration (UNTIMED)
+message SetupConfig {
+  int32 num_branches = 1;
+  BranchShape branch_shape = 2;
+
+  // Data operations to perform during setup (per branch)
+  int32 inserts_per_branch = 3;
+  int32 updates_per_branch = 4;
+  int32 deletes_per_branch = 5;
+}
+
+// DDL operation specific configuration
+message DdlConfig {
+  string index_column_name = 1;  // For ADD_INDEX operations
+  string column_name = 2;         // For ADD_COLUMN/REMOVE_COLUMN
+  string column_type = 3;         // For ADD_COLUMN (e.g., "VARCHAR(100)")
+}
+
+// Single operation benchmark configuration
+message OperationBenchmark {
+  OperationType operation = 1;
+  int32 num_ops = 2;  // Number of timed operations to execute
+  int32 warmup_ops = 6;  // Number of warm-up operations (executed but not timed)
+
+  // Setup phase configuration (UNTIMED)
+  SetupConfig setup = 3;
+
+  // Operation-specific configuration
+  RangeConfig range_config = 4;  // For RANGE operations
+  DdlConfig ddl_config = 5;      // For DDL operations
+}
+
+// Main task configuration
+message TaskConfig {
+  string run_id = 1;
+  Backend backend = 2;
+  string table_name = 3;
+  DatabaseSetup database_setup = 4;
+
+  // Scale factor (e.g., number of warehouses in TPCC schema)
+  int32 scale_factor = 5;
+
+  bool autocommit = 6;
+  int32 num_threads = 7;
+  bool measure_storage = 8;
+
+  // Single operation benchmark configuration
+  OperationBenchmark operation_benchmark = 9;
+}
