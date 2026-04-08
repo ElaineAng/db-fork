@@ -34,6 +34,7 @@ BRANCH_LIST=""
 THREADS_PER_BRANCH="4"  # Default ratio for proportional mode
 OPERATIONS=""
 NUM_OPS_OVERRIDE=""
+RANGE_OPS_OVERRIDE=""
 WARMUP_OPS=""
 WARMUP_FRACTION=""
 OUTPUT_DIR="/tmp/run_stats"
@@ -78,6 +79,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num-ops)
             NUM_OPS_OVERRIDE="$2"
+            shift 2
+            ;;
+        --range-ops)
+            RANGE_OPS_OVERRIDE="$2"
             shift 2
             ;;
         --warmup-ops)
@@ -129,6 +134,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  --branch-list <list>: Comma-separated branch counts (e.g., '1,2,4,8,16')"
     echo "  --seed <seed>: Random seed for reproducibility"
     echo "  --num-ops <n>: Number of operations per test (default: 5000 for point ops, 1000 for range ops)"
+    echo "  --range-ops <n>: Number of operations for range operations (overrides --num-ops for RANGE_* ops)"
     echo "  --warmup-ops <n>: Number of warm-up operations per thread (not counted in throughput)"
     echo "  --warmup-fraction <f>: Warm-up as fraction of num-ops (e.g., 0.2 for 20%)"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,RANGE_READ)"
@@ -254,6 +260,9 @@ echo "Random Seed: $SEED"
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"
 fi
+if [ -n "$RANGE_OPS_OVERRIDE" ]; then
+    echo "Range Ops (override): $RANGE_OPS_OVERRIDE"
+fi
 echo "==================================================="
 
 # Fixed config values
@@ -317,6 +326,9 @@ if [ "$SWEEP_MODE" = "proportional" ]; then
             # Use override if provided
             if [ -n "$NUM_OPS_OVERRIDE" ]; then
                 NUM_OPS="$NUM_OPS_OVERRIDE"
+            # Use range-ops override for range operations
+            elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^RANGE ]]; then
+                NUM_OPS="$RANGE_OPS_OVERRIDE"
             # For CONNECT operations, scale with number of threads (2x)
             elif [[ "$OPERATION" =~ ^CONNECT ]]; then
                 NUM_OPS=$((NUM_THREADS * 2))
@@ -431,6 +443,9 @@ else
                 # Use override if provided
                 if [ -n "$NUM_OPS_OVERRIDE" ]; then
                     NUM_OPS="$NUM_OPS_OVERRIDE"
+                # Use range-ops override for range operations
+                elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^RANGE ]]; then
+                    NUM_OPS="$RANGE_OPS_OVERRIDE"
                 # For CONNECT operations, scale with number of threads (2x)
                 elif [[ "$OPERATION" =~ ^CONNECT ]]; then
                     NUM_OPS=$((NUM_THREADS * 2))
