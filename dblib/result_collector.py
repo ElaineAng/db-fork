@@ -102,6 +102,9 @@ class ResultCollector:
         self.results = []
         self.iteration_counter = 0
 
+        # Track failed operations
+        self.failed_operations = []  # List of failure details
+
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
@@ -123,6 +126,8 @@ class ResultCollector:
             self._thread_local.branch_count = 0
             self._thread_local.step_id = -1
             self._thread_local.storage_fn = None
+            self._thread_local.start_time = 0.0
+            self._thread_local.end_time = 0.0
         return self._thread_local
 
     def _reset_metrics(self):
@@ -135,12 +140,15 @@ class ResultCollector:
         state.disk_size_before = 0
         state.disk_size_after = 0
         state.branch_count = 0
+        state.start_time = 0.0
+        state.end_time = 0.0
 
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
         with self._lock:
             self.results = []
             self.iteration_counter = 0
+            self.failed_operations = []
 
     def set_context(
         self,
@@ -180,16 +188,20 @@ class ResultCollector:
         if not timed and not storage:
             yield
             return
-        start_time = time.perf_counter() if timed else None
+        start_perf = time.perf_counter() if timed else None
+        start_wall = time.time() if timed else None
         try:
             yield
         except Exception as e:
             raise e
         else:
             if timed:
-                end_time = time.perf_counter()
+                end_perf = time.perf_counter()
+                end_wall = time.time()
                 self._validate_and_set_op_type(op_type)
-                state.current_latency = end_time - start_time
+                state.current_latency = end_perf - start_perf
+                state.start_time = start_wall
+                state.end_time = end_wall
             if storage and state.storage_fn:
                 state.disk_size_after = state.storage_fn()
 
@@ -244,11 +256,40 @@ class ResultCollector:
         result.disk_size_after = state.disk_size_after
         result.branch_count = state.branch_count
         result.step_id = state.step_id
+        result.start_time = state.start_time
+        result.end_time = state.end_time
 
         # Append to results (thread-safe)
         with self._lock:
             self.results.append(result)
             self.iteration_counter += 1
+
+        # Reset metric fields for next record
+        self._reset_metrics()
+
+    def record_failure(self, error: Exception, operation_number: int = None) -> None:
+        """
+        Record a failed operation with context details.
+
+        Args:
+            error: The exception that caused the failure
+            operation_number: Optional operation number (e.g., 5 out of 1000)
+        """
+        state = self._get_thread_state()
+
+        failure_info = {
+            "thread_id": get_current_thread_id(),
+            "op_type": rslt.OpType.Name(state.current_op_type) if state.current_op_type else "UNSPECIFIED",
+            "sql_query": state.sql_query if state.sql_query else None,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "operation_number": operation_number,
+            "timestamp": time.time(),
+        }
+
+        # Append to failed operations (thread-safe)
+        with self._lock:
+            self.failed_operations.append(failure_info)
 
         # Reset metric fields for next record
         self._reset_metrics()
@@ -285,6 +326,8 @@ class ResultCollector:
                 "sql_query": result.sql_query,
                 "branch_count": result.branch_count,
                 "step_id": result.step_id,
+                "start_time": result.start_time,
+                "end_time": result.end_time,
             }
             rows.append(row)
 

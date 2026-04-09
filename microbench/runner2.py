@@ -1320,7 +1320,10 @@ class OperationRunner:
                 try:
                     self.operation.execute(self.context)
                 except Exception as e:
-                    msg = f"[Thread {self.context.thread_id}] Warm-up operation {i+1}/{warmup_ops} failed: {e}"
+                    # Build detailed error message for warmup
+                    op_name = self.context.config.operation_name
+                    error_type = type(e).__name__
+                    msg = f"[Thread {self.context.thread_id}] Warm-up operation {i+1}/{warmup_ops} failed: {op_name} - {error_type}: {e}"
                     if self.context.shared_progress:
                         self.context.shared_progress.write(msg)
                     else:
@@ -1342,11 +1345,22 @@ class OperationRunner:
                     self.context.shared_progress.update(1)
 
             except Exception as e:
-                msg = f"[Thread {self.context.thread_id}] Operation {i+1}/{num_ops} failed: {e}"
+                # Record the failure with details
+                self.context.result_collector.record_failure(error=e, operation_number=i+1)
+
+                # Build detailed error message
+                op_name = self.context.config.operation_name
+                error_type = type(e).__name__
+                msg = f"[Thread {self.context.thread_id}] Operation {i+1}/{num_ops} failed: {op_name} - {error_type}: {e}"
+
                 if self.context.shared_progress:
                     self.context.shared_progress.write(msg)
                 else:
                     print(msg)
+
+                # Update progress even for failed ops
+                if self.context.shared_progress:
+                    self.context.shared_progress.update(1)
 
 
 # ============================================================================
@@ -1564,8 +1578,15 @@ class BenchmarkExecutor:
                     print(f"Worker thread failed: {e}")
 
     def _calculate_metrics(self, total_ops: int, elapsed_time: float) -> dict:
-        """Calculate throughput and latency metrics."""
-        throughput = total_ops / elapsed_time if elapsed_time > 0 else 0
+        """Calculate throughput and latency metrics.
+
+        Note: total_ops is the intended count (num_ops * num_threads).
+        Actual successful operation count is len(self.result_collector.results).
+        """
+        # Count actual successful operations (not intended count)
+        actual_ops = len(self.result_collector.results)
+        failed_ops = len(self.result_collector.failed_operations)
+        throughput = actual_ops / elapsed_time if elapsed_time > 0 else 0
 
         # Calculate data operation throughput (excluding branch ops)
         data_ops = [
@@ -1578,9 +1599,11 @@ class BenchmarkExecutor:
         data_throughput = data_ops_count / data_ops_time if data_ops_time > 0 else 0
 
         return {
-            "total_ops": total_ops,
+            "intended_ops": total_ops,  # Intended number of operations
+            "total_ops": actual_ops,  # Actual successful operations (all types)
+            "failed_ops": failed_ops,  # Number of failed operations
             "elapsed_time": elapsed_time,
-            "throughput": throughput,
+            "throughput": throughput,  # Based on actual successful ops
             "data_ops_count": data_ops_count,
             "data_ops_time": data_ops_time,
             "data_throughput": data_throughput,
@@ -1590,9 +1613,15 @@ class BenchmarkExecutor:
         """Print benchmark metrics."""
         print(f"\n{'='*60}")
         print(f"Benchmark Results:")
-        print(f"  Total operations: {metrics['total_ops']}")
+        print(f"  Intended operations: {metrics['intended_ops']}")
+        print(f"  Successful operations: {metrics['total_ops']}")
+        print(f"  Failed operations: {metrics['failed_ops']}", end="")
+        if metrics['failed_ops'] > 0 and metrics['intended_ops'] > 0:
+            print(f" ({100*metrics['failed_ops']/metrics['intended_ops']:.1f}%)")
+        else:
+            print()
         print(f"  Total time: {metrics['elapsed_time']:.2f}s")
-        print(f"  Throughput: {metrics['throughput']:.2f} ops/sec")
+        print(f"  Throughput: {metrics['throughput']:.2f} ops/sec (successful ops only)")
         print(f"\n  Data operations only (excluding branch ops):")
         print(f"    Count: {metrics['data_ops_count']}")
         print(f"    Time: {metrics['data_ops_time']:.2f}s")
@@ -1628,6 +1657,10 @@ class ResultManager:
         # Write summary JSON
         self._write_summary_json()
 
+        # Write failure details if any failures occurred
+        if self.result_collector.failed_operations:
+            self._write_failures_json()
+
     def _write_summary_json(self) -> None:
         """Write summary JSON with throughput metrics."""
         summary = {
@@ -1638,9 +1671,11 @@ class ResultManager:
             "num_threads": self.config.num_threads,
             "num_branches": self.config.num_branches,
             "scale_factor": self.config.scale_factor,
-            "total_ops": self.metrics["total_ops"],
+            "intended_ops": self.metrics["intended_ops"],  # num_ops * num_threads
+            "total_ops": self.metrics["total_ops"],  # Actual successful operations
+            "failed_ops": self.metrics["failed_ops"],  # Failed operations
             "elapsed_time": self.metrics["elapsed_time"],
-            "throughput": self.metrics["throughput"],
+            "throughput": self.metrics["throughput"],  # Based on successful ops only
             "data_ops_count": self.metrics["data_ops_count"],
             "data_ops_time": self.metrics["data_ops_time"],
             "data_throughput": self.metrics["data_throughput"],
@@ -1659,6 +1694,30 @@ class ResultManager:
             json.dump(summary, f, indent=2)
 
         print(f"Summary written to: {summary_path}")
+
+    def _write_failures_json(self) -> None:
+        """Write detailed failure information to a separate JSON file."""
+        failures_data = {
+            "run_id": self.config.run_id,
+            "backend": self.config.backend_name,
+            "operation": self.config.operation_name,
+            "total_failures": len(self.result_collector.failed_operations),
+            "failures": self.result_collector.failed_operations,
+        }
+
+        # Build filename
+        filename_parts = [
+            self.config.run_id,
+            self.config.operation_name,
+            f"threads{self.config.num_threads}",
+        ]
+        failures_filename = "_".join(filename_parts) + "_failures.json"
+        failures_path = os.path.join(self.output_dir, failures_filename)
+
+        with open(failures_path, "w") as f:
+            json.dump(failures_data, f, indent=2)
+
+        print(f"Failure details written to: {failures_path}")
 
 
 # ============================================================================

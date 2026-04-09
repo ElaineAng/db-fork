@@ -49,6 +49,12 @@ message Result {
 
   // Step ID within the macrobenchmark workflow (-1 if not in a step)
   int32 step_id = 15;
+
+  // Timestamp when the operation started (Unix epoch in seconds)
+  double start_time = 16;
+
+  // Timestamp when the operation completed (Unix epoch in seconds)
+  double end_time = 17;
 }
 
 // Enum for different types of database operations
