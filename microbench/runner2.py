@@ -1576,43 +1576,85 @@ class AsyncOperationRunner:
         # Wait for all operations to complete
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Debug: Analyze results for all threads
+        # Analyze results
         successes = [r for r in results if isinstance(r, dict) and r.get("status") == "success"]
         failures = [r for r in results if isinstance(r, dict) and r.get("status") == "failed"]
         exceptions = [r for r in results if isinstance(r, Exception)]
         nones = [r for r in results if r is None]
 
-        total_returned = len(results)
-        print(f"[Thread {self.context.thread_id}] Async execution complete:")
-        print(f"  Tasks created: {num_ops}")
-        print(f"  Results returned: {total_returned}")
-        print(f"  Successes: {len(successes)}")
-        print(f"  Failures: {len(failures)}")
-        print(f"  Exceptions (uncaught): {len(exceptions)}")
-        print(f"  None values: {len(nones)}")
-
+        # Record any uncaught exceptions as failures
+        # These are exceptions that escaped the try/except in _execute_single_async
         if exceptions:
-            print(f"  First 5 uncaught exceptions:")
-            for i, exc in enumerate(exceptions[:5]):
-                print(f"    {i+1}. {type(exc).__name__}: {exc}")
+            for exc in exceptions:
+                self.context.result_collector.record_failure(
+                    error=exc,
+                    operation_number=None
+                )
 
-        # Check result collector (note: results list is shared across threads)
-        num_results = len(self.context.result_collector.results)
-        num_failures = len(self.context.result_collector.failed_operations)
-        print(f"  Result collector total: {num_results} results, {num_failures} failures recorded")
+        # Check for issues
+        has_failures = len(failures) > 0
+        has_exceptions = len(exceptions) > 0
+        has_nones = len(nones) > 0
+        total_returned = len(results)
+        total_accounted = len(successes) + len(failures) + len(exceptions) + len(nones)
+        has_accounting_error = total_accounted != total_returned
+        has_missing_results = total_returned != num_ops
+
+        # Only print detailed output if this thread has issues
+        has_issues = (has_failures or has_exceptions or has_nones or
+                     has_accounting_error or has_missing_results)
+
+        if has_issues:
+            print(f"[Thread {self.context.thread_id}] WARNING: Issues detected during async execution")
+            print(f"  Tasks created: {num_ops}")
+            print(f"  Successes: {len(successes)}/{num_ops} ({100*len(successes)/num_ops:.1f}%)")
+
+            if has_failures:
+                print(f"  Failures (caught): {len(failures)}")
+
+            if has_exceptions:
+                print(f"  Exceptions (uncaught): {len(exceptions)}")
+                # Print first 5 exceptions with stack traces
+                for i, exc in enumerate(exceptions[:5]):
+                    print(f"    Exception {i+1}: {type(exc).__name__}: {exc}")
+                    import traceback
+                    traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+            if has_nones:
+                print(f"  None values: {len(nones)} (unexpected!)")
+
+            if has_accounting_error:
+                print(f"  ERROR: Accounted results ({total_accounted}) != returned results ({total_returned})")
+
+            if has_missing_results:
+                print(f"  WARNING: Results returned ({total_returned}) != tasks created ({num_ops})")
 
         # Clean up task-local storage now that all operations are complete
         self.context.result_collector.cleanup_task_local_storage()
 
-    def execute_multiple(self, num_ops: int, warmup_ops: int = 0) -> None:
+        # Return stats for aggregation
+        return {
+            "thread_id": self.context.thread_id,
+            "num_ops": num_ops,
+            "successes": len(successes),
+            "failures": len(failures),
+            "exceptions": len(exceptions),
+            "nones": len(nones),
+            "has_issues": has_issues
+        }
+
+    def execute_multiple(self, num_ops: int, warmup_ops: int = 0) -> dict:
         """Synchronous wrapper that runs async execution in event loop.
 
         Args:
             num_ops: Number of operations to execute (timed)
             warmup_ops: Number of warm-up operations to execute first
+
+        Returns:
+            dict with execution statistics (successes, failures, etc.)
         """
         # Run the async execution in the event loop
-        asyncio.run(self.execute_multiple_async(num_ops, warmup_ops))
+        return asyncio.run(self.execute_multiple_async(num_ops, warmup_ops))
 
 
 # ============================================================================
@@ -1762,9 +1804,12 @@ class BenchmarkExecutor:
             # Use async runner if concurrent_requests > 1, otherwise sync runner
             if self.config.concurrent_requests > 1:
                 runner = AsyncOperationRunner(self.config, ctx)
+                stats = runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                # Print aggregate summary for async execution
+                self._print_aggregate_summary([stats])
             else:
                 runner = OperationRunner(self.config, ctx)
-            runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
 
     def _execute_multi_threaded(
         self,
@@ -1774,8 +1819,12 @@ class BenchmarkExecutor:
     ) -> None:
         """Execute benchmark with multiple threads."""
 
-        def worker_fn(thread_id: int, assigned_branches: List[str]) -> None:
-            """Worker function for each thread."""
+        def worker_fn(thread_id: int, assigned_branches: List[str]):
+            """Worker function for each thread.
+
+            Returns:
+                dict with stats if using async runner, None otherwise
+            """
             rc.set_current_thread_id(thread_id)
             worker_seed = fixed_seed + thread_id
 
@@ -1814,9 +1863,11 @@ class BenchmarkExecutor:
                 # Use async runner if concurrent_requests > 1, otherwise sync runner
                 if self.config.concurrent_requests > 1:
                     runner = AsyncOperationRunner(self.config, ctx)
+                    return runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
                 else:
                     runner = OperationRunner(self.config, ctx)
-                runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                    runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                    return None
 
         # Execute with thread pool
         num_threads = self.config.num_threads
@@ -1830,12 +1881,19 @@ class BenchmarkExecutor:
                 for tid in range(num_threads)
             ]
 
-            # Wait for completion
+            # Wait for completion and collect stats
+            thread_stats = []
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    stats = future.result()
+                    if stats is not None:  # Async runner returns stats
+                        thread_stats.append(stats)
                 except Exception as e:
                     print(f"Worker thread failed: {e}")
+
+            # Print aggregate summary for async execution
+            if thread_stats:
+                self._print_aggregate_summary(thread_stats)
 
     def _calculate_metrics(self, total_ops: int, elapsed_time: float) -> dict:
         """Calculate throughput and latency metrics.
@@ -1868,6 +1926,42 @@ class BenchmarkExecutor:
             "data_ops_time": data_ops_time,
             "data_throughput": data_throughput,
         }
+
+    def _print_aggregate_summary(self, thread_stats: list) -> None:
+        """Print aggregate summary of async execution across all threads.
+
+        Args:
+            thread_stats: List of dicts with per-thread statistics
+        """
+        if not thread_stats:
+            return
+
+        # Aggregate stats across all threads
+        total_ops = sum(s['num_ops'] for s in thread_stats)
+        total_successes = sum(s['successes'] for s in thread_stats)
+        total_failures = sum(s['failures'] for s in thread_stats)
+        total_exceptions = sum(s['exceptions'] for s in thread_stats)
+        total_nones = sum(s['nones'] for s in thread_stats)
+        threads_with_issues = sum(1 for s in thread_stats if s['has_issues'])
+
+        print(f"\n{'='*80}")
+        print(f"Async Execution Summary ({len(thread_stats)} thread(s)):")
+        print(f"  Total operations: {total_ops:,}")
+        print(f"  Successes: {total_successes:,} ({100*total_successes/total_ops:.2f}%)" if total_ops > 0 else "  Successes: 0")
+
+        if total_failures > 0:
+            print(f"  Failures (caught): {total_failures:,} ({100*total_failures/total_ops:.2f}%)")
+
+        if total_exceptions > 0:
+            print(f"  Exceptions (uncaught): {total_exceptions:,} ({100*total_exceptions/total_ops:.2f}%)")
+
+        if total_nones > 0:
+            print(f"  None values: {total_nones:,}")
+
+        if threads_with_issues > 0:
+            print(f"  Threads with issues: {threads_with_issues}/{len(thread_stats)}")
+
+        print(f"{'='*80}\n")
 
     def _print_metrics(self, metrics: dict) -> None:
         """Print benchmark metrics."""

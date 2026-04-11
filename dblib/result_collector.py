@@ -132,10 +132,6 @@ class ResultCollector:
         # Track failed operations
         self.failed_operations = []  # List of failure details
 
-        # Debug counters for async mode
-        self._flush_record_calls = 0
-        self._task_states_created = 0
-
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
