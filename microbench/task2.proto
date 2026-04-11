@@ -121,6 +121,12 @@ message TaskConfig {
   int32 num_threads = 7;
   bool measure_storage = 8;
 
+  // Async execution configuration
+  // Number of concurrent requests per connection (default 1 = synchronous)
+  // When > 1, enables async mode with that many concurrent requests
+  // Requires autocommit = true when > 1
+  int32 concurrent_requests = 10;
+
   // Single operation benchmark configuration
   OperationBenchmark operation_benchmark = 9;
 }

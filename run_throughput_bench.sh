@@ -38,6 +38,7 @@ POINT_OPS_OVERRIDE=""
 RANGE_OPS_OVERRIDE=""
 WARMUP_OPS=""
 WARMUP_FRACTION=""
+CONCURRENT_REQUESTS="1"  # Default: 1 (synchronous mode)
 OUTPUT_DIR="/tmp/run_stats"
 
 while [[ $# -gt 0 ]]; do
@@ -98,6 +99,10 @@ while [[ $# -gt 0 ]]; do
             WARMUP_FRACTION="$2"
             shift 2
             ;;
+        --concurrent-requests)
+            CONCURRENT_REQUESTS="$2"
+            shift 2
+            ;;
         --operations)
             OPERATIONS="$2"
             shift 2
@@ -143,6 +148,8 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  --range-ops <n>: Number of operations for range operations (RANGE_READ, RANGE_UPDATE)"
     echo "  --warmup-ops <n>: Number of warm-up operations per thread (not counted in throughput)"
     echo "  --warmup-fraction <f>: Warm-up as fraction of num-ops (e.g., 0.2 for 20%)"
+    echo "  --concurrent-requests <n>: Number of concurrent requests per connection (default: 1)"
+    echo "                            Values > 1 enable async mode (requires autocommit)"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,RANGE_READ)"
     echo "  --output-dir <dir>: Output directory (default: /tmp/run_stats)"
     echo ""
@@ -159,6 +166,10 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  # Custom lists"
     echo "  $0 dolt db.sql --sweep-threads --branches 16 --thread-list '1,2,4,8,16,32'"
     echo "  $0 dolt db.sql --sweep-branches --threads 128 --branch-list '1,2,4,8,16'"
+    echo ""
+    echo "  # With concurrent requests (async mode)"
+    echo "  $0 dolt db.sql --sweep-threads --branches 1 --concurrent-requests 10"
+    echo "  (Enables 10 concurrent requests per connection for capacity testing)"
     exit 1
 fi
 
@@ -263,6 +274,10 @@ echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPS_ARRAY[*]}"
 echo "Random Seed: $SEED"
+echo "Concurrent Requests per Connection: $CONCURRENT_REQUESTS"
+if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
+    echo "  (Async mode enabled - concurrent requests on single connection)"
+fi
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"
 fi
@@ -390,6 +405,7 @@ database_setup {
 autocommit: true
 num_threads: ${NUM_THREADS}
 measure_storage: false
+concurrent_requests: ${CONCURRENT_REQUESTS}
 
 operation_benchmark {
   operation: ${OPERATION}
@@ -510,6 +526,7 @@ database_setup {
 autocommit: true
 num_threads: ${NUM_THREADS}
 measure_storage: false
+concurrent_requests: ${CONCURRENT_REQUESTS}
 
 operation_benchmark {
   operation: ${OPERATION}

@@ -135,3 +135,43 @@ class KpgToolSuite(DBToolSuite):
             print("Warning: KPG_DATA_DIR not configured, cannot measure storage")
             return 0
         return dbutil.get_directory_size_bytes(KPG_DATA_DIR)
+
+    # ========================================================================
+    # Async implementations
+    # ========================================================================
+
+    async def _create_branch_impl_async(self, branch_name: str, parent_id: str = None) -> None:
+        """Async version of _create_branch_impl."""
+        cmd = "CREATE DBFORK"
+        await super().execute_sql_async(cmd)
+
+        # Parse fork ID from notices (format: "Current fork id globally: <id>")
+        fork_id = None
+        conn = self.async_conn if self.async_conn else self.conn
+        for notice in conn.notices:
+            if "Current fork id globally:" in notice:
+                # Extract the ID from the notice
+                parts = notice.split("Current fork id globally:")
+                if len(parts) > 1:
+                    fork_id = int(parts[1].strip())
+                    break
+
+        if fork_id is None:
+            raise ValueError("Failed to get fork ID from CREATE DBFORK")
+
+        self._fork_name_to_id[branch_name] = fork_id
+        self._fork_id_to_name[fork_id] = branch_name
+
+    async def _connect_branch_impl_async(self, branch_name: str) -> None:
+        """Async version of _connect_branch_impl."""
+        self._current_fork_id = self._fork_name_to_id[branch_name]
+        # DROP DBFORK is currently a misnomer.
+        cmd = f"DROP DBFORK {self._current_fork_id}"
+        await super().execute_sql_async(cmd)
+
+    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
+        """Async version of _get_current_branch_impl."""
+        return (
+            self._fork_id_to_name[self._current_fork_id],
+            self._current_fork_id,
+        )

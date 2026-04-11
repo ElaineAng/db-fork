@@ -20,6 +20,7 @@ Design principles:
 """
 
 import argparse
+import asyncio
 import json
 import os
 import random
@@ -143,6 +144,14 @@ class BenchmarkConfig:
                 "Concurrent writes pollute per-thread storage deltas."
             )
 
+        # Validate async mode configuration
+        if self._proto.concurrent_requests > 1:
+            if not self._proto.autocommit:
+                raise ValueError(
+                    "concurrent_requests > 1 requires autocommit = true. "
+                    "Async mode does not support transaction management."
+                )
+
         # Backend-specific validation
         if self._proto.backend == tp.Backend.NEON:
             db_setup = self._proto.database_setup
@@ -192,6 +201,11 @@ class BenchmarkConfig:
     @property
     def measure_storage(self) -> bool:
         return self._proto.measure_storage
+
+    @property
+    def concurrent_requests(self) -> int:
+        """Number of concurrent requests per connection (default 1 = sync mode)."""
+        return max(1, self._proto.concurrent_requests)
 
     @property
     def database_setup(self) -> tp.DatabaseSetup:
@@ -1363,6 +1377,244 @@ class OperationRunner:
                     self.context.shared_progress.update(1)
 
 
+class AsyncOperationRunner:
+    """Executes operations asynchronously with configurable concurrency.
+
+    This runner uses asyncio to execute multiple operations concurrently
+    within a single connection, controlled by a semaphore to limit the
+    number of concurrent requests.
+
+    Each operation is timed independently with accurate start/end timestamps,
+    ensuring correct performance measurement even with overlapping execution.
+    """
+
+    def __init__(self, config: BenchmarkConfig, context: WorkerContext):
+        self.config = config
+        self.context = context
+        self.operation = self._create_operation()
+        self.concurrent_limit = config.concurrent_requests
+
+    def _create_operation(self):
+        """Create the operation instance based on config."""
+        # Reuse the same operation creation logic as OperationRunner
+        op_type = self.config.operation_type
+        table_name = self.config.table_name
+
+        # Operation-specific parameters
+        if op_type in [tp.OperationType.RANGE_READ, tp.OperationType.RANGE_UPDATE]:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                range_size=self.config.range_size
+            )
+        elif op_type == tp.OperationType.DDL_ADD_INDEX:
+            column_name = self.config.ddl_config.index_column_name or None
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=column_name
+            )
+        elif op_type == tp.OperationType.DDL_REMOVE_INDEX:
+            return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type == tp.OperationType.DDL_VACUUM:
+            return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type in [
+            tp.OperationType.READ,
+            tp.OperationType.INSERT,
+            tp.OperationType.UPDATE,
+            tp.OperationType.DELETE,
+        ]:
+            return OperationRegistry.create(op_type, table_name=table_name)
+        else:
+            # Branch operations and others without parameters
+            return OperationRegistry.create(op_type)
+
+    async def _execute_single_async(self, semaphore: asyncio.Semaphore, op_number: int) -> dict:
+        """Execute a single operation asynchronously with semaphore control.
+
+        Args:
+            semaphore: Semaphore to limit concurrent execution
+            op_number: Operation number for error reporting
+
+        Returns:
+            dict with status information for debugging
+        """
+        async with semaphore:
+            try:
+                # Check if operation has async version
+                if hasattr(self.operation, 'execute_async'):
+                    await self.operation.execute_async(self.context)
+                else:
+                    # Fall back to running sync operation in thread pool
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self.operation.execute, self.context)
+
+                # Update progress
+                if self.context.shared_progress:
+                    self.context.shared_progress.update(1)
+
+                return {"status": "success", "op_number": op_number}
+
+            except Exception as e:
+                # Record the failure
+                self.context.result_collector.record_failure(error=e, operation_number=op_number)
+
+                # Build detailed error message
+                op_name = self.context.config.operation_name
+                error_type = type(e).__name__
+                msg = f"[Thread {self.context.thread_id}] Async operation {op_number} failed: {op_name} - {error_type}: {e}"
+
+                if self.context.shared_progress:
+                    self.context.shared_progress.write(msg)
+                else:
+                    print(msg)
+
+                # Update progress even for failed ops
+                if self.context.shared_progress:
+                    self.context.shared_progress.update(1)
+
+                return {"status": "failed", "op_number": op_number, "error": str(e)}
+
+    async def _ensure_async_connection(self):
+        """Ensure async connection is initialized for the database tools."""
+        if self.context.db_tools.async_conn:
+            return  # Already initialized
+
+        # Import psycopg for async connections
+        try:
+            import psycopg
+        except ImportError:
+            raise ImportError(
+                "psycopg (v3) is required for async mode. Install with: pip install 'psycopg[binary]>=3.0'"
+            )
+
+        backend = self.config.backend
+        db_name = self.config.database_setup.db_name
+
+        # For Neon, we need to get the full URI with credentials from the API
+        # because DSN from psycopg2 doesn't include the password
+        if backend == tp.Backend.NEON:
+            from dblib.neon import NeonToolSuite
+
+            # NeonToolSuite stores project_id and current_branch_id
+            if not isinstance(self.context.db_tools, NeonToolSuite):
+                raise ValueError("Expected NeonToolSuite for Neon backend")
+
+            neon_tools = self.context.db_tools
+            uri = NeonToolSuite._get_neon_connection_uri(
+                project_id=neon_tools.project_id,
+                branch_id=neon_tools.current_branch_id,
+                db_name=db_name
+            )
+        else:
+            # For other backends, try to get DSN from connection
+            conn = self.context.db_tools.get_current_connection()
+
+            if not conn:
+                raise ValueError("No active connection found to create async connection from")
+
+            # Get DSN (Data Source Name) from the connection
+            # psycopg2 connections have a `dsn` attribute
+            if hasattr(conn, 'dsn'):
+                uri = conn.dsn
+            elif hasattr(conn, 'info') and hasattr(conn.info, 'dsn'):
+                uri = conn.info.dsn
+            else:
+                # Fallback: try to construct URI from backend-specific methods
+                if backend == tp.Backend.DOLT:
+                    from dblib.dolt import DoltToolSuite
+                    uri = DoltToolSuite.get_initial_connection_uri(db_name)
+                elif backend == tp.Backend.KPG:
+                    from dblib.kpg import KpgToolSuite
+                    uri = KpgToolSuite.get_initial_connection_uri(db_name)
+                else:
+                    raise ValueError(
+                        f"Cannot determine connection URI for backend: {backend}. "
+                        f"Connection object has no DSN attribute."
+                    )
+
+        # Create async connection with the same URI as the sync connection
+        async_conn = await psycopg.AsyncConnection.connect(uri, autocommit=True)
+        self.context.db_tools.async_conn = async_conn
+
+    async def execute_multiple_async(self, num_ops: int, warmup_ops: int = 0) -> None:
+        """Execute operations asynchronously with configurable concurrency.
+
+        Args:
+            num_ops: Number of operations to execute (timed)
+            warmup_ops: Number of warm-up operations to execute first (not counted in results)
+        """
+        # Ensure async connection is initialized
+        await self._ensure_async_connection()
+
+        # Create semaphore to limit concurrent executions
+        semaphore = asyncio.Semaphore(self.concurrent_limit)
+
+        # Execute warm-up operations (if any)
+        if warmup_ops > 0:
+            if self.context.thread_id == 0:
+                print(f"Executing {warmup_ops} warm-up operations with concurrency={self.concurrent_limit}...")
+
+            warmup_tasks = [
+                self._execute_single_async(semaphore, i+1)
+                for i in range(warmup_ops)
+            ]
+            await asyncio.gather(*warmup_tasks, return_exceptions=True)
+
+            # Clear warm-up results from collector
+            self.context.result_collector.reset()
+
+            if self.context.thread_id == 0:
+                print(f"Warm-up complete. Starting timed measurement of {num_ops} operations...")
+
+        # Execute timed operations concurrently
+        tasks = [
+            self._execute_single_async(semaphore, i+1)
+            for i in range(num_ops)
+        ]
+
+        # Wait for all operations to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Debug: Analyze results for all threads
+        successes = [r for r in results if isinstance(r, dict) and r.get("status") == "success"]
+        failures = [r for r in results if isinstance(r, dict) and r.get("status") == "failed"]
+        exceptions = [r for r in results if isinstance(r, Exception)]
+        nones = [r for r in results if r is None]
+
+        total_returned = len(results)
+        print(f"[Thread {self.context.thread_id}] Async execution complete:")
+        print(f"  Tasks created: {num_ops}")
+        print(f"  Results returned: {total_returned}")
+        print(f"  Successes: {len(successes)}")
+        print(f"  Failures: {len(failures)}")
+        print(f"  Exceptions (uncaught): {len(exceptions)}")
+        print(f"  None values: {len(nones)}")
+
+        if exceptions:
+            print(f"  First 5 uncaught exceptions:")
+            for i, exc in enumerate(exceptions[:5]):
+                print(f"    {i+1}. {type(exc).__name__}: {exc}")
+
+        # Check result collector (note: results list is shared across threads)
+        num_results = len(self.context.result_collector.results)
+        num_failures = len(self.context.result_collector.failed_operations)
+        print(f"  Result collector total: {num_results} results, {num_failures} failures recorded")
+
+        # Clean up task-local storage now that all operations are complete
+        self.context.result_collector.cleanup_task_local_storage()
+
+    def execute_multiple(self, num_ops: int, warmup_ops: int = 0) -> None:
+        """Synchronous wrapper that runs async execution in event loop.
+
+        Args:
+            num_ops: Number of operations to execute (timed)
+            warmup_ops: Number of warm-up operations to execute first
+        """
+        # Run the async execution in the event loop
+        asyncio.run(self.execute_multiple_async(num_ops, warmup_ops))
+
+
 # ============================================================================
 # Benchmark Execution
 # ============================================================================
@@ -1507,7 +1759,11 @@ class BenchmarkExecutor:
             )
 
             # Create and execute operations
-            runner = OperationRunner(self.config, ctx)
+            # Use async runner if concurrent_requests > 1, otherwise sync runner
+            if self.config.concurrent_requests > 1:
+                runner = AsyncOperationRunner(self.config, ctx)
+            else:
+                runner = OperationRunner(self.config, ctx)
             runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
 
     def _execute_multi_threaded(
@@ -1555,7 +1811,11 @@ class BenchmarkExecutor:
                 )
 
                 # Create and execute operations
-                runner = OperationRunner(self.config, ctx)
+                # Use async runner if concurrent_requests > 1, otherwise sync runner
+                if self.config.concurrent_requests > 1:
+                    runner = AsyncOperationRunner(self.config, ctx)
+                else:
+                    runner = OperationRunner(self.config, ctx)
                 runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
 
         # Execute with thread pool

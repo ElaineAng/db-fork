@@ -11,7 +11,7 @@ DOLT_USER = os.environ.get("DOLT_USER", "postgres")
 DOLT_PASSWORD = os.environ.get("DOLT_PASSWORD", "password")
 DOLT_HOST = os.environ.get("DOLT_HOST", "localhost")
 DOLT_PORT = int(os.environ.get("DOLT_PORT", "5432"))
-DOLT_DATA_DIR = os.environ.get("DOLT_DATA_DIR", "/tmp/doltgres_data/databases")
+DOLT_DATA_DIR = os.environ.get("DOLT_DATA_DIR", "~/doltgres/databases")
 
 
 def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
@@ -211,3 +211,36 @@ class DoltToolSuite(DBToolSuite):
         return dbutil.get_directory_size_bytes(
             os.path.join(DOLT_DATA_DIR, self.db_name)
         )
+
+    # ========================================================================
+    # Async implementations
+    # ========================================================================
+
+    async def _create_branch_impl_async(
+        self, branch_name: str, parent_id: str = None
+    ) -> None:
+        """Async version of _create_branch_impl."""
+        # Only checkout to parent if specified, otherwise create from current branch
+        if parent_id:
+            await self._connect_branch_impl_async(parent_id)
+        cmd = f"SELECT dolt_checkout('-b', '{branch_name}');"
+        await super().execute_sql_async(cmd)
+
+    async def _connect_branch_impl_async(self, branch_name: str) -> None:
+        """Async version of _connect_branch_impl."""
+        cmd = f"SELECT dolt_checkout('{branch_name}');"
+        await super().execute_sql_async(cmd)
+
+    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
+        """Async version of _get_current_branch_impl."""
+        cmd = "SELECT active_branch();"
+        result = await super().execute_sql_async(cmd)
+        # Dolt's branch name is unique and can be used as an ID.
+        return (result[0][0], result[0][0])
+
+    async def _delete_branch_impl_async(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Async version of _delete_branch_impl."""
+        cmd = f"SELECT dolt_branch('-D', '{branch_name}');"
+        await super().execute_sql_async(cmd)

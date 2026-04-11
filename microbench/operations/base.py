@@ -53,6 +53,24 @@ class Operation(ABC):
         """
         pass
 
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Execute the operation asynchronously.
+
+        Default implementation runs the sync execute() in a thread pool.
+        Override this method for true async support using await on
+        context.db_tools.*_async() methods.
+
+        Args:
+            context: WorkerContext providing access to database connection,
+                     random number generator, data generators, etc.
+
+        Raises:
+            Exception: Any database or operation-specific errors.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.execute, context)
+
     @abstractmethod
     def requires_setup_data(self) -> bool:
         """Whether this operation requires data from setup phase.

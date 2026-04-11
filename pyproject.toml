@@ -17,6 +17,7 @@ dependencies = [
     "numpy",
     "protobuf",
     "psycopg2-binary",
+    "psycopg[binary]>=3.0",  # For async database operations
     "python-dotenv",
     "langchain",
     "langgraph",

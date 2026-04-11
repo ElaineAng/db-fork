@@ -26,8 +26,12 @@ class BranchCreateOperation(Operation):
     def __init__(self):
         pass
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed branch creation operation."""
+    def _generate_branch_info(self, context: 'WorkerContext'):
+        """Shared logic: generate branch name and get parent info.
+
+        Returns:
+            Tuple of (branch_name, current_branch_id)
+        """
         # Get unique branch ID and current branch info
         branch_id = context.get_next_branch_id()
         _, current_branch_id = context.db_tools.get_current_branch()
@@ -35,8 +39,29 @@ class BranchCreateOperation(Operation):
         # Generate unique branch name
         branch_name = f"branch_tid{context.thread_id}_{branch_id}"
 
+        return (branch_name, current_branch_id)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed branch creation operation."""
+        branch_name, current_branch_id = self._generate_branch_info(context)
+
         # Create the branch (timed, with optional storage measurement)
         context.db_tools.create_branch(
+            branch_name=branch_name,
+            parent_id=current_branch_id,
+            timed=True,
+            storage=context.measure_storage,
+        )
+
+        # Track the newly created branch
+        context.add_branch(branch_name)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        branch_name, current_branch_id = self._generate_branch_info(context)
+
+        # Create the branch asynchronously (timed, with optional storage measurement)
+        await context.db_tools.create_branch_async(
             branch_name=branch_name,
             parent_id=current_branch_id,
             timed=True,
@@ -63,15 +88,34 @@ class BranchConnectOperation(Operation):
     def __init__(self):
         pass
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed branch connection operation."""
+    def _select_branch(self, context: 'WorkerContext'):
+        """Shared logic: select a random branch to connect to.
+
+        Returns:
+            branch_name to connect to
+        """
         # Get a random existing branch
         branch_to_connect = context.get_random_branch()
         if not branch_to_connect:
             raise ValueError("No branches available to connect to")
+        return branch_to_connect
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed branch connection operation."""
+        branch_to_connect = self._select_branch(context)
 
         # Connect to the branch (timed)
         context.db_tools.connect_branch(branch_to_connect, timed=True)
+
+        # Clear cached primary keys since we're on a different branch
+        context.clear_pk_cache()
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared selection logic."""
+        branch_to_connect = self._select_branch(context)
+
+        # Connect to the branch asynchronously (timed)
+        await context.db_tools.connect_branch_async(branch_to_connect, timed=True)
 
         # Clear cached primary keys since we're on a different branch
         context.clear_pk_cache()
@@ -94,8 +138,12 @@ class BranchDeleteOperation(Operation):
     def __init__(self):
         pass
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed branch deletion operation."""
+    def _select_branch_to_delete(self, context: 'WorkerContext'):
+        """Shared logic: select a branch to delete (not current).
+
+        Returns:
+            branch_name to delete
+        """
         # Get a random branch to delete (not the current one)
         current_branch_name, _ = context.db_tools.get_current_branch()
         branch_to_delete = context.get_random_branch()
@@ -109,8 +157,24 @@ class BranchDeleteOperation(Operation):
                 raise ValueError("No other branches available to delete")
             branch_to_delete = context.rnd.choice(other_branches)
 
+        return branch_to_delete
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed branch deletion operation."""
+        branch_to_delete = self._select_branch_to_delete(context)
+
         # Delete the branch (timed)
         context.db_tools.delete_branch(branch_to_delete, timed=True)
+
+        # Remove from branch tracking
+        context.remove_branch(branch_to_delete)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared selection logic."""
+        branch_to_delete = self._select_branch_to_delete(context)
+
+        # Delete the branch asynchronously (timed)
+        await context.db_tools.delete_branch_async(branch_to_delete, timed=True)
 
         # Remove from branch tracking
         context.remove_branch(branch_to_delete)

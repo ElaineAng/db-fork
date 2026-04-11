@@ -1,10 +1,19 @@
 import functools
+import time
 from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
+from contextlib import asynccontextmanager
 
 import dblib.result_collector as rc
 from dblib import result_pb2 as rslt
+
+# Type hint for async connection (optional import)
+try:
+    from psycopg import AsyncConnection
+    _AsyncConnection = AsyncConnection
+except ImportError:
+    _AsyncConnection = None
 
 
 def _require_connection(func):
@@ -23,14 +32,18 @@ class DBToolSuite(ABC):
     """
     An API for interacting with Postgres via a shared connection. The connection
     is always for a specific database, and, in some cases, a specific branch.
+
+    Supports both synchronous (psycopg2) and asynchronous (psycopg3) connections.
     """
 
     def __init__(
         self,
         connection: _pgconn = None,
         result_collector: Optional[rc.ResultCollector] = None,
+        async_connection = None,  # Optional async connection
     ):
-        self.conn = connection
+        self.conn = connection  # Sync connection (psycopg2)
+        self.async_conn = async_connection  # Async connection (psycopg3)
         self.result_collector = result_collector
         if not self.result_collector:
             print("Result collector is not provided.")
@@ -131,6 +144,52 @@ class DBToolSuite(ABC):
             branch_id: Backend-specific ID of the branch to delete.
         """
         pass
+
+    ######################################################################
+    # Protected async methods (async variants of above)
+    ######################################################################
+
+    async def _connect_branch_impl_async(self, branch_name: str) -> None:
+        """
+        Async version of _connect_branch_impl.
+        Default implementation: call sync version in thread pool.
+        Backends should override for true async support.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._connect_branch_impl, branch_name)
+
+    async def _create_branch_impl_async(
+        self, branch_name: str, parent_id: str = None
+    ) -> None:
+        """
+        Async version of _create_branch_impl.
+        Default implementation: call sync version in thread pool.
+        Backends should override for true async support.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._create_branch_impl, branch_name, parent_id)
+
+    async def _get_current_branch_impl_async(self) -> Tuple[str, str]:
+        """
+        Async version of _get_current_branch_impl.
+        Default implementation: call sync version in thread pool.
+        Backends should override for true async support.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_current_branch_impl)
+
+    async def _delete_branch_impl_async(self, branch_name: str, branch_id: str) -> None:
+        """
+        Async version of _delete_branch_impl.
+        Default implementation: call sync version in thread pool.
+        Backends should override for true async support.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._delete_branch_impl, branch_name, branch_id)
 
     #########################################################################
     # Public methods
@@ -363,3 +422,138 @@ class DBToolSuite(ABC):
             self.result_collector.record_sql_query(query_with_args)
             self.result_collector.flush_record()
         return res
+
+    #########################################################################
+    # Async public methods
+    #########################################################################
+
+    async def close_connection_async(self) -> None:
+        """Closes the async database connection."""
+        if self.async_conn:
+            await self.async_conn.close()
+            self.async_conn = None
+
+    async def create_branch_async(
+        self, branch_name: str, parent_id: str = None, timed: bool = True, storage: bool = False
+    ) -> None:
+        """Async version of create_branch."""
+        try:
+            async with self._async_measure_ops(
+                op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
+            ):
+                await self._create_branch_impl_async(branch_name, parent_id)
+        except Exception as e:
+            raise Exception(f"Error creating branch: {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
+
+    async def connect_branch_async(self, branch_name: str, timed: bool = False, storage: bool = False) -> None:
+        """Async version of connect_branch."""
+        try:
+            async with self._async_measure_ops(
+                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
+            ):
+                await self._connect_branch_impl_async(branch_name)
+        except Exception as e:
+            raise Exception(f"Error connecting to branch: {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
+
+    async def get_current_branch_async(self) -> Tuple[str, str]:
+        """Async version of get_current_branch."""
+        return await self._get_current_branch_impl_async()
+
+    async def delete_branch_async(
+        self,
+        branch_name: str,
+        branch_id: str = "",
+        timed: bool = True,
+        storage: bool = False,
+    ) -> None:
+        """Async version of delete_branch."""
+        try:
+            async with self._async_measure_ops(
+                op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
+            ):
+                await self._delete_branch_impl_async(branch_name, branch_id)
+        except Exception as e:
+            raise Exception(f"Error deleting branch '{branch_name}': {e}")
+        if timed:
+            self.result_collector.record_num_keys_touched(0)
+            self.result_collector.flush_record()
+
+    async def execute_sql_async(
+        self,
+        query: str,
+        vars=None,
+        timed: bool = False,
+        storage: bool = False,
+    ) -> list[tuple]:
+        """
+        Async version of execute_sql. Runs an SQL query using async connection.
+        """
+        if not self.async_conn:
+            raise ValueError("Async connection not established. Cannot execute async SQL.")
+
+        res = None
+        try:
+            async with self.async_conn.cursor() as cur:
+                # Timing both the execute and fetchall together
+                op_type = rc.GetOpTypeFromSQL(query)
+                async with self._async_measure_ops(timed, op_type, storage=storage):
+                    await cur.execute(query, vars)
+                    # cur.description is None for INSERT/UPDATE (no results to fetch)
+                    if cur.description is not None:
+                        res = await cur.fetchall()
+        except Exception as e:
+            raise Exception(f"Error executing async sql query: {query}; {vars}; {e}")
+        if timed:
+            # Record query with args for debugging/analysis
+            query_with_args = f"{query} -- args: {vars}" if vars else query
+            self.result_collector.record_sql_query(query_with_args)
+            self.result_collector.flush_record()
+        return res
+
+    @asynccontextmanager
+    async def _async_measure_ops(self, timed: bool, op_type: rslt.OpType, storage: bool = False):
+        """
+        Async context manager for measuring operation timing.
+        """
+        state = self.result_collector._get_thread_state()
+
+        # Measure storage before if requested
+        if storage and state.storage_fn:
+            state.disk_size_before = state.storage_fn() if callable(state.storage_fn) else 0
+
+        if not timed and not storage:
+            yield
+            return
+
+        # Capture start time
+        start_perf = time.perf_counter() if timed else None
+        start_wall = time.time() if timed else None
+
+        try:
+            yield
+        except Exception as e:
+            raise e
+        else:
+            if timed:
+                # Capture end time immediately after operation
+                end_perf = time.perf_counter()
+                end_wall = time.time()
+                latency = end_perf - start_perf
+
+                # Validate and set operation type
+                self.result_collector._validate_and_set_op_type(op_type)
+
+                # Record timing
+                state.current_latency = latency
+                state.start_time = start_wall
+                state.end_time = end_wall
+
+            # Measure storage after if requested
+            if storage and state.storage_fn:
+                state.disk_size_after = state.storage_fn() if callable(state.storage_fn) else 0

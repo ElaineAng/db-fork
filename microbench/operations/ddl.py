@@ -32,8 +32,12 @@ class AddIndexOperation(Operation):
         self.table_name = table_name
         self.column_name = column_name
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed index creation operation."""
+    def _prepare_index_creation(self, context: 'WorkerContext'):
+        """Shared logic: prepare index creation SQL.
+
+        Returns:
+            Tuple of (create_index_sql, index_name)
+        """
         # Get column name from config if not provided
         column_name = self.column_name
         if not column_name:
@@ -56,9 +60,27 @@ class AddIndexOperation(Operation):
 
         index_name = f"idx_{self.table_name}_{column_name}_{idx_num}"
 
-        # Create the index (timed)
+        # Create the index SQL
         create_index_sql = f"CREATE INDEX {index_name} ON {self.table_name}({column_name})"
+
+        return (create_index_sql, index_name)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed index creation operation."""
+        create_index_sql, index_name = self._prepare_index_creation(context)
+
+        # Create the index (timed)
         context.db_tools.execute_sql(create_index_sql, timed=True)
+
+        # Track the created index
+        context.track_created_index(self.table_name, index_name)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        create_index_sql, index_name = self._prepare_index_creation(context)
+
+        # Create the index asynchronously (timed)
+        await context.db_tools.execute_sql_async(create_index_sql, timed=True)
 
         # Track the created index
         context.track_created_index(self.table_name, index_name)

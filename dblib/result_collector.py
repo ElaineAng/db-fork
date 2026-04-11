@@ -2,7 +2,9 @@ import os
 import uuid
 import time
 import threading
+import asyncio
 from contextlib import contextmanager
+from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dblib import result_pb2 as rslt
@@ -11,6 +13,27 @@ from util.sql_parse import get_sql_operation_keyword
 
 # Thread-local storage for thread_id
 _thread_local = threading.local()
+
+
+class _OperationState:
+    """State for a single operation (used in both thread-local and task-local storage)."""
+    def __init__(self):
+        self.initialized = True
+        self.current_table_name = ""
+        self.current_table_schema = ""
+        self.initial_db_size = 0
+        self.seed = 0
+        self.current_op_type = rslt.OpType.UNSPECIFIED
+        self.current_latency = 0.0
+        self.num_keys_touched = 0
+        self.sql_query = ""
+        self.disk_size_before = 0
+        self.disk_size_after = 0
+        self.branch_count = 0
+        self.step_id = -1
+        self.storage_fn = None
+        self.start_time = 0.0
+        self.end_time = 0.0
 
 
 def set_current_thread_id(thread_id: int) -> None:
@@ -98,6 +121,10 @@ class ResultCollector:
         # Thread-local storage for per-thread context and metrics
         self._thread_local = threading.local()
 
+        # Task-local storage for async operations (dict[task_id -> state])
+        # Protected by _lock for thread-safety
+        self._task_local = {}
+
         # Shared results list (protected by lock)
         self.results = []
         self.iteration_counter = 0
@@ -105,30 +132,37 @@ class ResultCollector:
         # Track failed operations
         self.failed_operations = []  # List of failure details
 
+        # Debug counters for async mode
+        self._flush_record_calls = 0
+        self._task_states_created = 0
+
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
 
     def _get_thread_state(self):
-        """Get or initialize thread-local state for the current thread."""
-        if not hasattr(self._thread_local, "initialized"):
-            # Initialize thread-local state
-            self._thread_local.initialized = True
-            self._thread_local.current_table_name = ""
-            self._thread_local.current_table_schema = ""
-            self._thread_local.initial_db_size = 0
-            self._thread_local.seed = 0
-            self._thread_local.current_op_type = rslt.OpType.UNSPECIFIED
-            self._thread_local.current_latency = 0.0
-            self._thread_local.num_keys_touched = 0
-            self._thread_local.sql_query = ""
-            self._thread_local.disk_size_before = 0
-            self._thread_local.disk_size_after = 0
-            self._thread_local.branch_count = 0
-            self._thread_local.step_id = -1
-            self._thread_local.storage_fn = None
-            self._thread_local.start_time = 0.0
-            self._thread_local.end_time = 0.0
-        return self._thread_local
+        """Get or initialize state for the current thread or async task.
+
+        For async operations, uses task-local storage (one state per concurrent task).
+        For sync operations, uses thread-local storage (one state per thread).
+        """
+        # Check if we're in an async context
+        try:
+            task = asyncio.current_task()
+            if task is not None:
+                # Async mode: use task-local storage
+                task_id = id(task)
+                with self._lock:
+                    if task_id not in self._task_local:
+                        self._task_local[task_id] = _OperationState()
+                    return self._task_local[task_id]
+        except RuntimeError:
+            # Not in async context, fall through to thread-local
+            pass
+
+        # Sync mode: use thread-local storage
+        if not hasattr(self._thread_local, "state"):
+            self._thread_local.state = _OperationState()
+        return self._thread_local.state
 
     def _reset_metrics(self):
         """Reset all metric fields for a new record (thread-local)."""
@@ -149,6 +183,14 @@ class ResultCollector:
             self.results = []
             self.iteration_counter = 0
             self.failed_operations = []
+
+    def cleanup_task_local_storage(self):
+        """Clean up task-local storage for completed async operations.
+
+        Call this after all async operations are complete to free memory.
+        """
+        with self._lock:
+            self._task_local.clear()
 
     def set_context(
         self,
@@ -234,38 +276,51 @@ class ResultCollector:
         Create a Result proto with all current context and metrics, save it, and reset.
 
         Uses the thread-local thread_id set via set_current_thread_id().
+        For async operations, cleans up task-local storage after recording.
         """
-        state = self._get_thread_state()
+        try:
+            state = self._get_thread_state()
 
-        # Create and fill the Result proto
-        result = rslt.Result()
-        result.run_id = self.run_id
-        result.iteration_number = self.iteration_counter
-        result.table_name = state.current_table_name
-        result.table_schema = state.current_table_schema
-        result.initial_db_size = state.initial_db_size
-        result.random_seed = state.seed
+            # Create and fill the Result proto
+            result = rslt.Result()
+            result.run_id = self.run_id
+            # Note: iteration_number will be set inside the lock to avoid race conditions
+            result.table_name = state.current_table_name
+            result.table_schema = state.current_table_schema
+            result.initial_db_size = state.initial_db_size
+            result.random_seed = state.seed
 
-        # Fill in collected metrics
-        result.op_type = state.current_op_type
-        result.num_keys_touched = state.num_keys_touched
-        result.latency = state.current_latency
-        result.sql_query = state.sql_query
-        result.thread_id = get_current_thread_id()
-        result.disk_size_before = state.disk_size_before
-        result.disk_size_after = state.disk_size_after
-        result.branch_count = state.branch_count
-        result.step_id = state.step_id
-        result.start_time = state.start_time
-        result.end_time = state.end_time
+            # Fill in collected metrics
+            result.op_type = state.current_op_type
+            result.num_keys_touched = state.num_keys_touched
+            result.latency = state.current_latency
+            result.sql_query = state.sql_query
+            result.thread_id = get_current_thread_id()
+            result.disk_size_before = state.disk_size_before
+            result.disk_size_after = state.disk_size_after
+            result.branch_count = state.branch_count
+            result.step_id = state.step_id
+            result.start_time = state.start_time
+            result.end_time = state.end_time
 
-        # Append to results (thread-safe)
-        with self._lock:
-            self.results.append(result)
-            self.iteration_counter += 1
+            # Append to results (thread-safe)
+            # Set iteration_number inside lock to avoid race condition
+            with self._lock:
+                result.iteration_number = self.iteration_counter
+                self.results.append(result)
+                self.iteration_counter += 1
 
-        # Reset metric fields for next record
-        self._reset_metrics()
+            # Reset metrics for next operation
+            # For async mode: task-local state persists (will be GC'd when task ends)
+            # For sync mode: thread-local state persists (reused across operations)
+            self._reset_metrics()
+
+        except Exception as e:
+            # Log but don't crash if flush_record fails
+            import sys
+            print(f"ERROR in flush_record: {type(e).__name__}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
     def record_failure(self, error: Exception, operation_number: int = None) -> None:
         """

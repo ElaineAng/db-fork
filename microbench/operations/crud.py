@@ -24,8 +24,12 @@ class ReadOperation(Operation):
     def __init__(self, table_name: str):
         self.table_name = table_name
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed point read operation."""
+    def _prepare_read(self, context: 'WorkerContext'):
+        """Shared logic: prepare the read query and parameters.
+
+        Returns:
+            Tuple of (sql_query, params, key_to_read)
+        """
         # Select a random existing key
         key_to_read = context.select_random_key(self.table_name)
         if not key_to_read:
@@ -39,8 +43,23 @@ class ReadOperation(Operation):
         # Record that we're touching 1 key
         context.record_keys_touched(1)
 
+        return (select_sql, key_to_read)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed point read operation."""
+        select_sql, key_to_read = self._prepare_read(context)
+
         # Execute the timed read
         result = context.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        if not result:
+            raise ValueError("Read operation returned no results")
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        select_sql, key_to_read = self._prepare_read(context)
+
+        # Execute the timed read asynchronously
+        result = await context.db_tools.execute_sql_async(select_sql, key_to_read, timed=True)
         if not result:
             raise ValueError("Read operation returned no results")
 
@@ -61,8 +80,12 @@ class InsertOperation(Operation):
     def __init__(self, table_name: str):
         self.table_name = table_name
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed insert operation."""
+    def _generate_insert_data(self, context: 'WorkerContext'):
+        """Shared logic: generate insert SQL and row data.
+
+        Returns:
+            Tuple of (sql_query, col_names, pk_columns)
+        """
         col_names = dbh.get_all_columns(
             context.db_tools.get_current_connection(), self.table_name
         )
@@ -73,6 +96,12 @@ class InsertOperation(Operation):
 
         # Record that we're touching 1 key
         context.record_keys_touched(1)
+
+        return (insert_sql, col_names, pk_columns)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed insert operation."""
+        insert_sql, col_names, pk_columns = self._generate_insert_data(context)
 
         # Try to insert with retries for PK collisions
         inserted = False
@@ -88,6 +117,34 @@ class InsertOperation(Operation):
                 # Commit if not in autocommit mode
                 if not context.db_tools.autocommit:
                     context.db_tools.commit_changes(timed=True, message="insert")
+                break
+            except Exception as e:
+                if attempt == 4:  # Last attempt
+                    raise
+                continue  # Retry with new data
+
+        if not inserted:
+            raise ValueError("Failed to insert row after 5 attempts")
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        insert_sql, col_names, pk_columns = self._generate_insert_data(context)
+
+        # Try to insert with retries for PK collisions
+        inserted = False
+        for attempt in range(5):
+            row_data = context.generate_row(self.table_name)
+            pk_tuple = tuple(row_data[pk] for pk in pk_columns)
+
+            try:
+                await context.db_tools.execute_sql_async(insert_sql, row_data, timed=True)
+                context.track_modified_key(pk_tuple)
+                inserted = True
+
+                # Commit if not in autocommit mode (should not happen in async mode)
+                if not context.db_tools.autocommit:
+                    # Note: In async mode, autocommit is required
+                    pass
                 break
             except Exception as e:
                 if attempt == 4:  # Last attempt
@@ -114,8 +171,12 @@ class UpdateOperation(Operation):
     def __init__(self, table_name: str):
         self.table_name = table_name
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed point update operation."""
+    def _prepare_update(self, context: 'WorkerContext'):
+        """Shared logic: prepare the update query and parameters.
+
+        Returns:
+            Tuple of (sql_query, params, key_to_update)
+        """
         # Select a random existing key
         key_to_update = context.select_random_key(self.table_name)
         if not key_to_update:
@@ -148,12 +209,33 @@ class UpdateOperation(Operation):
         # Record that we're touching 1 key
         context.record_keys_touched(1)
 
+        return (update_sql, row_data, key_to_update)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed point update operation."""
+        update_sql, row_data, key_to_update = self._prepare_update(context)
+
         # Execute the timed update
         context.db_tools.execute_sql(update_sql, row_data, timed=True)
 
         # Commit if not in autocommit mode
         if not context.db_tools.autocommit:
             context.db_tools.commit_changes(timed=False, message="update")
+
+        # Track the modified key
+        context.track_modified_key(key_to_update)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        update_sql, row_data, key_to_update = self._prepare_update(context)
+
+        # Execute the timed update asynchronously
+        await context.db_tools.execute_sql_async(update_sql, row_data, timed=True)
+
+        # Commit if not in autocommit mode (should not happen in async mode)
+        if not context.db_tools.autocommit:
+            # Note: In async mode, autocommit is required
+            pass
 
         # Track the modified key
         context.track_modified_key(key_to_update)
@@ -174,8 +256,12 @@ class DeleteOperation(Operation):
     def __init__(self, table_name: str):
         self.table_name = table_name
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed delete operation."""
+    def _prepare_delete(self, context: 'WorkerContext'):
+        """Shared logic: prepare the delete query and parameters.
+
+        Returns:
+            Tuple of (sql_query, params, key_to_delete)
+        """
         # Select a random existing key
         key_to_delete = context.select_random_key(self.table_name)
         if not key_to_delete:
@@ -189,12 +275,33 @@ class DeleteOperation(Operation):
         # Record that we're touching 1 key
         context.record_keys_touched(1)
 
+        return (delete_sql, key_to_delete)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed delete operation."""
+        delete_sql, key_to_delete = self._prepare_delete(context)
+
         # Execute the timed delete
         context.db_tools.execute_sql(delete_sql, key_to_delete, timed=True)
 
         # Commit if not in autocommit mode
         if not context.db_tools.autocommit:
             context.db_tools.commit_changes(timed=False, message="delete")
+
+        # Remove from modified keys tracking
+        context.untrack_modified_key(key_to_delete)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        delete_sql, key_to_delete = self._prepare_delete(context)
+
+        # Execute the timed delete asynchronously
+        await context.db_tools.execute_sql_async(delete_sql, key_to_delete, timed=True)
+
+        # Commit if not in autocommit mode (should not happen in async mode)
+        if not context.db_tools.autocommit:
+            # Note: In async mode, autocommit is required
+            pass
 
         # Remove from modified keys tracking
         context.untrack_modified_key(key_to_delete)
@@ -217,8 +324,12 @@ class RangeReadOperation(Operation):
         self.table_name = table_name
         self.range_size = range_size
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed range read operation."""
+    def _prepare_range_read(self, context: 'WorkerContext'):
+        """Shared logic: prepare the range read query.
+
+        Returns:
+            Tuple of (sql_query, params, num_keys)
+        """
         # Prepare range query components
         range_info = context.prepare_range_query(
             self.table_name, self.range_size, "range read"
@@ -231,8 +342,19 @@ class RangeReadOperation(Operation):
         num_keys = len(range_info["keys_in_range"])
         context.record_keys_touched(num_keys)
 
+        return (select_sql, range_info["params"], num_keys)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed range read operation."""
+        select_sql, params, num_keys = self._prepare_range_read(context)
         # Execute the timed range read
-        context.db_tools.execute_sql(select_sql, range_info["params"], timed=True)
+        context.db_tools.execute_sql(select_sql, params, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        select_sql, params, num_keys = self._prepare_range_read(context)
+        # Execute the timed range read asynchronously
+        await context.db_tools.execute_sql_async(select_sql, params, timed=True)
 
     def requires_setup_data(self) -> bool:
         return True  # Needs existing rows to read from
@@ -252,8 +374,12 @@ class RangeUpdateOperation(Operation):
         self.table_name = table_name
         self.range_size = range_size
 
-    def execute(self, context: 'WorkerContext') -> None:
-        """Execute a timed range update operation."""
+    def _prepare_range_update(self, context: 'WorkerContext'):
+        """Shared logic: prepare the range update query.
+
+        Returns:
+            Tuple of (sql_query, params, keys_in_range, num_keys)
+        """
         # Prepare range query components
         range_info = context.prepare_range_query(
             self.table_name, self.range_size, "range update"
@@ -281,6 +407,12 @@ class RangeUpdateOperation(Operation):
         num_keys = len(range_info["keys_in_range"])
         context.record_keys_touched(num_keys)
 
+        return (update_sql, row_data, range_info["keys_in_range"], num_keys)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed range update operation."""
+        update_sql, row_data, keys_in_range, num_keys = self._prepare_range_update(context)
+
         # Execute the timed range update
         context.db_tools.execute_sql(update_sql, row_data, timed=True)
 
@@ -289,7 +421,23 @@ class RangeUpdateOperation(Operation):
             context.db_tools.commit_changes(timed=False, message="range update")
 
         # Track all keys in the range as modified
-        for key in range_info["keys_in_range"]:
+        for key in keys_in_range:
+            context.track_modified_key(key)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version using shared preparation logic."""
+        update_sql, row_data, keys_in_range, num_keys = self._prepare_range_update(context)
+
+        # Execute the timed range update asynchronously
+        await context.db_tools.execute_sql_async(update_sql, row_data, timed=True)
+
+        # Commit if not in autocommit mode (should not happen in async mode)
+        if not context.db_tools.autocommit:
+            # Note: In async mode, autocommit is required
+            pass
+
+        # Track all keys in the range as modified
+        for key in keys_in_range:
             context.track_modified_key(key)
 
     def requires_setup_data(self) -> bool:
