@@ -1491,7 +1491,7 @@ class AsyncOperationRunner:
         backend = self.config.backend
         db_name = self.config.database_setup.db_name
 
-        # For Neon, we need to get the full URI with credentials from the API
+        # For Neon and Dolt, we need to get the full URI with credentials
         # because DSN from psycopg2 doesn't include the password
         if backend == tp.Backend.NEON:
             from dblib.neon import NeonToolSuite
@@ -1506,6 +1506,15 @@ class AsyncOperationRunner:
                 branch_id=neon_tools.current_branch_id,
                 db_name=db_name
             )
+        elif backend == tp.Backend.DOLT:
+            # DoltgreSQL uses PostgreSQL protocol (psycopg2)
+            # Reconstruct URI with credentials from environment variables
+            from dblib.dolt import DoltToolSuite
+            uri = DoltToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.KPG:
+            # KPG also needs full URI with credentials
+            from dblib.kpg import KpgToolSuite
+            uri = KpgToolSuite.get_initial_connection_uri(db_name)
         else:
             # For other backends, try to get DSN from connection
             conn = self.context.db_tools.get_current_connection()
@@ -1520,18 +1529,10 @@ class AsyncOperationRunner:
             elif hasattr(conn, 'info') and hasattr(conn.info, 'dsn'):
                 uri = conn.info.dsn
             else:
-                # Fallback: try to construct URI from backend-specific methods
-                if backend == tp.Backend.DOLT:
-                    from dblib.dolt import DoltToolSuite
-                    uri = DoltToolSuite.get_initial_connection_uri(db_name)
-                elif backend == tp.Backend.KPG:
-                    from dblib.kpg import KpgToolSuite
-                    uri = KpgToolSuite.get_initial_connection_uri(db_name)
-                else:
-                    raise ValueError(
-                        f"Cannot determine connection URI for backend: {backend}. "
-                        f"Connection object has no DSN attribute."
-                    )
+                raise ValueError(
+                    f"Cannot determine connection URI for backend: {backend}. "
+                    f"Connection object has no DSN attribute."
+                )
 
         # Create async connection with the same URI as the sync connection
         async_conn = await psycopg.AsyncConnection.connect(uri, autocommit=True)
