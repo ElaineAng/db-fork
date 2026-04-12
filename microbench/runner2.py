@@ -1654,8 +1654,26 @@ class AsyncOperationRunner:
         Returns:
             dict with execution statistics (successes, failures, etc.)
         """
-        # Run the async execution in the event loop
-        return asyncio.run(self.execute_multiple_async(num_ops, warmup_ops))
+        # Create and manage event loop explicitly to avoid cleanup issues in threads
+        # This prevents "_ssock not found" errors in Python 3.12+ when running
+        # multiple event loops in ThreadPoolExecutor workers
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self.execute_multiple_async(num_ops, warmup_ops))
+        finally:
+            try:
+                # Cancel any remaining tasks
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                # Run loop once more to process cancellations
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            finally:
+                loop.close()
 
 
 # ============================================================================
