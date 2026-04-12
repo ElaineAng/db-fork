@@ -339,6 +339,10 @@ if [ "$SWEEP_MODE" = "proportional" ]; then
 
         # Generate run_id that includes both thread and branch counts
         RUN_ID="${BACKEND}_${SQL_PREFIX}_tp_t${NUM_THREADS}_b${NUM_BRANCHES}"
+        # Append concurrent requests if > 1 (async mode)
+        if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
+            RUN_ID="${RUN_ID}_cr${CONCURRENT_REQUESTS}"
+        fi
 
         echo ""
         echo "==================================================="
@@ -453,6 +457,10 @@ else
 
             # Generate run_id that includes both thread and branch counts
             RUN_ID="${BACKEND}_${SQL_PREFIX}_tp_t${NUM_THREADS}_b${NUM_BRANCHES}"
+            # Append concurrent requests if > 1 (async mode)
+            if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
+                RUN_ID="${RUN_ID}_cr${CONCURRENT_REQUESTS}"
+            fi
 
             echo ""
             echo "==================================================="
