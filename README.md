@@ -1,6 +1,6 @@
 # Database Benchmarking Framework
 
-A benchmarking framework for testing PostgreSQL-compatible branchable database backends (Dolt, Neon, etc.) with support for branching, schema, and data related operations. Includes both macrobenchmark and microbenchmark workloads.
+A parametrized and extensible benchmarking framework for testing PostgreSQL-compatible branchable database backends (Dolt, Neon, etc.) with support for branching, schema, and data related operations. Includes both macrobenchmark and microbenchmark workloads.
 
 ## Quick Start
 
@@ -11,21 +11,20 @@ source venv/bin/activate
 pip3 install .
 
 # 2. Run a macrobenchmark 
-```
 # Mini config, always start with this
 ./run_macrobench.sh --mini --outdir run_stats software_dev dolt 1 db_setup/ch-w1.sql
 
 # Full config with 2hr timeout
 ./run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
-```
-# 3. Run a microbenchmark (latency)
+
+# 3. Generate comparison plots
+python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
+
+# 4. Run a microbenchmark (latency)
 ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
 
-# 4. Run a microbenchmark (throughput)
+# 5. Run a microbenchmark (throughput)
 ./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional
-
-# 5. Generate comparison plots
-python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
 ```
 
 ---
@@ -132,7 +131,6 @@ Use `run_single_thread_bench.sh` to measure single-threaded operation latency:
 |--------|-------------|
 | `--seed <seed>` | Random seed for reproducibility |
 | `--shape <shape>` | Branch tree shape: `spine`, `bushy`, or `fan_out` (default: `spine`) |
-| `--measure-storage` | Measure disk size before/after each update |
 | `--operations <ops>` | Comma-separated list (e.g., `UPDATE,RANGE_UPDATE`) |
 | `--range-size <n>` | Range size for RANGE_UPDATE operation (default: 200) |
 | `--num-ops <n>` | Number of operations to perform |
@@ -146,9 +144,6 @@ Use `run_single_thread_bench.sh` to measure single-threaded operation latency:
 
 # Run with custom seed and bushy branch shape
 ./run_single_thread_bench.sh neon db_setup/tpcc_schema.sql 32 --seed 12345 --shape bushy
-
-# Run only UPDATE operations with storage measurement
-./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 8 --operations UPDATE --measure-storage
 
 # Run with custom range size
 ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16 --operations RANGE_UPDATE --range-size 500
@@ -318,22 +313,6 @@ python scripts/macro_comparison.py \
 | `--label-position` | Position for step labels as `x,y` in axes coordinates (default: `0.98,0.05`) |
 | `--label-fontsize` | Font size for step labels (default: 16) |
 
-#### Examples
-
-```bash
-# Compare full-scale macrobenchmarks
-python scripts/macro_comparison.py \
-    --dolt-dir run_stats_final/macro/dolt_full \
-    --neon-dir run_stats_final/macro/neon_full \
-    --outdir figures/macro_comparison
-
-# Compare mini macrobenchmarks
-python scripts/macro_comparison.py \
-    --dolt-dir run_stats_final/macro/dolt_mini \
-    --neon-dir run_stats_final/macro/neon_mini \
-    --outdir figures/macro_mini_comparison
-```
-
 #### Generated Plots
 
 The script generates the following figures in the output directory:
@@ -380,12 +359,6 @@ python scripts/plot_branch_latency_micro.py \
     --outdir figures/ \
     --operation connect
 
-# Plot both branch and connect (separate plots)
-python scripts/plot_branch_latency_micro.py \
-    --data-dir run_stats_final/micro/single_thread/branch \
-    --outdir figures/ \
-    --operation both
-
 # Plot combined (branch and connect on single plot)
 python scripts/plot_branch_latency_micro.py \
     --branch-dir run_stats_final/micro/single_thread/branch \
@@ -399,38 +372,9 @@ python scripts/plot_branch_latency_micro.py \
 Plot throughput vs threads/branches:
 
 ```bash
-python scripts/plot_throughput_micro.py \
+python scripts/plot_throughput_experiments.py \
     --data-dir <data_directory> \
-    --output-dir <output_figures_dir> \
-    [--operation <operation_type>]
-```
-
-#### Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `--data-dir` | Directory with throughput summary JSON files |
-| `--output-dir` | Directory to save figures |
-| `--operation` | (Optional) Specific operation type (e.g., `READ`, `RANGE_READ`, `UPDATE`) |
-
-#### Examples
-
-```bash
-# Plot all operations from proportional sweep
-python scripts/plot_throughput_micro.py \
-    --data-dir run_stats_final/micro/tp_proportional \
-    --output-dir figures/throughput
-
-# Plot specific operation
-python scripts/plot_throughput_micro.py \
-    --data-dir run_stats_final/micro/tp_proportional \
-    --operation READ \
-    --output-dir figures/throughput
-
-# Plot fixed-branch sweep results
-python scripts/plot_throughput_micro.py \
-    --data-dir run_stats_final/micro/tp_fix_branch \
-    --output-dir figures/throughput_fixed_branch
+    --output <output_figures_path> 
 ```
 
 ---
@@ -467,48 +411,7 @@ run_stats_final/micro/
 └── tp_proportional/    # Throughput: proportional threads and branches
 ```
 
-### Parquet Schema
-
-#### Macrobenchmark Parquet
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `run_id` | string | Benchmark run identifier |
-| `iteration_number` | int | Sequential operation number |
-| `op_type` | int | Operation type (see below) |
-| `latency` | float | Operation latency in seconds |
-| `sql_query` | string | Actual SQL executed |
-| `thread_id` | int | Worker thread ID |
-| `step_id` | int | Workflow step ID |
-| `branch_count` | int | Current number of branches |
-
-#### Microbenchmark Parquet
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `run_id` | string | Benchmark run identifier |
-| `iteration_number` | int | Sequential operation number |
-| `op_type` | int | Operation type (see below) |
-| `latency` | float | Operation latency in seconds |
-| `num_keys_touched` | int | Number of rows affected |
-| `table_name` | string | Target table name |
-| `sql_query` | string | Actual SQL executed |
-| `random_seed` | int | Random seed used |
-
-### Operation Types
-
-| Code | Operation | Description |
-|------|-----------|-------------|
-| `0` | UNSPECIFIED | Unspecified operation |
-| `1` | BRANCH_CREATE | Create a new branch |
-| `2` | BRANCH_CONNECT | Connect to a branch |
-| `3` | READ | Single-row read |
-| `4` | INSERT | Insert operation |
-| `5` | UPDATE | Update operation |
-| `6` | COMMIT | Commit transaction |
-| `7` | DDL | DDL operation (schema change) |
-| `8` | BRANCH_DELETE | Delete a branch |
-| `9` | API_RETRY_WAIT | API retry wait (overhead) |
+### Parquet Schema (TODO)
 
 ---
 
@@ -543,23 +446,4 @@ NEON_CONNECTION_STRING=postgresql://user:pass@host.neon.tech/dbname
 - **Workflow configurations**: See `macrobench/configs/` for workflow definitions
 - **Microbenchmark configs**: See `microbench/configs/` for example configurations
 - **Database schemas**: See `db_setup/` for SQL dump files
-- **Library functions**: See `bench_lib.sh` for reusable benchmark utilities
 
----
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Database connection errors**: Check that your backend is running and accessible
-2. **Permission errors**: Ensure your database user has CREATE/DROP permissions
-3. **Missing dependencies**: Run `pip install .` to install all required packages
-4. **Out of memory**: Reduce `--max-branches` or `--num-ops` for smaller tests
-5. **Neon rate limits**: Add delays between runs or use `--measure-storage` cautiously
-
-### Getting Help
-
-For issues or questions:
-- Check the documentation in each script's header comments
-- Review the example configurations in `macrobench/configs/` and `microbench/configs/`
-- Examine the benchmark library functions in `bench_lib.sh`
