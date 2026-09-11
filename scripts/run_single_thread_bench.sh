@@ -187,7 +187,7 @@ get_num_ops() {
         BRANCH_CONNECT|READ|INSERT|UPDATE|DELETE|RANGE_READ)
             echo 1000
             ;;
-        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM)
+        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM|DDL_ADD_COLUMN|DDL_REMOVE_COLUMN)
             echo 10
             ;;
         *)
