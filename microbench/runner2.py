@@ -69,6 +69,9 @@ from microbench.operations import (
     AddIndexOperation,
     RemoveIndexOperation,
     VacuumOperation,
+    AddColumnOperation,
+    RemoveColumnOperation,
+
 )
 
 # Utility imports
@@ -893,6 +896,7 @@ class WorkerContext:
 
         # Index tracking for DDL operations
         self._created_indexes: Dict[str, List[str]] = {}  # table -> [index_names]
+        self._created_columns: Dict[str, List[str]] = {}  # table -> [column_names]
 
     def __enter__(self) -> 'WorkerContext':
         """Initialize database connection and tools."""
@@ -1163,6 +1167,27 @@ class WorkerContext:
             if index_name in self._created_indexes[table_name]:
                 self._created_indexes[table_name].remove(index_name)
 
+    def track_created_column(self, table_name: str, column_name: str) -> None:
+        """Track a benchmark-created column so it can be safely dropped later."""
+        self._created_columns.setdefault(table_name, []).append(column_name)
+
+    def untrack_column(self, table_name: str, column_name: str) -> None:
+        """Remove a column from tracking."""
+        if table_name in self._created_columns:
+            if column_name in self._created_columns[table_name]:
+                self._created_columns[table_name].remove(column_name)
+
+    def get_random_created_column(self, table_name: str) -> Optional[str]:
+        """Get a random benchmark-created column for this table.
+
+        Only returns columns this benchmark added, never original schema
+        columns, so DROP COLUMN can never corrupt the base dataset.
+        """
+        columns = self._created_columns.get(table_name, [])
+        if columns:
+            return self.rnd.choice(columns)
+        return None
+
     def get_random_index(self, table_name: str) -> Optional[str]:
         """Get a random index name from the table."""
         indexes = self._created_indexes.get(table_name, [])
@@ -1418,6 +1443,21 @@ class AsyncOperationRunner:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.DDL_VACUUM:
             return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+            )
+        elif op_type == tp.OperationType.DDL_REMOVE_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+            )
         elif op_type in [
             tp.OperationType.READ,
             tp.OperationType.INSERT,
@@ -2120,6 +2160,8 @@ def register_all_operations() -> None:
     OperationRegistry.register(tp.OperationType.DDL_ADD_INDEX, AddIndexOperation)
     OperationRegistry.register(tp.OperationType.DDL_REMOVE_INDEX, RemoveIndexOperation)
     OperationRegistry.register(tp.OperationType.DDL_VACUUM, VacuumOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_COLUMN, AddColumnOperation)
+    OperationRegistry.register(tp.OperationType.DDL_REMOVE_COLUMN, RemoveColumnOperation)
 
 
 # ============================================================================
