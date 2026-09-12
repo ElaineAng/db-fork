@@ -30,7 +30,8 @@ from microbench.operations.ddl import (
     RemoveColumnOperation,
     RemoveIndexOperation,
     VacuumOperation,
-
+    BackfillOperation,
+    AddColumnWithDefaultOperation,
 )
 
 
@@ -54,4 +55,6 @@ __all__ = [
     "RemoveColumnOperation",
     "RemoveIndexOperation",
     "VacuumOperation",
+    "BackfillOperation",
+    "AddColumnWithDefaultOperation",
 ]

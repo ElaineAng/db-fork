@@ -287,3 +287,162 @@ class RemoveColumnOperation(Operation):
 
     def get_operation_type(self) -> rslt.OpType:
         return rslt.OpType.DDL
+
+class BackfillOperation(Operation):
+    """Rewrite an existing column across a fraction of the table's rows.
+ 
+    This is the row-rewriting half of schema evolution: adding a column is
+    usually metadata-only, but populating it touches every affected row. In
+    a mining study of 11,562 DDL operations across six production OSS
+    projects, backfills were 10.5% of all schema changes - and they are the
+    operation most responsible for storage amplification on copy-on-write
+    and versioned storage engines.
+ 
+    Cost is therefore parameterised by *rows rewritten*, not by statement
+    count: backfill_fraction controls what share of the table is updated.
+    """
+ 
+    def __init__(
+        self,
+        table_name: str,
+        backfill_fraction: float = 1.0,
+        column_name: Optional[str] = None,
+    ):
+        self.table_name = table_name
+        self.backfill_fraction = max(0.0, min(1.0, backfill_fraction))
+        self.column_name = column_name
+ 
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        """Pick the column to rewrite.
+ 
+        Prefers an explicitly configured column, then a column this
+        benchmark created, then any non-PK column. We never rewrite a
+        primary key column.
+        """
+        if self.column_name:
+            return self.column_name
+ 
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+ 
+        pk_columns = context.get_pk_columns(self.table_name)
+        all_columns = dbh.get_all_columns(
+            context.db_tools.get_current_connection(), self.table_name
+        )
+        non_pk = [c for c in all_columns if c not in pk_columns]
+        if not non_pk:
+            raise ValueError(
+                f"No non-PK column available to backfill in {self.table_name}"
+            )
+        return non_pk[0]
+ 
+    def _prepare_backfill(self, context: 'WorkerContext'):
+        """Shared logic: build the UPDATE statement and its parameters.
+ 
+        Returns:
+            Tuple of (sql, params, rows_targeted)
+        """
+        column_name = self._resolve_column(context)
+ 
+        total_keys = context.get_existing_key_count(self.table_name)
+        if total_keys == 0:
+            raise ValueError(
+                f"No rows to backfill in {self.table_name}. The table is "
+                f"empty - check inserts_per_branch in the setup config."
+            )
+ 
+        # Rows to rewrite: at least one, at most the whole table.
+        rows_targeted = max(1, int(round(self.backfill_fraction * total_keys)))
+ 
+        range_info = context.prepare_range_query(
+            self.table_name, rows_targeted, "backfill"
+        )
+ 
+        params = dict(range_info["params"])
+        params["_backfill_value"] = context.rnd.randint(0, 1_000_000)
+ 
+        sql = (
+            f"UPDATE {self.table_name} "
+            f"SET {column_name} = %(_backfill_value)s "
+            f"WHERE {range_info['where_clause']};"
+        )
+        return sql, params, len(range_info["keys_in_range"])
+ 
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed backfill over a fraction of the table."""
+        sql, params, rows = self._prepare_backfill(context)
+        context.db_tools.execute_sql(sql, params, timed=True)
+ 
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version of the backfill."""
+        sql, params, rows = self._prepare_backfill(context)
+        await context.db_tools.execute_sql_async(sql, params, timed=True)
+ 
+    def requires_setup_data(self) -> bool:
+        return True  # Needs rows to rewrite
+ 
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+ 
+ 
+class AddColumnWithDefaultOperation(Operation):
+    """Add a column WITH a default value.
+ 
+    The interesting twin of ADD COLUMN: without a default, most engines
+    treat this as a catalog-only change; with a default, some engines must
+    rewrite every existing row. Running both and comparing isolates that
+    implicit rewrite - the difference between the two is the cost the engine
+    hides behind identical-looking DDL.
+    """
+ 
+    _column_counter = 0
+    _counter_lock = threading.Lock()
+ 
+    def __init__(
+        self,
+        table_name: str,
+        column_name: Optional[str] = None,
+        column_type: str = "INTEGER",
+        default_value: str = "0",
+    ):
+        self.table_name = table_name
+        self.column_name = column_name
+        self.column_type = column_type
+        self.default_value = default_value or "0"
+ 
+    def _next_column_name(self) -> str:
+        if self.column_name:
+            return self.column_name
+        with AddColumnWithDefaultOperation._counter_lock:
+            AddColumnWithDefaultOperation._column_counter += 1
+            col_num = AddColumnWithDefaultOperation._column_counter
+        return f"col_default_{col_num}"
+ 
+    def execute(self, context: 'WorkerContext') -> None:
+        """Execute a timed column addition with a default value."""
+        column_name = self._next_column_name()
+        sql = (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD COLUMN {column_name} {self.column_type} "
+            f"DEFAULT {self.default_value}"
+        )
+        context.db_tools.execute_sql(sql, timed=True)
+        context.track_created_column(self.table_name, column_name)
+ 
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version of column addition with a default."""
+        column_name = self._next_column_name()
+        sql = (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD COLUMN {column_name} {self.column_type} "
+            f"DEFAULT {self.default_value}"
+        )
+        await context.db_tools.execute_sql_async(sql, timed=True)
+        context.track_created_column(self.table_name, column_name)
+ 
+    def requires_setup_data(self) -> bool:
+        return True  # Needs table to exist
+ 
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL

@@ -71,7 +71,8 @@ from microbench.operations import (
     VacuumOperation,
     AddColumnOperation,
     RemoveColumnOperation,
-
+    BackfillOperation,
+    AddColumnWithDefaultOperation,
 )
 
 # Utility imports
@@ -1096,6 +1097,19 @@ class WorkerContext:
         """Clear cached primary keys (e.g., after branch switch)."""
         self._existing_pks = []
 
+    def get_existing_key_count(self, table_name: str) -> int:
+        """Number of existing primary keys in the table.
+
+        Used to turn a backfill fraction into a concrete row count.
+        """
+        pk_columns = self.get_pk_columns(table_name)
+        existing_pks = self._existing_pks or dbh.get_pk_values(
+            self.db_tools.get_current_connection(), table_name, pk_columns
+        )
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
+        return len(existing_pks) if existing_pks else 0
+
     def prepare_range_query(
         self, table_name: str, range_size: int, operation_name: str
     ) -> dict:
@@ -1327,15 +1341,28 @@ class OperationRunner:
                 table_name=table_name,
                 column_name=self.config.ddl_config.column_name or None,
                 column_type=(
-                    self.config.ddl_config.column_type or "INTEGER"
-                ),
-            )
+                    self.config.ddl_config.column_type or "INTEGER"),)
         elif op_type == tp.OperationType.DDL_REMOVE_COLUMN:
             return OperationRegistry.create(
                 op_type,
                 table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,)
+        elif op_type == tp.OperationType.DDL_BACKFILL:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                backfill_fraction=(
+                    self.config.ddl_config.backfill_fraction or 1.0),
+                column_name=self.config.ddl_config.column_name or None,)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN_WITH_DEFAULT:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
                 column_name=self.config.ddl_config.column_name or None,
-            )
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+                default_value=self.config.ddl_config.default_value or "0",)
         elif op_type in [
             tp.OperationType.READ,
             tp.OperationType.INSERT,
@@ -2177,6 +2204,8 @@ def register_all_operations() -> None:
     OperationRegistry.register(tp.OperationType.DDL_VACUUM, VacuumOperation)
     OperationRegistry.register(tp.OperationType.DDL_ADD_COLUMN, AddColumnOperation)
     OperationRegistry.register(tp.OperationType.DDL_REMOVE_COLUMN, RemoveColumnOperation)
+    OperationRegistry.register(tp.OperationType.DDL_BACKFILL, BackfillOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_COLUMN_WITH_DEFAULT,AddColumnWithDefaultOperation,)
 
 
 # ============================================================================
