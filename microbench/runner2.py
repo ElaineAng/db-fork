@@ -1321,6 +1321,21 @@ class OperationRunner:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.DDL_VACUUM:
             return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+            )
+        elif op_type == tp.OperationType.DDL_REMOVE_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+            )
         elif op_type in [
             tp.OperationType.READ,
             tp.OperationType.INSERT,
