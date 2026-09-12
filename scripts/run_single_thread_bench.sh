@@ -36,6 +36,7 @@ OPS_STRING=""
 NUM_OPS_OVERRIDE=""
 OUTPUT_DIR="./run_stats"
 RANGE_SIZE=200
+BACKFILL_FRACTION=1.0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -57,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --range-size)
             RANGE_SIZE="$2"
+            shift 2
+            ;;
+        --backfill-fraction)
+            BACKFILL_FRACTION="$2"
             shift 2
             ;;
         --num-ops)
@@ -156,7 +161,7 @@ fi
 IFS=',' read -ra BRANCH_COUNTS <<< "$NUM_BRANCHES"
 
 # Other fixed config values
-TABLE_NAME="orders"
+TABLE_NAME="${TABLE_NAME_OVERRIDE:-orders}"
 DB_NAME="microbench"
 INSERTS_PER_BRANCH=0
 UPDATES_PER_BRANCH=0
@@ -187,7 +192,7 @@ get_num_ops() {
         BRANCH_CONNECT|READ|INSERT|UPDATE|DELETE|RANGE_READ)
             echo 1000
             ;;
-        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM|DDL_ADD_COLUMN|DDL_REMOVE_COLUMN)
+        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM|DDL_ADD_COLUMN|DDL_REMOVE_COLUMN|DDL_BACKFILL|DDL_ADD_COLUMN_WITH_DEFAULT)
             echo 10
             ;;
         *)
@@ -205,6 +210,7 @@ echo "Branch Counts: ${BRANCH_COUNTS[*]}"
 echo "Branch Shape: $SHAPE"
 echo "Random Seed: $SEED"
 echo "Measure Storage: $MEASURE_STORAGE"
+echo "Backfill Fraction: $BACKFILL_FRACTION"
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"
 fi
@@ -271,6 +277,9 @@ operation_benchmark {
 
   range_config {
     range_size: ${RANGE_SIZE}
+  }
+  ddl_config {
+    backfill_fraction: ${BACKFILL_FRACTION}
   }
 }
 EOF
