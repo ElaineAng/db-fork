@@ -202,6 +202,25 @@ class AddColumnOperation(Operation):
         )
         context.db_tools.execute_sql(add_column_sql, timed=True)
 
+        # Track it so REMOVE_COLUMN only ever drops benchmark-created columns
+        context.track_created_column(self.table_name, column_name)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version of column addition."""
+        column_name = self.column_name
+        if not column_name:
+            with AddColumnOperation._counter_lock:
+                AddColumnOperation._column_counter += 1
+                col_num = AddColumnOperation._column_counter
+            column_name = f"col_added_{col_num}"
+
+        add_column_sql = (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD COLUMN {column_name} {self.column_type}"
+        )
+        await context.db_tools.execute_sql_async(add_column_sql, timed=True)
+        context.track_created_column(self.table_name, column_name)
+
     def requires_setup_data(self) -> bool:
         return True  # Needs table to exist
 
@@ -216,17 +235,52 @@ class RemoveColumnOperation(Operation):
     the cost of schema evolution (ALTER TABLE DROP COLUMN).
     """
 
-    def __init__(self, table_name: str, column_name: str):
+    def __init__(self, table_name: str, column_name: Optional[str] = None):
         self.table_name = table_name
         self.column_name = column_name
 
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        """Pick the column to drop.
+
+        If no column is configured, drop a column this benchmark created.
+        We deliberately never drop an original schema column: dropping a
+        TPC-C column would corrupt the dataset for every subsequent
+        operation in the run.
+        """
+        if self.column_name:
+            return self.column_name
+
+        column_name = context.get_random_created_column(self.table_name)
+        if not column_name:
+            raise ValueError(
+                f"No benchmark-created column available to drop on "
+                f"{self.table_name}. Run DDL_ADD_COLUMN first, or set "
+                f"ddl_config.column_name explicitly."
+            )
+        return column_name
+
     def execute(self, context: 'WorkerContext') -> None:
         """Execute a timed column removal operation."""
+        column_name = self._resolve_column(context)
+
         # Drop the column (timed)
         drop_column_sql = (
-            f"ALTER TABLE {self.table_name} DROP COLUMN {self.column_name}"
+            f"ALTER TABLE {self.table_name} DROP COLUMN {column_name}"
         )
         context.db_tools.execute_sql(drop_column_sql, timed=True)
+
+        context.untrack_column(self.table_name, column_name)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        """Async version of column removal."""
+        column_name = self._resolve_column(context)
+
+        drop_column_sql = (
+            f"ALTER TABLE {self.table_name} DROP COLUMN {column_name}"
+        )
+        await context.db_tools.execute_sql_async(drop_column_sql, timed=True)
+
+        context.untrack_column(self.table_name, column_name)
 
     def requires_setup_data(self) -> bool:
         return True  # Needs table and column to exist
