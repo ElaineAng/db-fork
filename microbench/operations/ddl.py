@@ -312,56 +312,80 @@ class BackfillOperation(Operation):
         self.backfill_fraction = max(0.0, min(1.0, backfill_fraction))
         self.column_name = column_name
  
-    def _resolve_column(self, context: 'WorkerContext') -> str:
-        """Pick the column to rewrite.
- 
-        Prefers an explicitly configured column, then a column this
-        benchmark created, then any non-PK column. We never rewrite a
-        primary key column.
+    _NUMERIC_TYPES = {"integer", "bigint", "smallint", "numeric",
+                      "double precision", "real", "decimal"}
+    _TEXT_TYPES = {"character varying", "character", "text"}
+
+    def _resolve_column(self, context: 'WorkerContext') -> tuple:
+        """Pick the column to rewrite, and return it with its data type.
+
+        Never a primary key (breaks row identity), never a foreign key
+        (the generated value would violate referential integrity), and only
+        types we can generate a valid value for.
         """
+        conn = context.db_tools.get_current_connection()
+        col_types = dbh.get_column_types(conn, self.table_name)
+
         if self.column_name:
-            return self.column_name
- 
+            return self.column_name, col_types.get(self.column_name, "integer")
+
         tracked = context.get_random_created_column(self.table_name)
         if tracked:
-            return tracked
- 
-        pk_columns = context.get_pk_columns(self.table_name)
-        all_columns = dbh.get_all_columns(
-            context.db_tools.get_current_connection(), self.table_name
+            return tracked, col_types.get(tracked, "integer")
+
+        pk_columns = set(context.get_pk_columns(self.table_name))
+        fk_columns = set(dbh.get_foreign_key_columns(conn, self.table_name))
+        supported = self._NUMERIC_TYPES | self._TEXT_TYPES
+
+        for name, dtype in col_types.items():
+            if name in pk_columns or name in fk_columns:
+                continue
+            if dtype in supported:
+                return name, dtype
+
+        raise ValueError(
+            f"No backfillable column in {self.table_name}: every column is "
+            f"part of a key or has a type this operation cannot generate "
+            f"values for. Set ddl_config.column_name explicitly, or run "
+            f"DDL_ADD_COLUMN first."
         )
-        non_pk = [c for c in all_columns if c not in pk_columns]
-        if not non_pk:
-            raise ValueError(
-                f"No non-PK column available to backfill in {self.table_name}"
-            )
-        return non_pk[0]
- 
-    def _prepare_backfill(self, context: 'WorkerContext'):
-        """Shared logic: build the UPDATE statement and its parameters.
- 
-        Returns:
-            Tuple of (sql, params, rows_targeted)
+
+    def _generate_value(self, context: 'WorkerContext', dtype: str):
+        """Produce a value valid for the target column's type and width.
+
+        Integer widths matter: smallint tops out at 32,767, so a generic
+        random integer silently fails on narrow columns.
         """
-        column_name = self._resolve_column(context)
- 
+        if dtype in self._TEXT_TYPES:
+            return f"bf_{context.rnd.randint(0, 100_000)}"
+        if dtype == "smallint":
+            return context.rnd.randint(0, 32_000)
+        if dtype == "integer":
+            return context.rnd.randint(0, 1_000_000)
+        if dtype in ("bigint",):
+            return context.rnd.randint(0, 1_000_000_000)
+        # numeric / real / double precision
+        return context.rnd.randint(0, 1_000_000)
+
+    def _prepare_backfill(self, context: 'WorkerContext'):
+        """Build the UPDATE statement and its parameters."""
+        column_name, dtype = self._resolve_column(context)
+
         total_keys = context.get_existing_key_count(self.table_name)
         if total_keys == 0:
             raise ValueError(
                 f"No rows to backfill in {self.table_name}. The table is "
                 f"empty - check inserts_per_branch in the setup config."
             )
- 
-        # Rows to rewrite: at least one, at most the whole table.
+
         rows_targeted = max(1, int(round(self.backfill_fraction * total_keys)))
- 
         range_info = context.prepare_range_query(
             self.table_name, rows_targeted, "backfill"
         )
- 
+
         params = dict(range_info["params"])
-        params["_backfill_value"] = context.rnd.randint(0, 1_000_000)
- 
+        params["_backfill_value"] = self._generate_value(context, dtype)
+
         sql = (
             f"UPDATE {self.table_name} "
             f"SET {column_name} = %(_backfill_value)s "
