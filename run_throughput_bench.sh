@@ -41,6 +41,7 @@ WARMUP_OPS=""
 WARMUP_FRACTION=""
 CONCURRENT_REQUESTS="1"  # Default: 1 (synchronous mode)
 OUTPUT_DIR="/tmp/run_stats"
+TABLE_NAME=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -106,6 +107,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --concurrent-requests)
             CONCURRENT_REQUESTS="$2"
+            shift 2
+            ;;
+        --table-name)
+            TABLE_NAME="$2"
             shift 2
             ;;
         --operations)
@@ -305,7 +310,7 @@ fi
 echo "==================================================="
 
 # Fixed config values
-TABLE_NAME="orders"
+TABLE_NAME="${TABLE_NAME:-orders}"
 DB_NAME="throughput_bench"
 INSERTS_PER_BRANCH=0
 UPDATES_PER_BRANCH=0
