@@ -37,6 +37,8 @@ enum OperationType {
   DDL_ADD_COLUMN = 22;
   DDL_REMOVE_COLUMN = 23;
   DDL_VACUUM = 24;
+  DDL_BACKFILL = 25;
+  DDL_ADD_COLUMN_WITH_DEFAULT = 26;
 }
 
 // Branch tree shapes for setup phase
@@ -91,6 +93,8 @@ message DdlConfig {
   string index_column_name = 1;  // For ADD_INDEX operations
   string column_name = 2;         // For ADD_COLUMN/REMOVE_COLUMN
   string column_type = 3;         // For ADD_COLUMN (e.g., "VARCHAR(100)")
+  float backfill_fraction = 4;    // For BACKFILL: fraction of the table's rows to rewrite (0.0-1.0)
+  string default_value = 5;       // For ADD_COLUMN_WITH_DEFAULT: the default value expression.
 }
 
 // Single operation benchmark configuration

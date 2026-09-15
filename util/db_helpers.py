@@ -231,3 +231,56 @@ def get_all_columns(
     """
     columns = _run_sql_query(conn, query, (table_name,))
     return [col[0] for col in columns]
+
+def get_foreign_key_columns(
+    conn: psycopg2.extensions.connection, table_name: str
+) -> list[str]:
+    """
+    Get the column names participating in foreign key constraints.
+
+    Used to avoid writing arbitrary values into referencing columns, which
+    would violate referential integrity.
+
+    Args:
+        conn: Active psycopg2 connection
+        table_name: Name of the table
+
+    Returns:
+        List of column names that are part of a foreign key
+    """
+    query = """
+        SELECT DISTINCT kcu.column_name
+        FROM information_schema.key_column_usage kcu
+        JOIN information_schema.table_constraints tc
+            ON kcu.constraint_name = tc.constraint_name
+            AND kcu.table_schema = tc.table_schema
+        WHERE tc.table_schema = 'public'
+            AND tc.table_name = %s
+            AND tc.constraint_type = 'FOREIGN KEY';
+    """
+    try:
+        rows = _run_sql_query(conn, query, (table_name,))
+        return [r[0] for r in rows]
+    except Exception:
+        # If the backend doesn't support this introspection, fail open:
+        # callers treat an empty list as "no known FK columns".
+        return []
+
+def get_column_types(
+    conn: psycopg2.extensions.connection, table_name: str
+) -> dict[str, str]:
+    """
+    Get the data type of every column in a table.
+
+    Returns:
+        Mapping of column_name -> information_schema data_type
+        (e.g. 'integer', 'character varying', 'timestamp without time zone')
+    """
+    _run_sql_query(conn, "SET search_path TO public")
+    query = """
+    SELECT column_name, data_type
+    FROM information_schema.columns
+    WHERE table_name = %s
+    """
+    rows = _run_sql_query(conn, query, (table_name,))
+    return {r[0]: r[1] for r in rows}

@@ -14,6 +14,7 @@
 #   --measure-storage     Measure disk size before/after each update
 #   --operations <ops>    Comma-separated list (e.g., READ,UPDATE; default: all)
 #   --range-size <n>      Range size for RANGE_UPDATE operation (default: 200)
+#   --table-name <name>   Table to run operations against (default: orders)
 #   --num-ops <n>         Number of operations to perform (overrides defaults)
 #   --output-dir <dir>    Output directory for results (default: ./run_stats)
 #
@@ -36,6 +37,9 @@ OPS_STRING=""
 NUM_OPS_OVERRIDE=""
 OUTPUT_DIR="./run_stats"
 RANGE_SIZE=200
+TABLE_NAME=""
+BACKFILL_FRACTION=1.0
+
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -57,6 +61,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --range-size)
             RANGE_SIZE="$2"
+            shift 2
+            ;;
+        --table-name)
+            TABLE_NAME="$2"
+            shift 2
+            ;;
+        --backfill-fraction)
+            BACKFILL_FRACTION="$2"
             shift 2
             ;;
         --num-ops)
@@ -98,6 +110,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$NUM_BRANCHES" ]; then
     echo "  --measure-storage: Measure disk_size_before/after for each update"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,UPDATE; default: all)"
     echo "  --range-size <n>: Range size for RANGE_UPDATE operation (default: 200)"
+    echo "  --table-name <name>: Table to run operations against (default: orders)"
     echo "  --num-ops <n>: Number of operations (overrides defaults)"
     echo "  --output-dir <dir>: Output directory for results (default: ./run_stats)"
     echo ""
@@ -156,7 +169,7 @@ fi
 IFS=',' read -ra BRANCH_COUNTS <<< "$NUM_BRANCHES"
 
 # Other fixed config values
-TABLE_NAME="orders"
+TABLE_NAME="${TABLE_NAME:-orders}"
 DB_NAME="microbench"
 INSERTS_PER_BRANCH=0
 UPDATES_PER_BRANCH=0
@@ -187,7 +200,7 @@ get_num_ops() {
         BRANCH_CONNECT|READ|INSERT|UPDATE|DELETE|RANGE_READ)
             echo 1000
             ;;
-        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM)
+        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM|DDL_ADD_COLUMN|DDL_REMOVE_COLUMN|DDL_BACKFILL|DDL_ADD_COLUMN_WITH_DEFAULT)
             echo 10
             ;;
         *)
@@ -205,6 +218,7 @@ echo "Branch Counts: ${BRANCH_COUNTS[*]}"
 echo "Branch Shape: $SHAPE"
 echo "Random Seed: $SEED"
 echo "Measure Storage: $MEASURE_STORAGE"
+echo "Backfill Fraction: $BACKFILL_FRACTION"
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"
 fi
@@ -271,6 +285,9 @@ operation_benchmark {
 
   range_config {
     range_size: ${RANGE_SIZE}
+  }
+  ddl_config {
+    backfill_fraction: ${BACKFILL_FRACTION}
   }
 }
 EOF
