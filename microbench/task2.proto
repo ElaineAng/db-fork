@@ -11,6 +11,7 @@ enum Backend {
   FILE_COPY = 4;
   TIGER = 5;
   TXN = 6;
+  DOLT_MYSQL = 7;
 }
 
 // Operation types for benchmarking

@@ -36,6 +36,7 @@ from microbench.runner import (
 
 # Import backend tool suites for per-thread connections
 from dblib.dolt import DoltToolSuite
+from dblib.dolt_mysql import DoltMySQLToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.xata import XataToolSuite
@@ -63,6 +64,13 @@ def _create_db_tools(config, backend_info, result_collector):
 
     if backend == tp.Backend.DOLT:
         return DoltToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            autocommit,
+            backend_info.default_branch_name,
+        )
+    elif backend == tp.Backend.DOLT_MYSQL:
+        return DoltMySQLToolSuite.init_for_bench(
             result_collector,
             db_name,
             autocommit,
