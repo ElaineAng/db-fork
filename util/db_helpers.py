@@ -7,6 +7,27 @@ that work with any psycopg2 connection.
 
 from typing import Optional
 import psycopg2
+import pymysql
+
+
+def _is_mysql(conn) -> bool:
+    """True for a PyMySQL connection (the dolt_mysql backend)."""
+    return isinstance(conn, pymysql.connections.Connection)
+
+
+def _schema_sql(conn) -> str:
+    """SQL expression for the schema that holds the benchmark tables.
+
+    Postgres puts them in 'public'; in MySQL the schema is the database, and
+    information_schema covers every database on the server.
+    """
+    return "DATABASE()" if _is_mysql(conn) else "'public'"
+
+
+def _set_search_path(conn) -> None:
+    # MySQL has no search_path; the connection's database plays that role.
+    if not _is_mysql(conn):
+        _run_sql_query(conn, "SET search_path TO public")
 
 
 def _run_sql_query(
@@ -72,18 +93,19 @@ def _get_primary_key_columns(
     Returns:
         List of (column_name, ordinal_position) tuples
     """
-    query = """
-        SELECT 
+    schema = _schema_sql(conn)
+    query = f"""
+        SELECT
             column_name, ordinal_position
-        FROM 
+        FROM
             information_schema.key_column_usage
-        WHERE 
-            table_schema = 'public'
+        WHERE
+            table_schema = {schema}
             AND table_name = %s
             AND constraint_name = (
                 SELECT constraint_name
                 FROM information_schema.table_constraints
-                WHERE table_schema = 'public'
+                WHERE table_schema = {schema}
                 AND table_name = %s
                 AND constraint_type = 'PRIMARY KEY'
             )
@@ -137,7 +159,7 @@ def get_pk_values(
     if not pk_columns:
         pk_columns = get_pk_column_names(conn, table_name)
     # Ensure we're using the public schema
-    _run_sql_query(conn, "SET search_path TO public")
+    _set_search_path(conn)
 
     # dsn = conn.get_dsn_parameters()
     # uri = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['dbname']}"
@@ -168,12 +190,16 @@ def get_all_tables(conn: psycopg2.extensions.connection) -> list[str]:
     Returns:
         List of table names
     """
-    _run_sql_query(conn, "SET search_path TO public")
-    query = """
+    _set_search_path(conn)
+    if _is_mysql(conn):
+        schema_filter = "table_schema = DATABASE()"
+    else:
+        schema_filter = "table_schema NOT IN ('pg_catalog', 'information_schema')"
+    query = f"""
     SELECT table_name
     FROM information_schema.tables
     WHERE table_type = 'BASE TABLE'
-    AND table_schema NOT IN ('pg_catalog', 'information_schema');
+    AND {schema_filter};
     """
     tables = _run_sql_query(conn, query)
     return [table[0] for table in tables]
@@ -194,7 +220,7 @@ def get_db_size(conn: psycopg2.extensions.connection) -> int:
     db_name_result = _run_sql_query(conn, db_name_query)
     db_name = db_name_result[0][0] if db_name_result else None
 
-    _run_sql_query(conn, "SET search_path TO public")
+    _set_search_path(conn)
 
     if not db_name:
         print("Warning: Could not determine database name, returning 0")
@@ -223,11 +249,13 @@ def get_all_columns(
     Returns:
         List of column names
     """
-    _run_sql_query(conn, "SET search_path TO public")
+    _set_search_path(conn)
     query = """
     SELECT column_name
     FROM information_schema.columns
     WHERE table_name = %s
     """
+    if _is_mysql(conn):
+        query += "AND table_schema = DATABASE()\n"
     columns = _run_sql_query(conn, query, (table_name,))
     return [col[0] for col in columns]

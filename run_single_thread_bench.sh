@@ -4,7 +4,7 @@
 # Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
 #
 # Required Arguments:
-#   backend:        dolt, neon, kpg, xata, file_copy, txn, tiger
+#   backend:        dolt, dolt_mysql, neon, kpg, xata, file_copy, txn, tiger
 #   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql)
 #   branch_counts:  Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)
 #
@@ -113,8 +113,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, neon, kpg, xata, file_copy, txn, tiger"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, dolt_mysql, neon, kpg, xata, file_copy, txn, tiger"
     exit 1
 fi
 
@@ -284,8 +284,12 @@ EOF
     python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
         # Clean up dropped databases to prevent disk space explosion (Dolt only)
-        if [ "$BACKEND" = "dolt" ]; then
-            DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+        if [ "$BACKEND" = "dolt" ] || [ "$BACKEND" = "dolt_mysql" ]; then
+            if [ "$BACKEND" = "dolt_mysql" ]; then
+                DOLT_DIR="${DOLT_MYSQL_DATA_DIR:-$HOME/dolt/databases}"
+            else
+                DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+            fi
             if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
                 DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
                 if [ "$DROPPED_COUNT" -gt 0 ]; then

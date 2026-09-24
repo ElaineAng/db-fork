@@ -203,9 +203,11 @@ class DBToolSuite(ABC):
         query = f"DROP DATABASE IF EXISTS {db_name};"
         self.execute_sql(query)
 
-    def get_table_schema(self, table_name: str) -> str:
+    def _get_table_columns(self, table_name: str) -> list[tuple]:
         """
-        Returns the schema of a specific table in a CREATE TABLE format.
+        Returns one (column_name, type_name, is_nullable, char_max_length,
+        numeric_precision, numeric_scale) row per column, in column order.
+        Backends whose information_schema differs from Postgres override this.
         """
         # Query for column details, including length and precision/scale
         query = """
@@ -223,7 +225,13 @@ class DBToolSuite(ABC):
         ORDER BY
             ordinal_position;
         """
-        columns = self.execute_sql(query, (table_name,))
+        return self.execute_sql(query, (table_name,))
+
+    def get_table_schema(self, table_name: str) -> str:
+        """
+        Returns the schema of a specific table in a CREATE TABLE format.
+        """
+        columns = self._get_table_columns(table_name)
 
         if not columns or len(columns) == 0:
             raise Exception(f"Error: Table '{table_name}' not found.")

@@ -196,6 +196,32 @@ class DoltMySQLToolSuite(DBToolSuite):
         self.autocommit = autocommit
         self.db_name = db_name
 
+    def _get_table_columns(self, table_name: str) -> list[tuple]:
+        # MySQL's information_schema spans every database on the server, so
+        # filter to the current one; DATA_TYPE is MySQL's udt_name equivalent.
+        query = """
+        SELECT
+            column_name,
+            data_type,
+            is_nullable,
+            character_maximum_length,
+            numeric_precision,
+            numeric_scale
+        FROM
+            information_schema.columns
+        WHERE
+            table_schema = DATABASE() AND table_name = %s
+        ORDER BY
+            ordinal_position;
+        """
+        rows = super().execute_sql(query, (table_name,))
+        # The data generator knows Postgres type names; MySQL reports
+        # TIMESTAMP WITHOUT TIME ZONE columns (loaded as DATETIME) as datetime.
+        return [
+            (name, "timestamp" if dtype == "datetime" else dtype, *rest)
+            for name, dtype, *rest in rows
+        ]
+
     def list_branches(self) -> list[str]:
         cmd = "SELECT name FROM dolt_branches;"
         return [branch[0] for branch in super().execute_sql(cmd)]

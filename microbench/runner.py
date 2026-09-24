@@ -638,6 +638,13 @@ class BenchmarkSuite:
                     self._config.autocommit,
                     self._backend_info.default_branch_name,
                 )
+            elif self._config.backend == tp.Backend.DOLT_MYSQL:
+                db_tools = DoltMySQLToolSuite.init_for_bench(
+                    result_collector,
+                    self._db_name,
+                    self._config.autocommit,
+                    self._backend_info.default_branch_name,
+                )
             elif self._config.backend == tp.Backend.KPG:
                 db_tools = KpgToolSuite.init_for_bench(
                     result_collector, self._db_name, self._config.autocommit
