@@ -32,6 +32,14 @@ from microbench.operations.ddl import (
     VacuumOperation,
     BackfillOperation,
     AddColumnWithDefaultOperation,
+    TypeChangeOperation,
+    RenameColumnOperation,
+    RenameTableOperation,
+    AddForeignKeyOperation,
+    AddCheckOperation,
+    SetDefaultOperation,
+    SetNotNullOperation,
+    ExpandContractOperation,
 )
 
 
@@ -57,4 +65,12 @@ __all__ = [
     "VacuumOperation",
     "BackfillOperation",
     "AddColumnWithDefaultOperation",
+    "TypeChangeOperation",
+    "RenameColumnOperation",
+    "RenameTableOperation",
+    "AddForeignKeyOperation",
+    "AddCheckOperation",
+    "SetDefaultOperation",
+    "SetNotNullOperation",
+    "ExpandContractOperation",
 ]

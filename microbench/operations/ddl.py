@@ -470,3 +470,291 @@ class AddColumnWithDefaultOperation(Operation):
  
     def get_operation_type(self) -> rslt.OpType:
         return rslt.OpType.DDL
+    
+class TypeChangeOperation(Operation):
+    """Change an existing column's type.
+
+    Doltgres reportedly does not support ALTER TABLE ... USING, which
+    Postgres needs for most non-trivial type changes. If that is
+    confirmed here, the failure itself is a support-matrix result, not
+    a bug in this operation.
+    """
+
+    def __init__(self, table_name: str, column_name: Optional[str] = None,
+                 new_type: str = "BIGINT"):
+        self.table_name = table_name
+        self.column_name = column_name
+        self.new_type = new_type
+
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        if self.column_name:
+            return self.column_name
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+        raise ValueError(
+            f"No column configured for type change on {self.table_name}. "
+            f"Run DDL_ADD_COLUMN first, or set ddl_config.column_name."
+        )
+
+    def execute(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} TYPE {self.new_type}"
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} TYPE {self.new_type}"
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+class RenameColumnOperation(Operation):
+    def __init__(self, table_name: str, column_name: Optional[str] = None,
+                 new_column_name: Optional[str] = None):
+        self.table_name = table_name
+        self.column_name = column_name
+        self.new_column_name = new_column_name
+
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        if self.column_name:
+            return self.column_name
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+        raise ValueError(
+            f"No column configured to rename on {self.table_name}. "
+            f"Run DDL_ADD_COLUMN first, or set ddl_config.column_name."
+        )
+
+    def execute(self, context: 'WorkerContext') -> None:
+        old = self._resolve_column(context)
+        new = self.new_column_name or f"{old}_renamed"
+        sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {old} TO {new}"
+        context.db_tools.execute_sql(sql, timed=True)
+        context.untrack_column(self.table_name, old)
+        context.track_created_column(self.table_name, new)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        old = self._resolve_column(context)
+        new = self.new_column_name or f"{old}_renamed"
+        sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {old} TO {new}"
+        await context.db_tools.execute_sql_async(sql, timed=True)
+        context.untrack_column(self.table_name, old)
+        context.track_created_column(self.table_name, new)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+class SetNotNullOperation(Operation):
+    def __init__(self, table_name: str, column_name: Optional[str] = None):
+        self.table_name = table_name
+        self.column_name = column_name
+
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        if self.column_name:
+            return self.column_name
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+        raise ValueError(
+            f"No column configured for SET NOT NULL on {self.table_name}."
+        )
+
+    def execute(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET NOT NULL"
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET NOT NULL"
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+class RenameTableOperation(Operation):
+    def __init__(self, table_name: str, new_table_name: Optional[str] = None):
+        self.table_name = table_name
+        self.new_table_name = new_table_name or f"{table_name}_renamed"
+
+    def execute(self, context: 'WorkerContext') -> None:
+        sql = f"ALTER TABLE {self.table_name} RENAME TO {self.new_table_name}"
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        sql = f"ALTER TABLE {self.table_name} RENAME TO {self.new_table_name}"
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+
+class AddForeignKeyOperation(Operation):
+    def __init__(self, table_name: str, column_name: Optional[str] = None,
+                 ref_table_name: Optional[str] = None,
+                 ref_column_name: Optional[str] = None):
+        self.table_name = table_name
+        self.column_name = column_name
+        self.ref_table_name = ref_table_name
+        self.ref_column_name = ref_column_name
+
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        if self.column_name:
+            return self.column_name
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+        raise ValueError(f"No column configured for ADD FK on {self.table_name}.")
+
+    def _build_sql(self, context: 'WorkerContext') -> str:
+        column_name = self._resolve_column(context)
+        if not self.ref_table_name or not self.ref_column_name:
+            raise ValueError(
+                "ADD_FK needs ref_table_name and ref_column_name set in "
+                "ddl_config, there is no sensible default for what to "
+                "reference."
+            )
+        constraint_name = f"fk_{self.table_name}_{column_name}"
+        return (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD CONSTRAINT {constraint_name} "
+            f"FOREIGN KEY ({column_name}) "
+            f"REFERENCES {self.ref_table_name}({self.ref_column_name})"
+        )
+
+    def execute(self, context: 'WorkerContext') -> None:
+        sql = self._build_sql(context)
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        sql = self._build_sql(context)
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+
+class AddCheckOperation(Operation):
+    def __init__(self, table_name: str, check_expression: str = "1=1"):
+        self.table_name = table_name
+        self.check_expression = check_expression or "1=1"
+
+    def execute(self, context: 'WorkerContext') -> None:
+        constraint_name = f"chk_{self.table_name}_{id(self)}"
+        sql = (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD CONSTRAINT {constraint_name} "
+            f"CHECK ({self.check_expression})"
+        )
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        constraint_name = f"chk_{self.table_name}_{id(self)}"
+        sql = (
+            f"ALTER TABLE {self.table_name} "
+            f"ADD CONSTRAINT {constraint_name} "
+            f"CHECK ({self.check_expression})"
+        )
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+class SetDefaultOperation(Operation):
+    def __init__(self, table_name: str, column_name: Optional[str] = None,
+                 default_value: str = "0"):
+        self.table_name = table_name
+        self.column_name = column_name
+        self.default_value = default_value or "0"
+
+    def _resolve_column(self, context: 'WorkerContext') -> str:
+        if self.column_name:
+            return self.column_name
+        tracked = context.get_random_created_column(self.table_name)
+        if tracked:
+            return tracked
+        raise ValueError(f"No column configured for SET DEFAULT on {self.table_name}.")
+
+    def execute(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET DEFAULT {self.default_value}"
+        context.db_tools.execute_sql(sql, timed=True)
+
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        column_name = self._resolve_column(context)
+        sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET DEFAULT {self.default_value}"
+        await context.db_tools.execute_sql_async(sql, timed=True)
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
+
+class ExpandContractOperation(Operation):
+    """Add a column, rename it, then drop it, all as one timed sequence.
+
+    This mirrors the pattern the mining study found production teams
+    actually use instead of a direct rename: add, backfill, drop. This
+    version tests the simpler add, rename, drop shape first, tracking
+    success at each stage so a failure partway through is attributable
+    to a specific step rather than the sequence as a whole.
+    """
+
+    _column_counter = 0
+    _counter_lock = threading.Lock()
+
+    def __init__(self, table_name: str, column_type: str = "INTEGER"):
+        self.table_name = table_name
+        self.column_type = column_type
+
+    def _next_column_name(self) -> str:
+        with ExpandContractOperation._counter_lock:
+            ExpandContractOperation._column_counter += 1
+            n = ExpandContractOperation._column_counter
+        return f"seq_col_{n}"
+
+    def execute(self, context: 'WorkerContext') -> None:
+        col = self._next_column_name()
+        renamed = f"{col}_renamed"
+        stage = "add"
+        try:
+            add_sql = f"ALTER TABLE {self.table_name} ADD COLUMN {col} {self.column_type}"
+            context.db_tools.execute_sql(add_sql, timed=True)
+
+            stage = "rename"
+            rename_sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {col} TO {renamed}"
+            context.db_tools.execute_sql(rename_sql, timed=True)
+
+            stage = "drop"
+            drop_sql = f"ALTER TABLE {self.table_name} DROP COLUMN {renamed}"
+            context.db_tools.execute_sql(drop_sql, timed=True)
+        except Exception as e:
+            raise ValueError(f"Sequence failed at stage '{stage}': {e}")
+
+    def requires_setup_data(self) -> bool:
+        return True
+
+    def get_operation_type(self) -> rslt.OpType:
+        return rslt.OpType.DDL
