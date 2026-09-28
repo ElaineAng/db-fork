@@ -43,6 +43,8 @@ from dblib import result_pb2 as rslt
 
 # Database backend imports
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
+from dblib import dolt_mysql
+from dblib.dolt_mysql import DoltMySQLToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
@@ -326,6 +328,11 @@ class BackendManager:
             info.default_branch_name = "main"
             print(f"Default Dolt connection URI: {info.default_uri}")
 
+        elif backend == tp.Backend.DOLT_MYSQL:
+            info.default_uri = DoltMySQLToolSuite.get_default_connection_uri()
+            info.default_branch_name = "main"
+            print(f"Default Dolt MySQL connection URI: {info.default_uri}")
+
         elif backend == tp.Backend.KPG:
             info.default_uri = KpgToolSuite.get_default_connection_uri()
             info.default_branch_name = "main"
@@ -412,7 +419,12 @@ class BackendManager:
             raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
 
         # Create database and load schema if needed
-        if require_db_setup:
+        if require_db_setup and backend == tp.Backend.DOLT_MYSQL:
+            # Not a Postgres server, so psql/psycopg2 can't be used to set it up.
+            dolt_mysql.setup_database(
+                db_name, config.database_setup.sql_dump.sql_dump_path
+            )
+        elif require_db_setup:
             if not info.tiger:
                 self._create_database(info.default_uri, db_name)
 
@@ -454,6 +466,11 @@ class BackendManager:
                     except Exception as e:
                         print(f"Warning: failed to delete Tiger service {sid}: {e}")
             TigerToolSuite.delete_tiger_service(project_id, root_id)
+        elif self.config.backend == tp.Backend.DOLT_MYSQL and db_name:
+            try:
+                dolt_mysql.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
             # Close TXN connection if exists
             if info.txn_conn:
@@ -506,6 +523,8 @@ class BackendManager:
 
         if backend == tp.Backend.DOLT:
             return DoltToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.DOLT_MYSQL:
+            return DoltMySQLToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.KPG:
             return KpgToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
@@ -912,6 +931,10 @@ class WorkerContext:
 
         if backend == tp.Backend.DOLT:
             self.db_tools = DoltToolSuite.init_for_bench(
+                result_collector, db_name, config.autocommit, default_branch_name
+            )
+        elif backend == tp.Backend.DOLT_MYSQL:
+            self.db_tools = DoltMySQLToolSuite.init_for_bench(
                 result_collector, db_name, config.autocommit, default_branch_name
             )
         elif backend == tp.Backend.KPG:
@@ -1479,6 +1502,12 @@ class AsyncOperationRunner:
         """Ensure async connection is initialized for the database tools."""
         if self.context.db_tools.async_conn:
             return  # Already initialized
+
+        if self.config.backend == tp.Backend.DOLT_MYSQL:
+            # Async connections use psycopg (Postgres protocol only).
+            raise NotImplementedError(
+                "Async mode is not supported for the dolt_mysql backend."
+            )
 
         # Import psycopg for async connections
         try:

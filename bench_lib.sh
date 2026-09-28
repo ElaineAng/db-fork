@@ -23,8 +23,8 @@ load_env() {
 validate_backend() {
     local backend="$1"
     BACKEND_UPPER=$(echo "$backend" | tr '[:lower:]' '[:upper:]')
-    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|FILE_COPY|TIGER|TXN)$ ]]; then
-        echo "Error: Invalid backend '$backend'. Must be one of: dolt, neon, kpg, xata, file_copy, tiger, txn"
+    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON|KPG|XATA|FILE_COPY|TIGER|TXN)$ ]]; then
+        echo "Error: Invalid backend '$backend'. Must be one of: dolt, dolt_mysql, neon, kpg, xata, file_copy, tiger, txn"
         return 1
     fi
 }
