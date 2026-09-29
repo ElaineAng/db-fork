@@ -1,6 +1,8 @@
+import asyncio
 import os
 import re
 
+import aiomysql
 import pymysql
 from pymysql.constants import CLIENT
 
@@ -41,6 +43,18 @@ def connect(db_name: str = None, autocommit: bool = True, **kwargs):
         database=db_name,
         autocommit=autocommit,
         **kwargs,
+    )
+
+
+async def connect_async(db_name: str = None, autocommit: bool = True):
+    """Open an aiomysql connection to the Dolt sql-server."""
+    return await aiomysql.connect(
+        host=DOLT_MYSQL_HOST,
+        port=DOLT_MYSQL_PORT,
+        user=DOLT_MYSQL_USER,
+        password=DOLT_MYSQL_PASSWORD,
+        db=db_name,
+        autocommit=autocommit,
     )
 
 
@@ -195,6 +209,8 @@ class DoltMySQLToolSuite(DBToolSuite):
         self._connect_branch_impl(default_branch_name)
         self.autocommit = autocommit
         self.db_name = db_name
+        # Guards async_conn, created with it in open_async_connection().
+        self._async_lock = None
 
     def _get_table_columns(self, table_name: str) -> list[tuple]:
         # MySQL's information_schema spans every database on the server, so
@@ -319,3 +335,105 @@ class DoltMySQLToolSuite(DBToolSuite):
         return dbutil.get_directory_size_bytes(
             os.path.join(DOLT_MYSQL_DATA_DIR, self.db_name)
         )
+
+    # ========================================================================
+    # Async implementations
+    # ========================================================================
+
+    async def open_async_connection(self, branch_name: str) -> None:
+        """Open the async connection and check out branch_name on it.
+
+        A new session starts on the default branch, so without the checkout
+        async ops would run on main instead of the worker's branch.
+        """
+        self.async_conn = await connect_async(self.db_name)
+        self._async_lock = asyncio.Lock()
+        async with self._async_lock:
+            await self._run_async_query("CALL DOLT_CHECKOUT(%s);", (branch_name,))
+
+    async def close_connection_async(self) -> None:
+        if self.async_conn:
+            try:
+                await self.async_conn.ensure_closed()
+            except Exception:
+                self.async_conn.close()
+            self.async_conn = None
+
+    async def _run_async_query(self, query: str, vars=None) -> list[tuple]:
+        """Run one query on async_conn. The caller must hold _async_lock.
+
+        Unlike psycopg, aiomysql has no per-connection lock, and interleaving
+        two queries on one MySQL connection corrupts the protocol. The whole
+        cursor lifetime is covered because closing it drains pending results.
+        """
+        async with self.async_conn.cursor() as cur:
+            await cur.execute(query, vars)
+            # cur.description is None for INSERT/UPDATE (no results to fetch)
+            if cur.description is not None:
+                return await cur.fetchall()
+        return None
+
+    async def execute_sql_async(
+        self,
+        query: str,
+        vars=None,
+        timed: bool = False,
+        storage: bool = False,
+    ) -> list[tuple]:
+        """Async execute_sql on the aiomysql connection.
+
+        The lock is taken inside the timed region, so latency includes time
+        spent queued behind other requests on this connection. This matches
+        the dolt backend, where psycopg's connection lock is also timed.
+        """
+        if not self.async_conn:
+            raise ValueError("Async connection not established. Cannot execute async SQL.")
+
+        res = None
+        try:
+            op_type = rc.GetOpTypeFromSQL(query)
+            async with self._async_measure_ops(timed, op_type, storage=storage):
+                async with self._async_lock:
+                    res = await self._run_async_query(query, vars)
+        except Exception as e:
+            raise Exception(f"Error executing async sql query: {query}; {vars}; {e}")
+        if timed:
+            # Record query with args for debugging/analysis
+            query_with_args = f"{query} -- args: {vars}" if vars else query
+            self.result_collector.record_sql_query(query_with_args)
+            self.result_collector.flush_record()
+        return res
+
+    # The branch hooks hold the lock for the whole operation so that no other
+    # request can change the session's checked-out branch midway (e.g.
+    # between checking out the parent and creating the child). They call
+    # _run_async_query directly since asyncio.Lock is not reentrant.
+
+    async def _create_branch_impl_async(
+        self, branch_name: str, parent_id: str = None
+    ) -> None:
+        """Async version of _create_branch_impl."""
+        async with self._async_lock:
+            # Only checkout to parent if specified, otherwise create from current branch
+            if parent_id:
+                await self._run_async_query("CALL DOLT_CHECKOUT(%s);", (parent_id,))
+            await self._run_async_query("CALL DOLT_CHECKOUT('-b', %s);", (branch_name,))
+
+    async def _connect_branch_impl_async(self, branch_name: str) -> None:
+        """Async version of _connect_branch_impl."""
+        async with self._async_lock:
+            await self._run_async_query("CALL DOLT_CHECKOUT(%s);", (branch_name,))
+
+    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
+        """Async version of _get_current_branch_impl."""
+        async with self._async_lock:
+            result = await self._run_async_query("SELECT active_branch();")
+        # Dolt's branch name is unique and can be used as an ID.
+        return (result[0][0], result[0][0])
+
+    async def _delete_branch_impl_async(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Async version of _delete_branch_impl."""
+        async with self._async_lock:
+            await self._run_async_query("CALL DOLT_BRANCH('-D', %s);", (branch_name,))
