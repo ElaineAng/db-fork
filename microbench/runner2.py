@@ -361,7 +361,6 @@ class BackendManager:
                 info.default_branch_id = neon_project["branch"]["id"]
                 info.default_branch_name = neon_project["branch"]["name"]
                 print(f"Neon project ID: {info.neon_project_id}")
-                print(f"Default Neon connection URI: {info.default_uri}")
             else:
                 info.neon_project_id = config.database_setup.existing_db.neon_project_id
                 proj_branches = NeonToolSuite.get_project_branches(info.neon_project_id)
@@ -394,7 +393,6 @@ class BackendManager:
                 info.default_branch_id = tiger_service["service_id"]
                 info.default_branch_name = tiger_service["name"]
                 print(f"Tiger service ID: {info.tiger['service_id']}")
-                print(f"Default Tiger connection URI: {info.default_uri}")
             else:
                 raise NotImplementedError("Tiger with existing service not implemented")
 
@@ -411,7 +409,6 @@ class BackendManager:
                 info.default_branch_id = default_branch_id
                 info.default_branch_name = default_branch_name
                 print(f"Xata project ID: {info.xata_project_id}")
-                print(f"Default Xata connection URI: {info.default_uri}")
             else:
                 raise NotImplementedError("Xata requires database setup")
 
@@ -459,7 +456,7 @@ class BackendManager:
             root_id = info.tiger["service_id"]
             project_id = info.tiger["project_id"]
             # Delete forks first, root last
-            for sname, (sid, pw) in all_ids:
+            for sname, (sid, pw) in all_ids.items():
                 if sid != root_id:
                     try:
                         TigerToolSuite.delete_tiger_service(project_id, sid)
