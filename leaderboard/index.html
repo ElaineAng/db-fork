@@ -280,6 +280,7 @@ function entryLink(e) {
     const a = document.createElement('a');
     a.href = e.source;
     a.textContent = `${e.system} (${e.machine})`;
+    if (e.hosted === 'yes') a.title = `Region ${e.region}; round trip ${e.rtt_ms} ms from ${e.client_location}`;
     a.style.color = `oklch(0.5 0.2 ${nameToHue(e.system)})`;
     return a;
 }
@@ -310,7 +311,9 @@ function summaryRow(e, score, raw) {
     const tr = document.createElement('tr');
     const name = tr.insertCell();
     name.className = 'summary-name';
-    name.append(entryLink(e), ': ');
+    name.append(entryLink(e));
+    if (e.hosted === 'yes') name.append(` ${e.region}, ${e.rtt_ms} ms round trip`);
+    name.append(': ');
 
     const cell = tr.insertCell();
     cell.className = 'summary-bar-cell';

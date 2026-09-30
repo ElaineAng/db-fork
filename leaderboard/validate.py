@@ -28,6 +28,10 @@ FIELDS = {
     "dataset_sha256": str, "python": str, "lock_sha256": str,
     "provision_time": float, "load_time": float, "result": list,
 }
+# Hosted results add these. service holds only requested, non-secret settings.
+HOSTED_FIELDS = {"region": str, "rtt_ms": float, "client_location": str, "service": dict}
+SERVICE_KEYS = {"region", "pg_version", "endpoint_type", "cpu_millis", "memory_gbs", "instance_type", "image",
+                "replicas", "scale_to_zero_minutes"}
 SECRET_KEY = re.compile(r"pass(word)?|secret|token|api[-_]?key|credential", re.I)
 SECRET_VALUE = re.compile(r"://[^/\s@]*:[^/\s@]*@|(pass(word)?|secret|token|api[-_]?key)\s*[=:]", re.I)
 
@@ -85,11 +89,12 @@ def validate(path: Path, board: Path = BOARD) -> list[str]:
             problems.append("an error file holds only a non-empty error string")
         return problems
 
-    if missing := sorted(FIELDS.keys() - data.keys()):
+    fields = FIELDS | HOSTED_FIELDS if data.get("hosted") == "yes" else FIELDS
+    if missing := sorted(fields.keys() - data.keys()):
         problems.append(f"missing keys: {missing}")
-    if unexpected := sorted(data.keys() - FIELDS.keys()):
+    if unexpected := sorted(data.keys() - fields.keys()):
         problems.append(f"unexpected keys: {unexpected}")
-    problems += [f"{k} must be {t.__name__}" for k, t in FIELDS.items() if k in data and not has_type(data[k], t)]
+    problems += [f"{k} must be {t.__name__}" for k, t in fields.items() if k in data and not has_type(data[k], t)]
     if problems:
         return problems  # the checks below rely on every key being present and typed
 
@@ -107,8 +112,14 @@ def validate(path: Path, board: Path = BOARD) -> list[str]:
         problems.append("commit is not a full git SHA")
     if data["dirty"]:
         problems.append("the run had uncommitted changes")
-    problems += [f"{k} must be finite and positive" for k in ("provision_time", "load_time")
-                 if not (math.isfinite(data[k]) and data[k] > 0)]
+    positive = ("provision_time", "load_time", "rtt_ms") if fields is not FIELDS else ("provision_time", "load_time")
+    problems += [f"{k} must be finite and positive" for k in positive if not (math.isfinite(data[k]) and data[k] > 0)]
+    if fields is not FIELDS:
+        problems += [f"{k} is empty" for k in ("region", "client_location") if not data[k].strip()]
+        if outside := sorted(data["service"].keys() - SERVICE_KEYS):
+            problems.append(f"service keys outside the allowlist: {outside}")
+        if any(type(v) not in (str, int) for v in data["service"].values()):
+            problems.append("service values must be strings or integers")
     rows, tries = data["result"], suite["tries"]
     if len(rows) != len(suite["rows"]) or any(type(r) is not list or len(r) != tries for r in rows):
         problems.append(f"result must have {len(suite['rows'])} rows of {tries} tries")
