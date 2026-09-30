@@ -141,6 +141,18 @@
         min-width: 36rem;
     }
 
+    /* Mock entries stand in for systems without a real run: marked, and faded. */
+    .mock-note {
+        background: #FFF1DC;
+        border: 1px solid #FFCB80;
+        border-radius: 0.5rem;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .summary tr.mock .summary-bar {
+        opacity: 0.45;
+    }
+
     .details th {
         vertical-align: bottom;
         white-space: pre;
@@ -166,12 +178,14 @@
 <p>Branch and data operations on databases that support branches. Lower is better.
 See the <a href="README.md">README</a> for the method and how to reproduce a result.</p>
 <p id="method" class="note"></p>
+<p id="mock-note" class="mock-note" hidden></p>
 
 <table class="selectors">
     <tr><th>Hosting:</th><td id="selectors-hosted"></td></tr>
     <tr><th>System:</th><td id="selectors-system"></td></tr>
     <tr><th>Machine:</th><td id="selectors-machine"></td></tr>
     <tr><th>Tags:</th><td id="selectors-tag"></td></tr>
+    <tr id="data-row"><th>Data:</th><td id="selectors-kind"></td></tr>
     <tr><th>View:</th><td id="selectors-view"></td></tr>
     <tr id="try-row"><th>Try:</th><td id="selectors-mode"></td></tr>
 </table>
@@ -240,6 +254,7 @@ const state = {
     system: allOn(uniq(data.map(e => e.system))),
     machine: allOn(uniq(data.map(e => e.machine))),
     tag: allOn(uniq(data.flatMap(e => e.tags))),
+    kind: allOn(['measured', 'mock']),
 };
 
 const FILTERS = {
@@ -247,7 +262,11 @@ const FILTERS = {
     system: e => state.system[e.system],
     machine: e => state.machine[e.machine],
     tags: e => e.tags.some(t => state.tag[t]),
+    data: e => state.kind[e.mock ? 'mock' : 'measured'],
 };
+
+/// A mock entry is named as mock, not by the machine it pretends to run on.
+const label = e => `${e.system} (${e.mock ? 'mock' : e.machine})`;
 
 function selector(text, active, onclick) {
     const button = document.createElement('button');
@@ -284,8 +303,9 @@ function nameToHue(str) {
 function entryLink(e) {
     const a = document.createElement('a');
     a.href = e.source;
-    a.textContent = `${e.system} (${e.machine})`;
-    if (e.hosted === 'yes') a.title = `Region ${e.region}; round trip ${e.rtt_ms} ms from ${e.client_location}`;
+    a.textContent = label(e);
+    if (e.mock) a.title = e.basis;
+    else if (e.hosted === 'yes') a.title = `Region ${e.region}; round trip ${e.rtt_ms} ms from ${e.client_location}`;
     a.style.color = `oklch(0.5 0.2 ${nameToHue(e.system)})`;
     return a;
 }
@@ -314,6 +334,7 @@ function colorize(td, ratio) {
 
 function summaryRow(e, score, raw) {
     const tr = document.createElement('tr');
+    if (e.mock) tr.className = 'mock';
     const name = tr.insertCell();
     name.className = 'summary-name';
     name.append(entryLink(e));
@@ -344,7 +365,7 @@ function detailTable(view, ranked, best, entries) {
     const head = table.createTHead().insertRow();
     head.append(document.createElement('th'), ...entries.map(e => {
         const th = document.createElement('th');
-        th.textContent = `${e.system}\n(${e.machine})`;
+        th.textContent = label(e).replace(' (', '\n(');
         return th;
     }));
     const body = table.createTBody();
@@ -427,7 +448,7 @@ function renderGroup(title, entries) {
         section.append(paragraph(`Not ranked, because no result in this table has a value: ${dropped.map(r => r.label).join(', ')}.`));
     }
     for (const {e, missing} of incomplete) {
-        section.append(paragraph(`${e.system} (${e.machine}) is not ranked: it has ${usable.length - missing.length} of ${usable.length} rows. Missing: ${missing.map(r => r.label).join(', ')}.`));
+        section.append(paragraph(`${label(e)} is not ranked: it has ${usable.length - missing.length} of ${usable.length} rows. Missing: ${missing.map(r => r.label).join(', ')}.`));
     }
     const details = document.createElement('h3');
     details.textContent = 'Detailed comparison';
@@ -458,13 +479,20 @@ function render() {
     toggles(el('selectors-system'), state.system);
     toggles(el('selectors-machine'), state.machine);
     toggles(el('selectors-tag'), state.tag);
+    toggles(el('selectors-kind'), state.kind, k => k === 'mock' ? 'Mock' : 'Measured');
+    el('data-row').hidden = !data.some(e => e.mock);
     choice(el('selectors-view'), Object.fromEntries(Object.entries(VIEWS).map(([k, v]) => [k, v.label])), 'view');
     choice(el('selectors-mode'), {first: 'First try', best: 'Best repeat'}, 'mode');
     el('try-row').hidden = Boolean(VIEWS[state.view].noTries);
 
     const shown = data.filter(e => Object.values(FILTERS).every(f => f(e)));
     const hidden = Object.entries(FILTERS).map(([name, f]) => [name, data.filter(e => !f(e)).length]).filter(([, n]) => n);
-    el('shown').textContent = `Showing ${shown.length} of ${data.length} results.`
+    const mocked = uniq(shown.filter(e => e.mock).map(e => e.system));
+    el('mock-note').hidden = !mocked.length;
+    el('mock-note').textContent = `Mock data for ${mocked.join(', ')}: illustrative numbers, not measurements.`
+        + ' Each mock stands in until that system has a real run, then disappears. Hover a mock entry to see its basis.';
+    el('shown').textContent = `Showing ${shown.length} of ${data.length} results`
+        + (mocked.length ? `, ${shown.filter(e => e.mock).length} of them mock.` : '.')
         + (hidden.length ? ` Hidden by ${hidden.map(([name, n]) => `${name}: ${n}`).join(', ')}.` : '');
 
     el('groups').replaceChildren(...[['no', 'Local systems'], ['yes', 'Hosted systems']]

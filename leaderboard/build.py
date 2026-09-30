@@ -3,6 +3,9 @@
 From the repository root:
     python -m leaderboard.build
 The page loads data.js with a script tag, so it also works when opened from disk.
+
+A system with no result file yet is shown from leaderboard/mock/<system>.json, if
+one exists. Mock entries carry "mock": true, and the page labels them as mock.
 """
 
 from __future__ import annotations
@@ -21,11 +24,19 @@ def newest(board: Path) -> list[Path]:
     return list(found.values())
 
 
+def mocks(board: Path, measured: set[str]) -> list[dict]:
+    """Mock entries for the systems that have no result file, with their identity from system.json."""
+    return [{**json.loads((board / path.stem / "system.json").read_text()), **json.loads(path.read_text()),
+             "mock": True, "source": path.relative_to(board).as_posix()}
+            for path in sorted((board / "mock").glob("*.json")) if path.stem not in measured]
+
+
 def build(board: Path = BOARD) -> tuple[list[dict], list[dict]]:
     """Entries to rank, and excluded entries with their reasons. A newest file that
     is an error or invalid excludes its system and machine; no older file stands in."""
-    entries, excluded = [], []
+    entries, excluded, measured = [], [], set()
     for path in newest(board):
+        measured.add(path.parts[-4])
         source = path.relative_to(board).as_posix()
         if problems := validate(path, board):
             reason = "invalid: " + "; ".join(problems)
@@ -35,7 +46,7 @@ def build(board: Path = BOARD) -> tuple[list[dict], list[dict]]:
             entries.append({**data, "source": source})
             continue
         excluded.append({"system": path.parts[-4], "machine": path.stem, "source": source, "reason": reason})
-    return entries, excluded
+    return entries + mocks(board, measured), excluded
 
 
 def main() -> None:
@@ -44,7 +55,8 @@ def main() -> None:
     (BOARD / "data.js").write_text("".join(
         f"const {name} = {json.dumps(value, indent=1)};\n"
         for name, value in (("suite", suite), ("data", entries), ("excluded", excluded))))
-    print(f"data.js: {len(entries)} entries, {len(excluded)} excluded")
+    mock = sum(1 for e in entries if e.get("mock"))
+    print(f"data.js: {len(entries) - mock} entries, {mock} mock, {len(excluded)} excluded")
 
 
 if __name__ == "__main__":

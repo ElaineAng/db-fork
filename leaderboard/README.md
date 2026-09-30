@@ -67,6 +67,22 @@ so their runs should take 15 to 25 minutes.
 If a run is killed, `leaderboard/.runs/<system>.journal.json` keeps the name, and
 the next run of that system deletes everything with that name before it starts.
 
+## Mock data
+
+Until Neon, Tiger Cloud, and Xata have real runs, the page shows mock entries for
+them, from `leaderboard/mock/<system>.json`. These are illustrative numbers, not
+measurements. Branch create and connect follow earlier hosted measurements in
+`run_stats_final`, and data operations assume about 20 ms per statement from a
+client in US East. Each file's `basis` says so.
+
+- The build adds a mock only for a system with no result file. So a system's first
+  real result, or even its first error record, replaces its mock.
+- The page labels mock entries "(mock)", fades their bars, and shows a notice. The
+  Data filter hides them.
+- Mock files sit outside `results/`, and the validator rejects a result file that
+  carries a `mock` key, so a mock cannot be published as a measurement.
+- To remove them all, delete `leaderboard/mock/` and run the build again.
+
 ## What is measured
 
 The suite in `suite.json` runs 8 rows, 3 tries each, on the `item` table:
