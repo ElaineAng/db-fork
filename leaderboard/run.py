@@ -562,8 +562,9 @@ def run(system: str, machine: str, out: Path, max_batch: int | None, allow_dirty
         failure = e
     finally:
         cleanup_failure = clean_up(system, server)
+        if not lifecycle(sysdir, "stop"):
+            cleanup_failure = cleanup_failure or RunError(f"{system}: the server did not stop")
         failure = failure or cleanup_failure
-        lifecycle(sysdir, "stop")
 
     if failure:
         detail = (scrub(str(failure)).splitlines() or [""])[0][:300]

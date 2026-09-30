@@ -16,5 +16,9 @@ if kill -0 "$pid" 2>/dev/null; then
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.5
     done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "dolt (pid $pid) is still running after 10 s; keeping its pid file" >&2
+        exit 1
+    fi
 fi
 rm -f "$runs/dolt_mysql.pid"
