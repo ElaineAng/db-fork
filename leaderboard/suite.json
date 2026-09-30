@@ -1,0 +1,36 @@
+{
+  "suite": "local-1",
+  "seed": 20260929,
+  "tries": 3,
+  "table": "item",
+  "range_size": 100,
+  "chain_length": 4,
+  "dataset": {
+    "path": "db_setup/ch_benchmark_seed.sql",
+    "sha256": "3a1b5d4f01a98a27cc2241b4267e51a17f31a4469e0e3ed38c7d8df4abe1826e",
+    "row_counts": {
+      "region": 5,
+      "nation": 5,
+      "supplier": 1,
+      "warehouse": 10,
+      "district": 100,
+      "customer": 10000,
+      "history": 0,
+      "item": 1000,
+      "stock": 10000,
+      "orders": 0,
+      "new_order": 0,
+      "order_line": 0
+    }
+  },
+  "rows": [
+    {"op": "time_to_first_query", "batch": 1},
+    {"op": "branch_create", "batch": 1},
+    {"op": "branch_connect", "batch": 100},
+    {"op": "read", "batch": 1000},
+    {"op": "range_read", "batch": 200},
+    {"op": "insert", "batch": 1000},
+    {"op": "update", "batch": 1000},
+    {"op": "range_update", "batch": 200}
+  ]
+}
