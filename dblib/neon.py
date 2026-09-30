@@ -16,6 +16,9 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 API_KEY = os.environ.get("NEON_API_KEY_ORG", "")
 neon = NeonAPI(api_key=API_KEY)
 NEON_API_BASE_URL = "https://console.neon.tech/api/v2/"
+REQUEST_TIMEOUT = 30  # seconds for one API call
+OPERATION_TIMEOUT = 300  # seconds to wait for Neon to finish an operation
+POLL_INTERVAL = 0.5
 
 
 class NeonToolSuite(DBToolSuite):
@@ -24,12 +27,12 @@ class NeonToolSuite(DBToolSuite):
     """
 
     @classmethod
-    def create_neon_project(cls, project_name: str) -> str:
+    def create_neon_project(cls, project_name: str, region_id: str = "aws-us-east-1") -> str:
         project_dict = {
             "project": {
                 "pg_version": 17,
                 "name": project_name,
-                "region_id": "aws-us-east-1",
+                "region_id": region_id,
             }
         }
         # TODO: Handle project creation failures.
@@ -99,12 +102,40 @@ class NeonToolSuite(DBToolSuite):
         headers["Content-Type"] = "application/json"
 
         r = requests.request(
-            method, NEON_API_BASE_URL + endpoint, headers=headers, **kwargs
+            method, NEON_API_BASE_URL + endpoint, headers=headers, timeout=REQUEST_TIMEOUT, **kwargs
         )
 
         r.raise_for_status()
 
         return r.json()
+
+    @classmethod
+    def _request_when_unlocked(cls, method: str, endpoint: str, **kwargs):
+        """Retry while Neon refuses the call because other operations on the
+        project are still running (HTTP 423)."""
+        deadline = time.monotonic() + OPERATION_TIMEOUT
+        while True:
+            try:
+                return cls._request(method, endpoint, **kwargs)
+            except requests.exceptions.HTTPError as e:
+                locked = e.response is not None and e.response.status_code == 423
+                if not locked or time.monotonic() > deadline:
+                    raise
+            time.sleep(POLL_INTERVAL)
+
+    def _wait_for_operation(self, operation_id: str) -> None:
+        """Poll until a Neon operation finishes. Raise if it fails or runs too long."""
+        deadline = time.monotonic() + OPERATION_TIMEOUT
+        endpoint = f"projects/{self.project_id}/operations/{operation_id}"
+        while True:
+            status = self.__class__._request("GET", endpoint)["operation"]["status"]
+            if status in ("finished", "skipped"):
+                return
+            if status in ("failed", "error", "cancelled"):
+                raise RuntimeError(f"Neon operation {operation_id} ended as {status}")
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Neon operation {operation_id} still {status} after {OPERATION_TIMEOUT} s")
+            time.sleep(POLL_INTERVAL)
 
     @classmethod
     def _get_neon_connection_uri(
@@ -208,9 +239,11 @@ class NeonToolSuite(DBToolSuite):
             "branch": {"name": branch_name, "parent_id": parent_id},
         }
 
-        # This returns a BranchOperations object with .branch attribute
-        new_branch = neon.branch_create(self.project_id, **branch_payload)
-        self._all_branches[branch_name] = (new_branch.branch.id, "")
+        # The adapter's own request has a timeout; the SDK's branch_create has none.
+        new_branch = self.__class__._request_when_unlocked(
+            "POST", f"projects/{self.project_id}/branches", json=branch_payload
+        )
+        self._all_branches[branch_name] = (new_branch["branch"]["id"], "")
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -356,7 +389,11 @@ class NeonToolSuite(DBToolSuite):
             )
 
         endpoint = f"projects/{self.project_id}/branches/{bid}"
-        self.__class__._request("DELETE", endpoint)
+        response = self.__class__._request_when_unlocked("DELETE", endpoint)
+        # Neon finishes the delete asynchronously. Wait, so the next create
+        # neither conflicts with it nor counts the branch against the limit.
+        for operation in response.get("operations", []):
+            self._wait_for_operation(operation["id"])
 
         # Remove from local cache.
         self._all_branches.pop(branch_name, None)
