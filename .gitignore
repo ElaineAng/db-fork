@@ -218,3 +218,7 @@ db_setup/BIRD-Critic-sol
 
 # MacOS specific files
 *.DS_Store
+# Leaderboard: runtime files, and results until the suite is frozen
+leaderboard/.runs/
+leaderboard/*/results/
+leaderboard/data.js

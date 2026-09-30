@@ -1,0 +1,17 @@
+#!/bin/bash
+# Start Doltgres the way dblib/dolt.py expects it: localhost:5432, user postgres.
+# Those are Doltgres's own defaults, so no config file is needed.
+set -euo pipefail
+
+runs="$(cd "$(dirname "$0")/.." && pwd)/.runs"
+data_dir="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+mkdir -p "$runs" "$data_dir"
+
+if [ -f "$runs/dolt.pid" ] && kill -0 "$(cat "$runs/dolt.pid")" 2>/dev/null; then
+    echo "Doltgres already running (pid $(cat "$runs/dolt.pid"))"
+    exit 0
+fi
+
+# -chdir keeps the .doltcfg folder Doltgres writes inside its data directory.
+doltgres -data-dir "$data_dir" -chdir "$data_dir" -out-and-err "$runs/dolt.log" &
+echo $! > "$runs/dolt.pid"
