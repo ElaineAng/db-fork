@@ -30,8 +30,12 @@ def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
         cur.execute("SELECT dolt_add('-A');")
         cur.execute(f"SELECT dolt_commit('-m', '{message}');")
         print(f"Dolt schema committed: {message}")
-    except Exception as e:
-        print(f"Warning: Dolt schema commit failed (may be okay): {e}")
+    except psycopg2.Error as e:
+        # An empty load leaves nothing to commit. Any other failure means new
+        # branches would not inherit the loaded data, so it must stop the run.
+        if "nothing to commit" not in str(e):
+            raise
+        print("Dolt schema commit skipped: nothing to commit")
     finally:
         if cur:
             cur.close()
