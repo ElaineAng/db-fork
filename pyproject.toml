@@ -12,7 +12,6 @@ dependencies = [
     "anytree",
     "coolname",
     "faker",
-    "microbench",
     "neon-api",
     "numpy",
     "protobuf",
@@ -33,7 +32,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["dblib", "microbench", "util"]
+packages = ["dblib", "microbench", "microbench.operations", "util"]
 
 [tool.setuptools.package-data]
 lib = ["*.py"]
