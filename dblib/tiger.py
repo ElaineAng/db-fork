@@ -280,6 +280,21 @@ class TigerToolSuite(DBToolSuite):
         return r.json()
 
     @classmethod
+    def list_tiger_services(cls, project_id: str) -> list[dict]:
+        access_key = os.environ.get("TIGER_ACCESS_KEY")
+        secret_key = os.environ.get("TIGER_SECRET_KEY")
+        token = base64.b64encode(f"{access_key}:{secret_key}".encode()).decode()
+        headers = {"Authorization": f"Basic {token}", "Accept": "application/json"}
+        r = requests.get(
+            f"{TIGER_API_BASE}/projects/{project_id}/services",
+            headers=headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if not r.ok:
+            raise Exception(f"Tiger list failed {r.status_code}: {r.text}")
+        return r.json()
+
+    @classmethod
     def delete_tiger_service(cls, project_id: str, service_id: str) -> None:
         access_key = os.environ.get("TIGER_ACCESS_KEY")
         secret_key = os.environ.get("TIGER_SECRET_KEY")
