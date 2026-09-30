@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BranchBench</title>
+<link rel="icon" href="data:,">
+<style>
+    :root {
+        --color: black;
+        --muted-color: #555;
+        --background-color: white;
+        --link-color: #08F;
+        --link-hover-color: #F40;
+        --selector-background-color: #EEE;
+        --selector-active-background-color: #FFCB80;
+        --selector-hover-background-color: #FDB;
+        --summary-every-other-row-color: #F8F8F8;
+        --highlight-color: #EEE;
+        /* The same values shown at 1x, 10x, 100x, and 1000x zoom, as on ClickBench. */
+        --bar-color1: oklch(0.3 0.1 30);
+        --bar-color2: oklch(0.5 0.1 50);
+        --bar-color3: oklch(0.8 0.1 70);
+        --bar-color4: oklch(0.9 0.1 90);
+    }
+
+    html, body {
+        color: var(--color);
+        background-color: var(--background-color);
+        margin: 0;
+    }
+
+    body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        padding: 1% 3% 2rem 3%;
+    }
+
+    p {
+        max-width: 75ch;
+        line-height: 1.45;
+    }
+
+    .note {
+        color: var(--muted-color);
+    }
+
+    a, a:visited {
+        color: var(--link-color);
+        text-decoration: none;
+    }
+
+    a:hover {
+        color: var(--link-hover-color);
+    }
+
+    table {
+        border-spacing: 1px;
+    }
+
+    .selectors {
+        padding: 1rem 0;
+    }
+
+    .selectors th {
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+        padding: 0.5rem 1rem 0 0;
+    }
+
+    .selector {
+        font: inherit;
+        color: inherit;
+        margin-left: 0.1rem;
+        padding: 0.2rem 0.5rem;
+        background: var(--selector-background-color);
+        border: 0.2rem solid var(--background-color);
+        border-radius: 0.5rem;
+        cursor: pointer;
+    }
+
+    .selector-active {
+        background: var(--selector-active-background-color);
+    }
+
+    .selector:hover {
+        background: var(--selector-hover-background-color);
+    }
+
+    .summary tr:nth-child(odd) {
+        background: var(--summary-every-other-row-color);
+    }
+
+    .summary tr:hover {
+        background: var(--highlight-color);
+        font-weight: bold;
+    }
+
+    .summary-name {
+        white-space: nowrap;
+        text-align: right;
+        padding-right: 1rem;
+    }
+
+    .summary-bar-cell {
+        width: 100%;
+        position: relative;
+    }
+
+    .summary-bar {
+        height: 1rem;
+    }
+
+    .summary-date, .summary-number, .details td {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .summary-date {
+        position: absolute;
+        right: 0.5rem;
+        top: 0;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        font-size: 80%;
+        pointer-events: none;
+    }
+
+    .summary-number {
+        text-align: right;
+        padding-left: 1rem;
+        white-space: nowrap;
+    }
+
+    .details-scroll {
+        overflow-x: auto;
+    }
+
+    .details th {
+        vertical-align: bottom;
+        white-space: pre;
+        padding: 0 0.5rem 0.5rem 0.5rem;
+    }
+
+    .details td {
+        white-space: pre;
+        text-align: right;
+        padding: 0.1rem 0.5rem;
+    }
+
+    .details td.row-label {
+        font-family: inherit;
+        text-align: left;
+    }
+</style>
+<script src="data.js"></script>
+</head>
+<body>
+
+<h1>BranchBench</h1>
+<p>Branch and data operations on databases that support branches. Lower is better.
+See the <a href="README.md">README</a> for the method and how to reproduce a result.</p>
+<p id="method" class="note"></p>
+
+<table class="selectors">
+    <tr><th>Hosting:</th><td id="selectors-hosted"></td></tr>
+    <tr><th>System:</th><td id="selectors-system"></td></tr>
+    <tr><th>Machine:</th><td id="selectors-machine"></td></tr>
+    <tr><th>Tags:</th><td id="selectors-tag"></td></tr>
+    <tr><th>View:</th><td id="selectors-view"></td></tr>
+    <tr id="try-row"><th>Try:</th><td id="selectors-mode"></td></tr>
+</table>
+
+<p id="shown" class="note"></p>
+<div id="groups"></div>
+<div id="excluded"></div>
+
+<script>
+const el = id => document.getElementById(id);
+
+if (typeof suite === 'undefined') {
+    el('groups').textContent = 'data.js is missing. From the repository root, run: python -m leaderboard.build';
+    throw new Error('data.js is missing');
+}
+
+const SHIFT = 0.01;       /// seconds added to every value before dividing, as ClickBench does
+const MAX_RATIO = 10000;  /// the ratio that fills the bar at 1x zoom, as on ClickBench
+
+const DESCRIPTIONS = {
+    time_to_first_query: 'Create a child of the chain tip, connect to it, and read one row, timed as one span.',
+    branch_create: 'Create a child of the chain tip.',
+    branch_connect: `Connect to the next branch of a chain of ${suite.chain_length}.`,
+    read: 'Read one row by primary key.',
+    range_read: `Read a range of ${suite.range_size} keys.`,
+    insert: 'Insert one generated row.',
+    update: 'Update one row by key.',
+    range_update: `Update a range of ${suite.range_size} keys.`,
+};
+
+/// First try is try 1. Best repeat is the lower of tries 2 and 3, and needs both.
+function pick(tries, mode) {
+    if (mode === 'first') return tries[0];
+    return tries[1] !== null && tries[2] !== null ? Math.min(tries[1], tries[2]) : null;
+}
+
+const suiteRows = suite.rows.map((row, i) => ({
+    label: (row.op === 'time_to_first_query' ? 'Time to first query' : row.op.toUpperCase())
+        + (row.batch > 1 ? ` ×${row.batch}` : ''),
+    title: DESCRIPTIONS[row.op],
+    shift: SHIFT,
+    value: e => pick(e.result[i], state.mode),
+}));
+const loadRow = {label: 'Load', title: 'Load the dump into a new database.', shift: 0, value: e => e.load_time};
+const provisionRow = {label: 'Provisioning', title: 'Create the empty database.', shift: 0, value: e => e.provision_time};
+
+/// Each view shows some rows and ranks some of them. Branch create and connect only
+/// explain where time to first query goes, so they are not ranked a second time.
+const VIEWS = {
+    branch: {label: 'Branch operations', rows: suiteRows.slice(0, 3), ranked: rows => rows.slice(0, 1)},
+    data: {label: 'Data operations', rows: suiteRows.slice(3), tickable: true, ranked: rows => {
+        const ticked = rows.filter(r => state.ticked.has(r));
+        return ticked.length ? ticked : rows;  /// nothing ticked ranks every row, as on ClickBench
+    }},
+    load: {label: 'Load', rows: [loadRow, provisionRow], ranked: rows => rows.slice(0, 1), noTries: true},
+};
+
+const uniq = values => [...new Set(values)].sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+const allOn = values => Object.fromEntries(values.map(v => [v, true]));
+
+const state = {
+    view: 'branch',
+    mode: 'first',
+    ticked: new Set(suiteRows),
+    hosted: allOn(['no', 'yes']),
+    system: allOn(uniq(data.map(e => e.system))),
+    machine: allOn(uniq(data.map(e => e.machine))),
+    tag: allOn(uniq(data.flatMap(e => e.tags))),
+};
+
+const FILTERS = {
+    hosting: e => state.hosted[e.hosted],
+    system: e => state.system[e.system],
+    machine: e => state.machine[e.machine],
+    tags: e => e.tags.some(t => state.tag[t]),
+};
+
+function selector(text, active, onclick) {
+    const button = document.createElement('button');
+    button.className = 'selector' + (active ? ' selector-active' : '');
+    button.textContent = text;
+    button.addEventListener('click', () => { onclick(); render(); });
+    return button;
+}
+
+/// Any number of values on at once. All turns everything on, or off if everything is on.
+function toggles(container, map, name = k => k) {
+    const every = Object.values(map).every(on => on);
+    container.replaceChildren(
+        selector('All', every, () => { for (const k in map) map[k] = !every; }),
+        ...Object.keys(map).map(k => selector(name(k), map[k], () => { map[k] = !map[k]; })));
+}
+
+/// Exactly one value on.
+function choice(container, options, key) {
+    container.replaceChildren(...Object.entries(options).map(([k, label]) =>
+        selector(label, state[key] === k, () => { state[key] = k; })));
+}
+
+function nameToHue(str) {
+    let x = 0;
+    for (let i = 0; i < str.length; i++) {
+        x += str.charCodeAt(i);
+        x *= 0xff51afd7;
+        x ^= x >> 17;
+    }
+    return 60 + Math.abs(x % 240);
+}
+
+function entryLink(e) {
+    const a = document.createElement('a');
+    a.href = e.source;
+    a.textContent = `${e.system} (${e.machine})`;
+    a.style.color = `oklch(0.5 0.2 ${nameToHue(e.system)})`;
+    return a;
+}
+
+function bestOf(entries, row) {
+    const values = entries.map(row.value).filter(v => v !== null);
+    return values.length ? Math.min(...values) : null;
+}
+
+function ratioOf(row, value, best) {
+    return value === null || best === null ? null : (value + row.shift) / (best + row.shift);
+}
+
+/// ClickBench's scale: 1 green, 2 yellow, 10 red, then toward black. The text is
+/// black or white, whichever contrasts more with the cell.
+function colorize(td, ratio) {
+    let [r, g] = [0, 0];
+    if (ratio !== null && ratio <= 2) [r, g] = [(ratio - 1) * 255, 255];
+    else if (ratio !== null && ratio <= 10) [r, g] = [255, (10 - ratio) / 8 * 255];
+    else if (ratio !== null) r = (1 - (ratio - 10) / (ratio - 10 + 1000)) * 255;
+    const linear = c => (c / 255) <= 0.04045 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4;
+    td.style.backgroundColor = `rgb(${r}, ${g}, 0)`;
+    td.style.color = 0.2126 * linear(r) + 0.7152 * linear(g) > 0.179 ? 'black' : 'white';
+    if (ratio === 1) td.style.fontWeight = 'bold';
+}
+
+function summaryRow(e, score, raw) {
+    const tr = document.createElement('tr');
+    const name = tr.insertCell();
+    name.className = 'summary-name';
+    name.append(entryLink(e), ': ');
+
+    const cell = tr.insertCell();
+    cell.className = 'summary-bar-cell';
+    const bar = document.createElement('div');
+    bar.className = 'summary-bar';
+    const [s1, s2, s3, s4] = [1, 10, 100, 1000].map(zoom => Math.min(100, score / MAX_RATIO * 100 * zoom));
+    bar.style.background = `linear-gradient(to right, var(--bar-color1) 0% ${s1}%, var(--bar-color2) ${s1}% ${s2}%,
+        var(--bar-color3) ${s2}% ${s3}%, var(--bar-color4) ${s3}% ${s4}%, transparent ${s4}%)`;
+    const date = document.createElement('span');
+    date.className = 'summary-date';
+    date.textContent = e.date;
+    cell.append(bar, date);
+
+    const number = tr.insertCell();
+    number.className = 'summary-number';
+    number.textContent = raw === null ? `×${score.toFixed(2)}` : `${raw.toFixed(3)}s (×${score.toFixed(2)})`;
+    return tr;
+}
+
+function detailTable(view, ranked, best, entries) {
+    const table = document.createElement('table');
+    table.className = 'details';
+    const head = table.createTHead().insertRow();
+    head.append(document.createElement('th'), ...entries.map(e => {
+        const th = document.createElement('th');
+        th.textContent = `${e.system}\n(${e.machine})`;
+        return th;
+    }));
+    const body = table.createTBody();
+    for (const row of view.rows) {
+        const tr = body.insertRow();
+        const label = tr.insertCell();
+        label.className = 'row-label';
+        label.title = row.title;
+        if (view.tickable) {
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.checked = state.ticked.has(row);
+            box.addEventListener('change', () => {
+                box.checked ? state.ticked.add(row) : state.ticked.delete(row);
+                render();
+            });
+            const wrap = document.createElement('label');
+            wrap.append(box, ` ${row.label}`);
+            label.append(wrap);
+        } else {
+            label.textContent = row.label + (ranked.includes(row) ? '' : ' (not ranked)');
+        }
+        for (const e of entries) {
+            const value = row.value(e);
+            const ratio = ratioOf(row, value, best.get(row));
+            const td = tr.insertCell();
+            td.textContent = value === null ? 'failed' : `${value.toFixed(3)}s (×${ratio.toFixed(2)})`;
+            colorize(td, ratio);
+        }
+    }
+    const scroll = document.createElement('div');
+    scroll.className = 'details-scroll';
+    scroll.append(table);
+    return scroll;
+}
+
+function paragraph(text, className = 'note') {
+    const p = document.createElement('p');
+    p.className = className;
+    p.textContent = text;
+    return p;
+}
+
+/// Rank one table. The best value per row comes from this table only. A ranked row
+/// that no entry here has a value for is dropped, and an entry that lacks any
+/// remaining ranked row is listed below the ranking instead of in it.
+function renderGroup(title, entries) {
+    const view = VIEWS[state.view];
+    const best = new Map(view.rows.map(r => [r, bestOf(entries, r)]));
+    const ranked = view.ranked(view.rows);
+    const usable = ranked.filter(r => best.get(r) !== null);
+    const dropped = ranked.filter(r => best.get(r) === null);
+
+    const scored = [], incomplete = [];
+    for (const e of usable.length ? entries : []) {
+        const missing = usable.filter(r => r.value(e) === null);
+        if (missing.length) {
+            incomplete.push({e, missing});
+            continue;
+        }
+        const logs = usable.map(r => Math.log(ratioOf(r, r.value(e), best.get(r))));
+        scored.push({e, score: Math.exp(logs.reduce((a, b) => a + b, 0) / logs.length)});
+    }
+    scored.sort((a, b) => a.score - b.score);
+
+    const section = document.createElement('section');
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+    const summary = document.createElement('table');
+    summary.className = 'summary';
+    const raw = e => usable.length === 1 ? usable[0].value(e) : null;
+    summary.append(...scored.map(({e, score}) => summaryRow(e, score, raw(e))));
+    section.append(heading, summary);
+
+    if (dropped.length) {
+        section.append(paragraph(`Not ranked, because no result in this table has a value: ${dropped.map(r => r.label).join(', ')}.`));
+    }
+    for (const {e, missing} of incomplete) {
+        section.append(paragraph(`${e.system} (${e.machine}) is not ranked: it has ${usable.length - missing.length} of ${usable.length} rows. Missing: ${missing.map(r => r.label).join(', ')}.`));
+    }
+    const details = document.createElement('h3');
+    details.textContent = 'Detailed comparison';
+    section.append(details, detailTable(view, ranked, best, [...scored.map(s => s.e), ...incomplete.map(i => i.e), ...(usable.length ? [] : entries)]));
+    return section;
+}
+
+function renderExcluded() {
+    const box = el('excluded');
+    box.replaceChildren();
+    if (!excluded.length) return;
+    const heading = document.createElement('h2');
+    heading.textContent = 'Excluded results';
+    const list = document.createElement('ul');
+    for (const x of excluded) {
+        const item = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = x.source;
+        a.textContent = `${x.system} (${x.machine})`;
+        item.append(a, `: ${x.reason}`);
+        list.append(item);
+    }
+    box.append(heading, paragraph('The newest result for each of these is an error or fails validation, so no older result stands in.'), list);
+}
+
+function render() {
+    toggles(el('selectors-hosted'), state.hosted, k => k === 'yes' ? 'Hosted' : 'Local');
+    toggles(el('selectors-system'), state.system);
+    toggles(el('selectors-machine'), state.machine);
+    toggles(el('selectors-tag'), state.tag);
+    choice(el('selectors-view'), Object.fromEntries(Object.entries(VIEWS).map(([k, v]) => [k, v.label])), 'view');
+    choice(el('selectors-mode'), {first: 'First try', best: 'Best repeat'}, 'mode');
+    el('try-row').hidden = Boolean(VIEWS[state.view].noTries);
+
+    const shown = data.filter(e => Object.values(FILTERS).every(f => f(e)));
+    const hidden = Object.entries(FILTERS).map(([name, f]) => [name, data.filter(e => !f(e)).length]).filter(([, n]) => n);
+    el('shown').textContent = `Showing ${shown.length} of ${data.length} results.`
+        + (hidden.length ? ` Hidden by ${hidden.map(([name, n]) => `${name}: ${n}`).join(', ')}.` : '');
+
+    el('groups').replaceChildren(...[['no', 'Local systems'], ['yes', 'Hosted systems']]
+        .filter(([hosted]) => shown.some(e => e.hosted === hosted))
+        .map(([hosted, title]) => renderGroup(title, shown.filter(e => e.hosted === hosted))));
+    renderExcluded();
+}
+
+el('method').textContent = `Suite ${suite.suite}: table ${suite.table} with ${suite.dataset.row_counts[suite.table]} rows,`
+    + ` ${suite.tries} tries per row, seed ${suite.seed}. A value is the sum of the timed database calls in one batch.`
+    + ' Each ratio adds 10 ms, then divides by the best value in the same table.'
+    + ' The score is the geometric mean of the ranked rows\' ratios.';
+render();
+</script>
+</body>
+</html>
