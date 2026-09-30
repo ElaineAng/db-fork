@@ -63,7 +63,9 @@ from util.import_db import load_sql_file
 ROOT = BOARD.parent
 RUNS = BOARD / ".runs"
 # What a run imports or reads. A change here, tracked or not, makes the run dirty.
-CODE_PATHS = ["dblib", "microbench", "util", "leaderboard", "db_setup", "pyproject.toml", "requirements.lock"]
+# Results and data.js are outputs, so a new, uncommitted result never does.
+CODE_PATHS = ["dblib", "microbench", "util", "leaderboard", "db_setup", "pyproject.toml", "requirements.lock",
+              ":!leaderboard/*/results/*", ":!leaderboard/data.js"]
 POINT_OPS = {"read": ReadOperation, "insert": InsertOperation, "update": UpdateOperation}
 RANGE_OPS = {"range_read": RangeReadOperation, "range_update": RangeUpdateOperation}
 LOAD_TIMEOUT = 900  # seconds for psql to load the dump
