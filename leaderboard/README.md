@@ -51,7 +51,8 @@ python -m leaderboard.run neon --machine apple-m5-32gb --client-location "US Eas
 ```
 
 Before creating anything, the runner checks that every variable is set and that
-the keys can reach the account. A failed check publishes nothing.
+the keys can reach the account. A failed check publishes nothing. Every hosted
+statement times out after 120 s.
 
 What a run creates, all named after `bb_<run id>` and all deleted at the end:
 

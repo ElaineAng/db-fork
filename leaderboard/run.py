@@ -539,6 +539,8 @@ def run(system: str, machine: str, out: Path, max_batch: int | None, allow_dirty
         except Exception as e:
             raise RunError(f"{system} preflight failed: {scrub(str(e))}") from e
     os.environ.setdefault("PGCONNECT_TIMEOUT", "10")
+    if hosted:  # bound every statement, since a stalled network call would block the run forever
+        os.environ.setdefault("PGOPTIONS", "-c statement_timeout=120s")
 
     RUNS.mkdir(parents=True, exist_ok=True)
     run_id = secrets.token_hex(4)
