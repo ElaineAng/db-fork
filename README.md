@@ -57,7 +57,7 @@ Use the `run_macrobench.sh` script in the root directory:
 | Argument | Description | Options |
 |----------|-------------|---------|
 | `workflow` | Workflow type | `software_dev`, `failure_repro`, `data_cleaning`, `mcts`, `simulation` |
-| `backend` | Database backend | `dolt`, `neon`, `kpg`, `xata`, `file_copy`, `txn` |
+| `backend` | Database backend | `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `file_copy`, `txn` |
 | `db_scale` | Database scale (number of warehouses) | Integer (e.g., `1`, `5`, `10`) |
 | `sql_path` | Path to SQL schema dump | e.g., `db_setup/ch-w1.sql`, `db_setup/ch-w5.sql` |
 
@@ -121,7 +121,7 @@ Use `run_single_thread_bench.sh` to measure single-threaded operation latency:
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
 | `sql_dump_path` | Path to SQL dump file (e.g., `db_setup/tpcc_schema.sql`) |
 | `num_branches` | Number of branches to create for testing |
 
@@ -423,6 +423,22 @@ run_stats_final/micro/
    - **Neon**: Configure via Neon console
 3. **psql** client for database setup
 4. **Required Python packages**: Install with `pip install .`
+
+---
+
+## Dolt (MySQL) backend — `dolt_mysql`
+
+Runs against Dolt's MySQL-compatible server (port 3306). Start it with:
+
+`dolt sql-server --host 127.0.0.1 --port 3306 --data-dir ~/dolt/databases`
+
+and set a commit identity (`dolt config --global --add user.name` / `user.email`).
+
+The loader reads Postgres `pg_dump` files (e.g. `ch-w1.sql`) directly and
+converts them to MySQL, so no separate MySQL schema is needed.
+
+Supports single-threaded, multi-threaded, and async (`concurrent_requests > 1`)
+microbenchmark runs via `runner2.py`.
 
 ---
 
