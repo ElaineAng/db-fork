@@ -7,6 +7,7 @@ These tests need no database server.
 from __future__ import annotations
 
 import json
+import os
 import random
 import shutil
 import tempfile
@@ -20,7 +21,9 @@ import requests
 
 from dblib.db_api import DBToolSuite
 from dblib.neon import NeonToolSuite
+from dblib.tiger import TigerToolSuite
 from leaderboard.build import build
+from leaderboard.run import SYSTEMS, scrub
 from leaderboard.validate import BOARD, SCHEMA_VERSION, sha256, validate
 from microbench.datagen import DynamicDataGenerator
 from microbench.operations.crud import is_duplicate_key
@@ -101,7 +104,8 @@ class ResultFiles(unittest.TestCase):
         self.board = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.board)
         shutil.copy(BOARD / "suite.json", self.board)
-        shutil.copytree(BOARD / "dolt", self.board / "dolt", ignore=shutil.ignore_patterns("results"))
+        for system in ("dolt", "neon"):
+            shutil.copytree(BOARD / system, self.board / system, ignore=shutil.ignore_patterns("results"))
         self.suite = json.loads((BOARD / "suite.json").read_text())
 
     def payload(self, date: str = "2026-09-30", **changes) -> dict:
@@ -113,8 +117,8 @@ class ResultFiles(unittest.TestCase):
                 "provision_time": 0.07, "load_time": 2.3,
                 "result": [[0.01] * self.suite["tries"] for _ in self.suite["rows"]], **changes}
 
-    def write(self, payload: dict, day_dir: str = "20260930") -> Path:
-        path = self.board / "dolt" / "results" / day_dir / "box.json"
+    def write(self, payload: dict, day_dir: str = "20260930", system: str = "dolt") -> Path:
+        path = self.board / system / "results" / day_dir / "box.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload))
         return path
@@ -138,6 +142,23 @@ class ResultFiles(unittest.TestCase):
                 problems = validate(self.write(payload, day_dir), self.board)
                 self.assertTrue(any(problem in p for p in problems), problems)
 
+    def test_hosted_results_need_their_fields(self) -> None:
+        def hosted(**changes) -> dict:
+            meta = json.loads((BOARD / "neon" / "system.json").read_text())
+            return self.payload(**{**meta, "region": "aws-us-east-1", "rtt_ms": 12.5, "client_location": "US East",
+                                   "service": {"region": "aws-us-east-1", "pg_version": 17}, **changes})
+
+        self.assertEqual(validate(self.write(hosted(), system="neon"), self.board), [])
+        cases = {  # label: file, system, the problem it must report
+            "no round trip": ({k: v for k, v in hosted().items() if k != "rtt_ms"}, "neon", "missing keys"),
+            "a service key outside the allowlist": (hosted(service={"api_hint": "x"}), "neon", "allowlist"),
+            "hosted fields on a local system": (self.payload(region="us-east-1"), "dolt", "unexpected keys"),
+        }
+        for label, (payload, system, problem) in cases.items():
+            with self.subTest(label):
+                problems = validate(self.write(payload, system=system), self.board)
+                self.assertTrue(any(problem in p for p in problems), problems)
+
     def test_newest_date_wins(self) -> None:
         self.write(self.payload("2026-09-29"), "20260929")
         self.write(self.payload(load_time=9.0))
@@ -151,6 +172,22 @@ class ResultFiles(unittest.TestCase):
         entries, excluded = build(self.board)
         self.assertEqual(entries, [])
         self.assertEqual([e["reason"] for e in excluded], ["RunError: server failed its check for 60 s"])
+
+
+class Runner(unittest.TestCase):
+    def test_errors_never_carry_a_uri_password(self) -> None:
+        self.assertEqual(scrub("connect failed: postgresql://owner:hunter2@ep-1.neon.tech/db?sslmode=require"),
+                         "connect failed: postgresql://owner:***@ep-1.neon.tech/db?sslmode=require")
+
+    def test_tiger_cleanup_deletes_only_the_runs_services_root_last(self) -> None:
+        listed = [{"service_id": "s1", "name": "bb_1a2b"}, {"service_id": "s2", "name": "bb_1a2b_chain_1"},
+                  {"service_id": "s3", "name": "bb_1a2bc"}, {"service_id": "s4", "name": "analytics"}]
+        deleted = []
+        with mock.patch.dict(os.environ, {"TIGER_PROJECT_ID": "project"}), \
+                mock.patch.object(TigerToolSuite, "list_tiger_services", side_effect=[listed, []]), \
+                mock.patch.object(TigerToolSuite, "delete_tiger_service", side_effect=lambda p, s: deleted.append(s)):
+            SYSTEMS["tiger"].delete("bb_1a2b")
+        self.assertEqual(deleted, ["s2", "s1"])
 
 
 if __name__ == "__main__":
