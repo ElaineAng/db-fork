@@ -7,12 +7,27 @@ point operations (single row) and range operations (multiple rows).
 
 from typing import TYPE_CHECKING
 
+import psycopg
+import psycopg2.errors
+import pymysql
+
 from dblib import result_pb2 as rslt
+from dblib.db_api import SqlError
 from microbench.operations.base import Operation
 from util import db_helpers as dbh
 
 if TYPE_CHECKING:
     from microbench.runner2 import WorkerContext
+
+
+def is_duplicate_key(exc: BaseException | None) -> bool:
+    """True when a failed insert collided with an existing primary key."""
+    if isinstance(exc, (psycopg2.errors.UniqueViolation, psycopg.errors.UniqueViolation)):
+        return True  # Postgres: Neon, Tiger, Xata
+    if isinstance(exc, pymysql.err.IntegrityError):
+        return exc.args[0] == 1062  # Dolt
+    # Doltgres raises a generic internal error that carries MySQL's code.
+    return exc is not None and "(errno 1062)" in str(exc)
 
 
 class ReadOperation(Operation):
@@ -118,10 +133,10 @@ class InsertOperation(Operation):
                 if not context.db_tools.autocommit:
                     context.db_tools.commit_changes(timed=True, message="insert")
                 break
-            except Exception as e:
-                if attempt == 4:  # Last attempt
+            except SqlError as e:
+                # Only a key collision is worth retrying with a new row.
+                if attempt == 4 or not is_duplicate_key(e.__cause__):
                     raise
-                continue  # Retry with new data
 
         if not inserted:
             raise ValueError("Failed to insert row after 5 attempts")
@@ -146,10 +161,10 @@ class InsertOperation(Operation):
                     # Note: In async mode, autocommit is required
                     pass
                 break
-            except Exception as e:
-                if attempt == 4:  # Last attempt
+            except SqlError as e:
+                # Only a key collision is worth retrying with a new row.
+                if attempt == 4 or not is_duplicate_key(e.__cause__):
                     raise
-                continue  # Retry with new data
 
         if not inserted:
             raise ValueError("Failed to insert row after 5 attempts")

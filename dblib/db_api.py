@@ -28,6 +28,10 @@ def _require_connection(func):
     return wrapper
 
 
+class SqlError(Exception):
+    """A query failed. The driver's own exception is attached as __cause__."""
+
+
 class DBToolSuite(ABC):
     """
     An API for interacting with Postgres via a shared connection. The connection
@@ -423,7 +427,7 @@ class DBToolSuite(ABC):
                         res = cur.fetchall()
                 # print(f"Executed query: {query} with vars: {vars}")
         except Exception as e:
-            raise Exception(f"Error executing sql query: {query}; {vars}; {e}")
+            raise SqlError(f"Error executing sql query: {query}; {vars}; {e}") from e
         if timed:
             # Record query with args for debugging/analysis
             query_with_args = f"{query} -- args: {vars}" if vars else query
@@ -516,7 +520,7 @@ class DBToolSuite(ABC):
                     if cur.description is not None:
                         res = await cur.fetchall()
         except Exception as e:
-            raise Exception(f"Error executing async sql query: {query}; {vars}; {e}")
+            raise SqlError(f"Error executing async sql query: {query}; {vars}; {e}") from e
         if timed:
             # Record query with args for debugging/analysis
             query_with_args = f"{query} -- args: {vars}" if vars else query
