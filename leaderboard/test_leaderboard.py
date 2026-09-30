@@ -23,7 +23,7 @@ from dblib.db_api import DBToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.tiger import TigerToolSuite
 from leaderboard.build import build
-from leaderboard.run import SYSTEMS, RunError, exclusive, scrub
+from leaderboard.run import SYSTEMS, RunError, clean_up, exclusive, scrub
 from leaderboard.validate import BOARD, SCHEMA_VERSION, sha256, validate
 from microbench.datagen import DynamicDataGenerator
 from microbench.operations.crud import is_duplicate_key
@@ -180,6 +180,13 @@ class Runner(unittest.TestCase):
             with exclusive("neon"), self.assertRaises(RunError):
                 with exclusive("neon"):
                     pass
+
+    def test_unreadable_journal_is_reported_and_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as runs, mock.patch("leaderboard.run.RUNS", Path(runs)):
+            journal = Path(runs) / "dolt.journal.json"
+            journal.write_text('{"run_id": "1a2b')  # cut short by a kill mid-write
+            self.assertIsInstance(clean_up("dolt", SYSTEMS["dolt"]), ValueError)
+            self.assertTrue(journal.exists())
 
     def test_errors_never_carry_a_uri_password(self) -> None:
         self.assertEqual(scrub("connect failed: postgresql://owner:hunter2@ep-1.neon.tech/db?sslmode=require"),

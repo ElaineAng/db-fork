@@ -301,9 +301,8 @@ def clean_up(system: str, server: System) -> Exception | None:
     the journal. The journal stays if the delete fails. Reports instead of raising."""
     if not journal(system).exists():
         return None
-    name = json.loads(journal(system).read_text())["name"]
-    try:
-        server.delete(name)
+    try:  # an unreadable journal fails the run too, and stays for a person to inspect
+        server.delete(json.loads(journal(system).read_text())["name"])
     except Exception as e:  # the caller turns this into the run's error record
         return e
     journal(system).unlink()
