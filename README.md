@@ -5,10 +5,12 @@ A parametrized and extensible benchmarking framework for testing PostgreSQL-comp
 ## Quick Start
 
 ```bash
-# 1. Setup environment
-python3 -m venv venv
-source venv/bin/activate
-pip3 install .
+# 1. Setup environment (Python 3.13, pinned in .python-version)
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.lock
+pip install -e . --no-deps
+python build_protos.py   # generates the *_pb2.py modules; needs protoc
 
 # 2. Run a macrobenchmark 
 # Mini config, always start with this
@@ -417,7 +419,7 @@ run_stats_final/micro/
 
 ## Prerequisites
 
-1. **Python 3.11+** with virtual environment
+1. **Python 3.13** in a virtual environment, with dependencies from `requirements.lock`
 2. **PostgreSQL-compatible backend**:
    - **Dolt**: Follow setup at https://github.com/dolthub/doltgresql
    - **Neon**: Configure via Neon console
