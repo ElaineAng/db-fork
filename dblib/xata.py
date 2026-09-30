@@ -19,6 +19,8 @@ XATA_ORGANIZATION_ID = os.environ.get("XATA_ORGANIZATION_ID", "")
 XATA_API_BASE_URL = (
     f"https://api.xata.tech/organizations/{XATA_ORGANIZATION_ID}/"
 )
+REQUEST_TIMEOUT = 30  # seconds for one API call
+POLL_INTERVAL = 0.5
 
 
 class XataToolSuite(DBToolSuite):
@@ -39,7 +41,7 @@ class XataToolSuite(DBToolSuite):
 
     @classmethod
     def create_xata_project(
-        cls, project_name: str
+        cls, project_name: str, region: str = "us-east-1"
     ) -> Tuple[str, str, str, str]:
         project_dict = {"name": project_name}
         # TODO: Handle project creation failures.
@@ -55,7 +57,7 @@ class XataToolSuite(DBToolSuite):
                 "inactivityPeriodMinutes": 30,
             },
             "configuration": {
-                "region": "us-east-1",
+                "region": region,
                 "instanceType": "xata.medium",
                 "image": "postgres:18.0",
                 "replicas": 0,
@@ -107,7 +109,6 @@ class XataToolSuite(DBToolSuite):
         autocommit: bool,
     ):
         uri = cls._get_xata_connection_uri(project_id, branch_id, database_name)
-        print(f"Initial connection to Xata with URI: {uri}")
         conn = psycopg2.connect(uri)
         if autocommit:
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -131,7 +132,7 @@ class XataToolSuite(DBToolSuite):
         headers["Content-Type"] = "application/json"
 
         r = requests.request(
-            method, XATA_API_BASE_URL + endpoint, headers=headers, **kwargs
+            method, XATA_API_BASE_URL + endpoint, headers=headers, timeout=REQUEST_TIMEOUT, **kwargs
         )
 
         r.raise_for_status()
@@ -149,8 +150,7 @@ class XataToolSuite(DBToolSuite):
         branch_id: str,
         initial_conn_string: str = None,
         initial_status_type: str = "",
-        max_attempts: int = 30,
-        interval: float = 10.0,
+        timeout: float = 300.0,
     ) -> str:
         """Poll until a branch has a connectionString and a ready status.
 
@@ -167,23 +167,19 @@ class XataToolSuite(DBToolSuite):
         conn_string = initial_conn_string
         status_type = initial_status_type
         endpoint = f"projects/{project_id}/branches/{branch_id}"
-        for _ in range(max_attempts):
-            if conn_string and status_type in cls._READY_STATUSES:
-                return conn_string
-            time.sleep(interval)
+        # A short interval, because the wait is part of the timed branch create.
+        deadline = time.monotonic() + timeout
+        while not (conn_string and status_type in cls._READY_STATUSES):
+            if time.monotonic() > deadline:
+                missing = "connection string not available" if not conn_string else "not active"
+                raise RuntimeError(
+                    f"Branch {branch_id} {missing} after {timeout} s (status: {status_type})"
+                )
+            time.sleep(POLL_INTERVAL)
             details = cls._request("GET", endpoint)
             conn_string = details.get("connectionString")
             status_type = (details.get("status") or {}).get("statusType", "")
-
-        if not conn_string:
-            raise RuntimeError(
-                f"Branch {branch_id} connection string not available after "
-                f"{max_attempts} attempts"
-            )
-        raise RuntimeError(
-            f"Branch {branch_id} not active after {max_attempts} attempts "
-            f"(status: {status_type})"
-        )
+        return conn_string
 
     @classmethod
     def _get_xata_connection_uri(
@@ -237,6 +233,12 @@ class XataToolSuite(DBToolSuite):
     def list_branches(self) -> list[str]:
         return list(self._get_xata_branches().keys())
 
+    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
+        cached = self._all_branches.get(branch_name)
+        bid = branch_id or (cached[0] if cached else self._get_xata_branches()[branch_name][0])
+        self._delete_branch(bid)
+        self._all_branches.pop(branch_name, None)
+
     def delete_db(self, db_name: str) -> None:
         """
         Deletes the database from all branches in the Xata project.
@@ -260,6 +262,8 @@ class XataToolSuite(DBToolSuite):
         }
         res = self.__class__._request("POST", endpoint, json=branch_payload)
         branch_id = res["id"]
+        # Recorded before the wait, so a branch that never becomes active is still deleted.
+        self._all_branches[branch_name] = (branch_id, None)
 
         conn_string = self.__class__._poll_branch_active(
             self.project_id,
