@@ -1,0 +1,20 @@
+{
+  "basis": "Mock, not a measurement. Branch create and connect follow earlier Xata measurements in run_stats_final (54.6 s mean and 43.8 s median create, 0.12 s connect). Data operations assume about 20 ms per statement from a client in US East.",
+  "date": "2026-09-30",
+  "machine": "apple-m5-32gb",
+  "region": "us-east-1",
+  "rtt_ms": 19.2,
+  "client_location": "US East",
+  "provision_time": 63.4,
+  "load_time": 10.3,
+  "result": [
+    [46.487, 44.329, 45.614],
+    [46.436, 43.25, 45.371],
+    [14.476, 13.796, 14.045],
+    [20.798, 20.272, 20.243],
+    [4.7, 4.5, 4.597],
+    [22.325, 20.597, 21.174],
+    [23.063, 20.583, 20.507],
+    [5.138, 4.837, 4.878]
+  ]
+}

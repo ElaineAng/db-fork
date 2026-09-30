@@ -1,0 +1,20 @@
+{
+  "basis": "Mock, not a measurement. Branch create and connect follow earlier Tiger measurements in run_stats_final (55.8 s mean create, 0.52 s connect). Data operations assume about 22 ms per statement from a client in US East.",
+  "date": "2026-09-30",
+  "machine": "apple-m5-32gb",
+  "region": "us-east-1",
+  "rtt_ms": 21.7,
+  "client_location": "US East",
+  "provision_time": 96.5,
+  "load_time": 11.2,
+  "result": [
+    [58.433, 55.028, 52.563],
+    [54.509, 51.815, 54.406],
+    [55.157, 51.903, 50.658],
+    [23.788, 22.039, 21.47],
+    [5.001, 4.706, 4.775],
+    [23.994, 21.927, 21.981],
+    [23.634, 22.616, 22.775],
+    [5.621, 5.246, 5.147]
+  ]
+}

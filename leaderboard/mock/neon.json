@@ -1,0 +1,20 @@
+{
+  "basis": "Mock, not a measurement. Branch create and connect follow earlier Neon measurements in run_stats_final (0.171 s per create, 0.78 s first connect, 117 ms repeated connect), adjusted for a client in US East. Data operations assume about 20 ms per statement.",
+  "date": "2026-09-30",
+  "machine": "apple-m5-32gb",
+  "region": "aws-us-east-1",
+  "rtt_ms": 18.4,
+  "client_location": "US East",
+  "provision_time": 4.8,
+  "load_time": 9.6,
+  "result": [
+    [1.079, 1.024, 0.995],
+    [0.199, 0.189, 0.195],
+    [16.029, 15.263, 14.452],
+    [21.985, 21.115, 20.35],
+    [4.934, 4.564, 4.386],
+    [22.093, 21.842, 20.81],
+    [22.939, 20.852, 21.304],
+    [5.268, 5.115, 5.094]
+  ]
+}
