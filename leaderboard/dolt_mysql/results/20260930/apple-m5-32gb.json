@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "run_id": "b0805f32",
+  "system": "Dolt",
+  "date": "2026-09-30",
+  "machine": "apple-m5-32gb",
+  "proprietary": "no",
+  "hosted": "no",
+  "tuned": "no",
+  "tags": [
+    "Go",
+    "MySQL protocol",
+    "Git-style branches"
+  ],
+  "version": "1.81.2",
+  "suite": "local-1",
+  "suite_sha256": "1f81da042c2e656c78f213f721a73c7d41ff49fcc3ac3846bd7baac12c369f93",
+  "seed": 20260929,
+  "commit": "a58c60cd6bd47ff1c77509706f4cf5e4af438faf",
+  "dirty": false,
+  "dataset_sha256": "3a1b5d4f01a98a27cc2241b4267e51a17f31a4469e0e3ed38c7d8df4abe1826e",
+  "python": "3.13.14",
+  "lock_sha256": "7ae09064a562613f4cd3ab164917169c08f062b0c26d419de7ea8b4bc5b0cfec",
+  "provision_time": 0.10169,
+  "load_time": 1.881417,
+  "result": [
+    [0.017025, 0.018352, 0.017342],
+    [0.016384, 0.018392, 0.018254],
+    [0.025941, 0.017882, 0.013131],
+    [0.079922, 0.078657, 0.077875],
+    [0.062561, 0.061475, 0.062164],
+    [4.178052, 4.1807, 4.242337],
+    [4.580433, 4.594474, 4.550795],
+    [0.864872, 0.873143, 0.925931]
+  ]
+}
