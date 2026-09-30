@@ -132,8 +132,13 @@
         white-space: nowrap;
     }
 
-    .details-scroll {
+    /* Wide tables scroll inside their own box, so the page never scrolls sideways. */
+    .scroll {
         overflow-x: auto;
+    }
+
+    .summary {
+        min-width: 36rem;
     }
 
     .details th {
@@ -370,10 +375,14 @@ function detailTable(view, ranked, best, entries) {
             colorize(td, ratio);
         }
     }
-    const scroll = document.createElement('div');
-    scroll.className = 'details-scroll';
-    scroll.append(table);
-    return scroll;
+    return scrolling(table);
+}
+
+function scrolling(table) {
+    const box = document.createElement('div');
+    box.className = 'scroll';
+    box.append(table);
+    return box;
 }
 
 function paragraph(text, className = 'note') {
@@ -412,7 +421,7 @@ function renderGroup(title, entries) {
     summary.className = 'summary';
     const raw = e => usable.length === 1 ? usable[0].value(e) : null;
     summary.append(...scored.map(({e, score}) => summaryRow(e, score, raw(e))));
-    section.append(heading, summary);
+    section.append(heading, scrolling(summary));
 
     if (dropped.length) {
         section.append(paragraph(`Not ranked, because no result in this table has a value: ${dropped.map(r => r.label).join(', ')}.`));
