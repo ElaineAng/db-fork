@@ -12,15 +12,19 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import psycopg2.errors
 import pymysql
+import requests
 
 from dblib.db_api import DBToolSuite
+from dblib.neon import NeonToolSuite
 from leaderboard.build import build
 from leaderboard.validate import BOARD, SCHEMA_VERSION, sha256, validate
 from microbench.datagen import DynamicDataGenerator
 from microbench.operations.crud import is_duplicate_key
+from util.import_db import _split_password
 
 ITEM_DDL = """CREATE TABLE item (
     i_id INT NOT NULL,
@@ -55,6 +59,31 @@ class HarnessFixes(unittest.TestCase):
 
         self.assertEqual(rows(7), rows(7))
         self.assertNotEqual(rows(7), rows(8))
+
+    def test_psql_password_leaves_the_command_line(self) -> None:
+        uri, password = _split_password("postgresql://owner:p%40ss:w@host.example/db?sslmode=require")
+        self.assertEqual((uri, password), ("postgresql://owner@host.example/db?sslmode=require", "p@ss:w"))
+        self.assertEqual(_split_password("postgresql://postgres@localhost/db"), ("postgresql://postgres@localhost/db", None))
+
+    def test_neon_delete_waits_out_locks_and_its_operations(self) -> None:
+        locked = requests.Response()
+        locked.status_code = 423
+        replies = iter([requests.exceptions.HTTPError(response=locked), {"operations": [{"id": "op1"}]},
+                        {"operation": {"status": "running"}}, {"operation": {"status": "finished"}}])
+
+        def fake_request(method: str, endpoint: str, **kwargs) -> dict:
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        suite = NeonToolSuite.__new__(NeonToolSuite)
+        suite.project_id, suite._all_branches = "project", {"row_read": ("br-1", "")}
+        with mock.patch.object(NeonToolSuite, "_request", side_effect=fake_request), \
+                mock.patch("dblib.neon.POLL_INTERVAL", 0):
+            suite._delete_branch_impl("row_read", "")
+        self.assertEqual(list(replies), [])
+        self.assertNotIn("row_read", suite._all_branches)
 
     def test_generated_item_rows_fit_the_columns(self) -> None:
         gen = DynamicDataGenerator(ITEM_DDL, random.Random(1))
