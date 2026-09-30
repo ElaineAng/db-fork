@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import json
 import os
 import platform
@@ -29,7 +30,7 @@ import statistics
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import psycopg2
@@ -276,6 +277,18 @@ def start_server(sysdir: Path) -> None:
         if time.monotonic() > deadline:
             raise RunError(f"{sysdir.name}: server failed its check for 60 s")
         time.sleep(0.5)
+
+
+@contextmanager
+def exclusive(system: str):
+    """Hold a per-system lock, so two runs never share a journal or a server."""
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with (RUNS / f"{system}.lock").open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RunError(f"another run of {system} is in progress") from None
+        yield
 
 
 def journal(system: str) -> Path:
@@ -600,8 +613,9 @@ def main() -> int:
     parser.add_argument("--deadline-min", type=float, default=120.0, help="stop the run after this many minutes")
     args = parser.parse_args()
     try:
-        path = run(args.system, args.machine, args.out, args.max_batch, args.allow_dirty, args.deadline_min,
-                   args.client_location)
+        with exclusive(args.system):
+            path = run(args.system, args.machine, args.out, args.max_batch, args.allow_dirty, args.deadline_min,
+                       args.client_location)
     except RunError as e:
         print(f"run failed: {e}", file=sys.stderr)
         return 1
