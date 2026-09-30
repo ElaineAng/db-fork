@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
 import platform
-import re
 import secrets
 import shutil
 import subprocess
@@ -41,6 +39,7 @@ from microbench.operations.crud import (
     ReadOperation,
     UpdateOperation,
 )
+from leaderboard.validate import BOARD, MACHINE_RE, SCHEMA_VERSION, sha256
 from microbench.runner2 import (
     BackendInfo,
     BenchmarkConfig,
@@ -50,11 +49,8 @@ from microbench.runner2 import (
 )
 from util.import_db import load_sql_file
 
-ROOT = Path(__file__).resolve().parent.parent
-BOARD = ROOT / "leaderboard"
+ROOT = BOARD.parent
 RUNS = BOARD / ".runs"
-SCHEMA_VERSION = 1
-MACHINE_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # What a run imports or reads. A change here, tracked or not, makes the run dirty.
 CODE_PATHS = ["dblib", "microbench", "util", "leaderboard", "db_setup", "pyproject.toml", "requirements.lock"]
 POINT_OPS = {"read": ReadOperation, "insert": InsertOperation, "update": UpdateOperation}
@@ -112,10 +108,6 @@ class Dolt:
 
 
 SYSTEMS = {"dolt": Doltgres(), "dolt_mysql": Dolt()}
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def lifecycle(sysdir: Path, step: str) -> bool:
