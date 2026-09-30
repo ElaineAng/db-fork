@@ -164,7 +164,9 @@ def get_pk_values(
     # dsn = conn.get_dsn_parameters()
     # uri = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['dbname']}"
     # print(uri)
-    sql = f"SELECT {', '.join(pk_columns)} FROM {table_name};"
+    # A fixed order lets the same seed pick the same keys on every run.
+    cols = ", ".join(pk_columns)
+    sql = f"SELECT {cols} FROM {table_name} ORDER BY {cols};"
     all_pks = _run_sql_query(conn, sql)
 
     # count_sql = f"SELECT COUNT(*) FROM ({sql.rstrip(';')}) as sub;"
