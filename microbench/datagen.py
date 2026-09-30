@@ -11,9 +11,12 @@ class DynamicDataGenerator:
     Parses a DDL schema to generate and insert fake data, respecting primary keys.
     """
 
-    def __init__(self, ddl_schema: str) -> None:
+    def __init__(self, ddl_schema: str, rnd: Optional[random.Random] = None) -> None:
         self.ddl: str = ddl_schema
+        # A caller's seeded generator makes the rows reproducible; Faker draws from it too.
+        self.rnd: random.Random = rnd or random.Random()
         self.fake: Faker = Faker()
+        self.fake.seed_instance(self.rnd.getrandbits(64))
         self.table_name: str = ""
         self.columns: Dict[str, ColumnDef] = {}
         self._parse_ddl()
@@ -101,14 +104,14 @@ class DynamicDataGenerator:
                 return self.fake.lexify(text="x" * (length or 1)).upper()
             return self.fake.text(max_nb_chars=length or 30)
         if col_type in ["smallint", "int2"]:
-            return random.randint(-32768, 32767)
+            return self.rnd.randint(-32768, 32767)
         if col_type in ["int", "integer", "bigint", "int4", "int8"]:
-            return random.randint(1, 1000000)
+            return self.rnd.randint(1, 1000000)
         if col_type in ["decimal", "numeric"]:
             if precision:
                 max_val = (10 ** (precision[0] - precision[1])) - 1
-                return round(random.uniform(0, max_val), precision[1])
-            return round(random.uniform(0, 1000), 2)
+                return round(self.rnd.uniform(0, max_val), precision[1])
+            return round(self.rnd.uniform(0, 1000), 2)
         if col_type in ["timestamp", "timestamptz", "date"]:
             return self.fake.date_time_between(start_date="-5y", end_date="now")
         if col_type == "boolean":

@@ -691,7 +691,7 @@ class SetupPhase:
         if not table_schema:
             raise ValueError(f"Could not fetch DDL for table {benchmark_table}")
 
-        ctx._table_datagen = DynamicDataGenerator(table_schema)
+        ctx._table_datagen = DynamicDataGenerator(table_schema, ctx.rnd)
         ctx._pk_columns = dbh.get_pk_column_names(
             ctx.db_tools.get_current_connection(), benchmark_table
         )
@@ -1071,7 +1071,7 @@ class WorkerContext:
         """Generate a fake data row for the table."""
         if not self._table_datagen:
             table_schema = self.db_tools.get_table_schema(table_name)
-            self._table_datagen = DynamicDataGenerator(table_schema)
+            self._table_datagen = DynamicDataGenerator(table_schema, self.rnd)
         return self._table_datagen.generate_row()
 
     def track_modified_key(self, key: Tuple) -> None:
