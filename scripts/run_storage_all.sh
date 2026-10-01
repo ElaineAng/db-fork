@@ -5,13 +5,15 @@
 # Results go to run_stats/dolt_storage/ and run_stats/neon_storage/.
 #
 # Usage:
-#   ./run_storage_all.sh [--sql-path PATH] [--db-scale N]
+#   ./scripts/run_storage_all.sh [--sql-path PATH] [--db-scale N]
 #
 # Defaults:
 #   --sql-path  db_setup/ch_benchmark_seed.sql
 #   --db-scale  1
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 SQL_PATH="db_setup/ch_benchmark_seed.sql"
 DB_SCALE=1
@@ -41,7 +43,7 @@ for BACKEND in "${BACKENDS[@]}"; do
         echo "  [$COUNT/$TOTAL] $WORKFLOW / $BACKEND"
         echo "========================================"
 
-        ./run_macrobench.sh \
+        "$SCRIPT_DIR/run_macrobench.sh" \
             --storage \
             --measure-storage \
             --outdir "$OUTDIR" \

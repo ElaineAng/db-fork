@@ -11,19 +11,34 @@ uv sync
 
 # 2. Run a macrobenchmark 
 # Mini config, always start with this
-./run_macrobench.sh --mini --outdir run_stats software_dev dolt 1 db_setup/ch-w1.sql
+./scripts/run_macrobench.sh --mini --outdir run_stats software_dev dolt 1 db_setup/ch-w1.sql
 
 # Full config with 2hr timeout
-./run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
+./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
 
 # 3. Generate comparison plots
-uv run python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
+uv run python scripts/plotting/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
 
 # 4. Run a microbenchmark (latency)
-./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
+./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
 
 # 5. Run a microbenchmark (throughput)
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional
+```
+
+All commands are run from the repository root.
+
+### Repository Layout
+
+```
+dblib/              # Backend tool suites (Dolt, Neon, Xata, ...) and result collection
+microbench/         # Microbenchmark runners and operations
+macrobench/         # Macrobenchmark workflows and runner
+util/               # Shared helpers (SQL loading, DB utilities)
+agent/              # LLM agent workloads (install with `uv sync --extra agent`)
+db_setup/           # SQL dumps/schemas and database setup scripts
+scripts/            # Benchmark entry points (run_*.sh) and bench_lib.sh
+scripts/plotting/   # Plotting and analysis scripts
 ```
 
 ---
@@ -45,10 +60,10 @@ Macrobenchmarks simulate real-world workflows with multiple concurrent workers p
 
 ### Running Macrobenchmarks
 
-Use the `run_macrobench.sh` script in the root directory:
+Use the `scripts/run_macrobench.sh` script (run it from the repository root):
 
 ```bash
-./run_macrobench.sh [OPTIONS] <workflow> <backend> <db_scale> <sql_path>
+./scripts/run_macrobench.sh [OPTIONS] <workflow> <backend> <db_scale> <sql_path>
 ```
 
 #### Arguments
@@ -73,19 +88,19 @@ Use the `run_macrobench.sh` script in the root directory:
 
 ```bash
 # Run software development workflow on Dolt with 5 warehouses
-./run_macrobench.sh software_dev dolt 5 db_setup/ch-w5.sql
+./scripts/run_macrobench.sh software_dev dolt 5 db_setup/ch-w5.sql
 
 # Run MCTS workflow on Neon with mini config
-./run_macrobench.sh --mini mcts neon 1 db_setup/ch-w1.sql
+./scripts/run_macrobench.sh --mini mcts neon 1 db_setup/ch-w1.sql
 
 # Run simulation workflow on Neon with custom output directory
-./run_macrobench.sh --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
+./scripts/run_macrobench.sh --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
 
 # Run with runtime limit (10 minutes)
-./run_macrobench.sh --max-runtime-sec 600 data_cleaning dolt 5 db_setup/ch-w5.sql
+./scripts/run_macrobench.sh --max-runtime-sec 600 data_cleaning dolt 5 db_setup/ch-w5.sql
 
 # Run with storage measurement for Neon
-./run_macrobench.sh --measure-storage mcts neon 5 db_setup/ch-w5.sql
+./scripts/run_macrobench.sh --measure-storage mcts neon 5 db_setup/ch-w5.sql
 ```
 
 #### Output Files
@@ -110,10 +125,10 @@ Measure operation latency with varying numbers of branches and threads.
 
 #### Single-Threaded Latency
 
-Use `run_single_thread_bench.sh` to measure single-threaded operation latency:
+Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation latency:
 
 ```bash
-./run_single_thread_bench.sh <backend> <sql_dump_path> <num_branches> [OPTIONS]
+./scripts/run_single_thread_bench.sh <backend> <sql_dump_path> <num_branches> [OPTIONS]
 ```
 
 ##### Arguments
@@ -139,21 +154,21 @@ Use `run_single_thread_bench.sh` to measure single-threaded operation latency:
 
 ```bash
 # Run with 16 branches
-./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
+./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
 
 # Run with custom seed and bushy branch shape
-./run_single_thread_bench.sh neon db_setup/tpcc_schema.sql 32 --seed 12345 --shape bushy
+./scripts/run_single_thread_bench.sh neon db_setup/tpcc_schema.sql 32 --seed 12345 --shape bushy
 
 # Run with custom range size
-./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16 --operations RANGE_UPDATE --range-size 500
+./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16 --operations RANGE_UPDATE --range-size 500
 ```
 
 #### Multi-Threaded Latency
 
-Use `run_multithread_bench.sh` to measure multi-threaded operation latency:
+Use `scripts/run_multithread_bench.sh` to measure multi-threaded operation latency:
 
 ```bash
-./run_multithread_bench.sh <backend> <sql_dump_path> [OPTIONS]
+./scripts/run_multithread_bench.sh <backend> <sql_dump_path> [OPTIONS]
 ```
 
 ##### Arguments
@@ -178,13 +193,13 @@ Use `run_multithread_bench.sh` to measure multi-threaded operation latency:
 
 ```bash
 # Sweep from 2 to 1024 branches (threads = branches at each configuration)
-./run_multithread_bench.sh dolt db_setup/tpcc_schema.sql
+./scripts/run_multithread_bench.sh dolt db_setup/tpcc_schema.sql
 
 # Test up to 128 branches
-./run_multithread_bench.sh dolt db_setup/tpcc_schema.sql --max-branches 128
+./scripts/run_multithread_bench.sh dolt db_setup/tpcc_schema.sql --max-branches 128
 
 # Run only READ and UPDATE operations with 100 ops per test
-./run_multithread_bench.sh neon db_setup/tpcc_schema.sql --operations READ,UPDATE --num-ops 100
+./scripts/run_multithread_bench.sh neon db_setup/tpcc_schema.sql --operations READ,UPDATE --num-ops 100
 ```
 
 **Note:** In multi-threaded latency benchmarks, the number of threads always equals the number of branches. For independent thread/branch control, use throughput benchmarks.
@@ -214,17 +229,17 @@ Measure throughput (operations per second) with independent control over threads
 
 #### Running Throughput Benchmarks
 
-Use `run_throughput_bench.sh` with one of three sweep modes:
+Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 
 ```bash
 # Sweep threads (fix branches, vary threads)
-./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-threads --branches <N> [OPTIONS]
+./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-threads --branches <N> [OPTIONS]
 
 # Sweep branches (fix threads, vary branches)
-./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [OPTIONS]
+./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [OPTIONS]
 
 # Sweep proportionally (vary both threads and branches together)
-./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [OPTIONS]
+./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [OPTIONS]
 ```
 
 #### Arguments
@@ -255,23 +270,23 @@ Use `run_throughput_bench.sh` with one of three sweep modes:
 
 ```bash
 # Fix branches at 1, vary threads: 1,2,4,8,16,32,64,128
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 1
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 1
 
 # Fix threads at 128, vary branches: 1,2,4,8,16,32
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128
 
 # Vary both proportionally (default: 4 threads per branch)
-./run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional
+./scripts/run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional
 
 # Custom thread/branch lists
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 16 --thread-list "1,2,4,8,16,32"
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 16 --thread-list "1,2,4,8,16,32"
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
 
 # Proportional with custom ratio (8 threads per branch)
-./run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional --threads-per-branch 8
+./scripts/run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional --threads-per-branch 8
 
 # Run only specific operations
-./run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional --operations READ,RANGE_READ
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional --operations READ,RANGE_READ
 ```
 
 #### Output Files
@@ -289,14 +304,14 @@ Throughput benchmark results are saved to the output directory:
 
 ## Plotting Results
 
-After running benchmarks, use the plotting scripts in the `scripts/` directory to generate visualizations.
+After running benchmarks, use the plotting scripts in the `scripts/plotting/` directory to generate visualizations.
 
 ### Macrobenchmark Comparison Plots
 
 Compare macrobenchmark results between Dolt and Neon:
 
 ```bash
-uv run python scripts/macro_comparison.py \
+uv run python scripts/plotting/macro_comparison.py \
     --dolt-dir <dolt_results_dir> \
     --neon-dir <neon_results_dir> \
     --outdir <output_figures_dir>
@@ -327,7 +342,7 @@ The script generates the following figures in the output directory:
 Plot microbenchmark latency results:
 
 ```bash
-uv run python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plotting/plot_branch_latency_micro.py \
     --data-dir <data_directory> \
     --outdir <output_figures_dir> \
     --operation <operation_type>
@@ -347,19 +362,19 @@ uv run python scripts/plot_branch_latency_micro.py \
 
 ```bash
 # Plot branch creation latency only
-uv run python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plotting/plot_branch_latency_micro.py \
     --data-dir run_stats_final/micro/single_thread/branch \
     --outdir figures/ \
     --operation branch
 
 # Plot branch connection latency only
-uv run python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plotting/plot_branch_latency_micro.py \
     --data-dir run_stats_final/micro/single_thread/connect \
     --outdir figures/ \
     --operation connect
 
 # Plot combined (branch and connect on single plot)
-uv run python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plotting/plot_branch_latency_micro.py \
     --branch-dir run_stats_final/micro/single_thread/branch \
     --connect-dir run_stats_final/micro/single_thread/connect \
     --outdir figures/ \
@@ -371,7 +386,7 @@ uv run python scripts/plot_branch_latency_micro.py \
 Plot throughput vs threads/branches:
 
 ```bash
-uv run python scripts/plot_throughput_experiments.py \
+uv run python scripts/plotting/plot_throughput_experiments.py \
     --data-dir <data_directory> \
     --output <output_figures_path> 
 ```
@@ -429,7 +444,7 @@ Install with `uv sync`, or `uv sync --extra agent` to also get the LLM agent
 dependencies used by `agent/`. The project is installed in editable mode, and
 `uv sync` / `uv run` recompile the protos whenever a `.proto` file changes.
 Run Python through `uv run` (e.g. `uv run python scripts/...`), or activate
-the environment with `source .venv/bin/activate`. The `run_*.sh` scripts
+the environment with `source .venv/bin/activate`. The `scripts/run_*.sh` scripts
 already use `uv run`. To add a dependency, use `uv add <package>` and commit
 the updated `uv.lock`.
 

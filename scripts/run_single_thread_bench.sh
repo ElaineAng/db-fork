@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_single_thread_bench.sh - Single-threaded benchmark script using runner2.py
 #
-# Usage: ./run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
+# Usage: ./scripts/run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
 #
 # Required Arguments:
 #   backend:        dolt, dolt_mysql, neon, kpg, xata, file_copy, txn, tiger
@@ -18,10 +18,10 @@
 #   --output-dir <dir>    Output directory for results (default: ./run_stats)
 #
 # Examples:
-#   ./run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 16
-#   ./run_single_thread_bench.sh neon schemas/tpcc_mini.sql 8,16,32
-#   ./run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 8 --measure-storage
-#   ./run_single_thread_bench.sh neon schemas/tpcc_mini.sql 16,32 --operations READ,UPDATE
+#   ./scripts/run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 16
+#   ./scripts/run_single_thread_bench.sh neon schemas/tpcc_mini.sql 8,16,32
+#   ./scripts/run_single_thread_bench.sh dolt schemas/tpcc_mini.sql 8 --measure-storage
+#   ./scripts/run_single_thread_bench.sh neon schemas/tpcc_mini.sql 16,32 --operations READ,UPDATE
 
 set -e
 

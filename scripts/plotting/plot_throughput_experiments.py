@@ -8,28 +8,28 @@ Supports two data sources:
 
 Usage:
     # JSON mode - sweep threads (includes all overhead)
-    python plot_throughput_experiments.py \
+    uv run python scripts/plotting/plot_throughput_experiments.py \
       --data-dir run_stats/micro/tp_fix_branches \
       --mode threads \
       --source json \
       --output figures/throughput_vs_threads.png
 
     # Parquet mode - sweep branches (default: uses all measured ops)
-    python plot_throughput_experiments.py \
+    uv run python scripts/plotting/plot_throughput_experiments.py \
       --data-dir run_stats/micro/tp_fix_thread \
       --mode branches \
       --source parquet \
       --output figures/throughput_vs_branches.png
 
     # Parquet mode - sweep concurrency (concurrent requests per thread)
-    python plot_throughput_experiments.py \
+    uv run python scripts/plotting/plot_throughput_experiments.py \
       --data-dir run_stats/micro/tp_cc \
       --mode concurrency \
       --source parquet \
       --output figures/throughput_vs_concurrency.png
 
     # Parquet mode with warm-up exclusion (uses last 80% of measured ops)
-    python plot_throughput_experiments.py \
+    uv run python scripts/plotting/plot_throughput_experiments.py \
       --data-dir run_stats/micro/tp_fix_thread \
       --mode branches \
       --source parquet \
