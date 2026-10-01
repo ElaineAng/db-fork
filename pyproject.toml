@@ -18,6 +18,7 @@ dependencies = [
     "protobuf",
     "psycopg2-binary",
     "pymysql",
+    "aiomysql",  # For async operations on the dolt_mysql backend
     "psycopg[binary]>=3.0",  # For async database operations
     "python-dotenv",
     "langchain",

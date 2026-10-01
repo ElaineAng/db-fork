@@ -1504,10 +1504,11 @@ class AsyncOperationRunner:
             return  # Already initialized
 
         if self.config.backend == tp.Backend.DOLT_MYSQL:
-            # Async connections use psycopg (Postgres protocol only).
-            raise NotImplementedError(
-                "Async mode is not supported for the dolt_mysql backend."
-            )
+            # MySQL protocol, so aiomysql instead of psycopg. Start the async
+            # session on the branch the sync connection has checked out.
+            branch_name, _ = self.context.db_tools.get_current_branch()
+            await self.context.db_tools.open_async_connection(branch_name)
+            return
 
         # Import psycopg for async connections
         try:
@@ -1702,6 +1703,13 @@ class AsyncOperationRunner:
             except Exception:
                 pass
             finally:
+                # Close the async connection on its own loop, before that loop
+                # is closed, so the server sees a clean disconnect.
+                if self.config.backend == tp.Backend.DOLT_MYSQL:
+                    try:
+                        loop.run_until_complete(self.context.db_tools.close_connection_async())
+                    except Exception as e:
+                        print(f"[Thread {self.context.thread_id}] Failed to close async connection: {e}")
                 loop.close()
 
 
