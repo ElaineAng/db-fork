@@ -1568,6 +1568,12 @@ class AsyncOperationRunner:
         async_conn = await psycopg.AsyncConnection.connect(uri, autocommit=True)
         self.context.db_tools.async_conn = async_conn
 
+        if backend == tp.Backend.DOLT:
+            # A new Dolt session starts on the default branch. Check out the
+            # branch the sync connection is on, or async ops would run on main.
+            branch_name, _ = self.context.db_tools.get_current_branch()
+            await self.context.db_tools.connect_branch_async(branch_name, timed=False)
+
     async def execute_multiple_async(self, num_ops: int, warmup_ops: int = 0) -> None:
         """Execute operations asynchronously with configurable concurrency.
 
