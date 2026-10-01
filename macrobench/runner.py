@@ -27,10 +27,10 @@ from macrobench.workflows import get_workflow_ops, WorkflowOps
 from dblib import result_collector as rc
 
 # Reuse infrastructure from microbench
-from microbench.runner import (
+from microbench.runner2 import (
     BackendInfo,
-    create_backend_project,
-    cleanup_backend,
+    BackendManager,
+    BackendSetup,
     SharedProgress,
 )
 
@@ -47,12 +47,12 @@ from dblib.transaction import TxnToolSuite
 def _create_db_tools(config, backend_info, result_collector):
     """Create a per-thread database tool suite connection.
 
-    Mirrors the BenchmarkSuite.__enter__ pattern from microbench/runner.py
+    Mirrors the WorkerContext.__enter__ pattern from microbench/runner2.py
     but returns just the db_tools object.
 
     Args:
         config: MacroBenchConfig protobuf.
-        backend_info: BackendInfo from create_backend_project().
+        backend_info: BackendInfo from BackendManager.setup().
         result_collector: Shared ResultCollector instance.
 
     Returns:
@@ -105,6 +105,8 @@ def _create_db_tools(config, backend_info, result_collector):
             autocommit,
             backend_info.default_branch_name,
             backend_info.file_copy_info.branches,
+            backend_info.file_copy_info.branches_lock,
+            backend_info.file_copy_info.create_db_lock,
         )
     elif backend == tp.Backend.TXN:
         # Each worker gets its own TxnToolSuite with its own root connection.
@@ -724,40 +726,6 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
     return None
 
 
-def _build_microbench_config(config):
-    """Build a microbench-compatible TaskConfig for create_backend_project().
-
-    The macrobench reuses microbench's backend setup infrastructure, which
-    expects a microbench.task_pb2.TaskConfig. This helper creates a minimal
-    one from the macrobench config.
-    """
-    from microbench import task_pb2 as micro_tp
-
-    micro_config = micro_tp.TaskConfig()
-    micro_config.run_id = config.run_id
-    micro_config.backend = config.backend  # enum values match
-    micro_config.autocommit = config.autocommit
-
-    # Copy database setup
-    micro_config.database_setup.db_name = config.database_setup.db_name
-    micro_config.database_setup.cleanup = config.database_setup.cleanup
-
-    source = config.database_setup.WhichOneof("source")
-    if source == "sql_dump":
-        micro_config.database_setup.sql_dump.sql_dump_path = (
-            config.database_setup.sql_dump.sql_dump_path
-        )
-    elif source == "existing_db":
-        micro_config.database_setup.existing_db.branch_id = (
-            config.database_setup.existing_db.branch_id
-        )
-        micro_config.database_setup.existing_db.neon_project_id = (
-            config.database_setup.existing_db.neon_project_id
-        )
-
-    return micro_config
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Run macrobenchmark from config file."
@@ -833,9 +801,12 @@ def main():
     if args.max_runtime_sec:
         print(f"Runtime cap: {args.max_runtime_sec}s")
 
-    # Set up backend and database
-    micro_config = _build_microbench_config(config)
-    backend_info = create_backend_project(micro_config)
+    # Set up backend and database. The macrobench DatabaseSetup has the same
+    # fields as the microbench one, so it is passed through as is.
+    backend_mgr = BackendManager(
+        BackendSetup(backend=config.backend, database_setup=config.database_setup)
+    )
+    backend_info = backend_mgr.setup()
 
     # Initialize components
     workflow_ops = get_workflow_ops(
@@ -1051,7 +1022,7 @@ def main():
         # Cleanup (retry once on transient network errors)
         for attempt in range(2):
             try:
-                cleanup_backend(micro_config, backend_info)
+                backend_mgr.cleanup()
                 break
             except Exception as e:
                 if attempt == 0:
