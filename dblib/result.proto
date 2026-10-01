@@ -55,6 +55,11 @@ message Result {
 
   // Timestamp when the operation completed (Unix epoch in seconds)
   double end_time = 17;
+
+  // Async mode: time spent waiting for a free pool connection before the
+  // operation started (in seconds). Not included in latency. Should stay
+  // near 0 when the pool size matches concurrent_requests.
+  double pool_wait_time = 18;
 }
 
 // Enum for different types of database operations

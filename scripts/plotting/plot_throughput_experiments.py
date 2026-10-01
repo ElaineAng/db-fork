@@ -38,9 +38,10 @@ Usage:
 
 Timing methodology:
     JSON:
-      - elapsed_time = wall-clock from benchmark start to finish
-      - Includes thread creation, warm-up execution, measured ops, cleanup
-      - Most accurate for real-world performance
+      - elapsed_time = timed window: from the start barrier (all workers
+        connected and warmed up) to the last worker finishing its timed ops
+      - Excludes thread creation, connection/pool setup, warm-up and cleanup
+        (summaries from older runs measured wall-clock including those)
 
     Parquet (default):
       - elapsed_time = max(end_time) - min(start_time) of measured ops

@@ -3,6 +3,7 @@ import uuid
 import time
 import threading
 import asyncio
+import weakref
 from contextlib import contextmanager
 from typing import Any
 import pyarrow as pa
@@ -34,6 +35,7 @@ class _OperationState:
         self.storage_fn = None
         self.start_time = 0.0
         self.end_time = 0.0
+        self.pool_wait_time = 0.0
 
 
 def set_current_thread_id(thread_id: int) -> None:
@@ -121,9 +123,12 @@ class ResultCollector:
         # Thread-local storage for per-thread context and metrics
         self._thread_local = threading.local()
 
-        # Task-local storage for async operations (dict[task_id -> state])
+        # Task-local storage for async operations (task -> state), shared by
+        # every worker thread's event loop. Weakly keyed, so a task's entry is
+        # dropped once the task is gone; nothing ever clears the whole map
+        # while other threads' tasks are still in flight.
         # Protected by _lock for thread-safety
-        self._task_local = {}
+        self._task_local = weakref.WeakKeyDictionary()
 
         # Shared results list (protected by lock)
         self.results = []
@@ -146,11 +151,11 @@ class ResultCollector:
             task = asyncio.current_task()
             if task is not None:
                 # Async mode: use task-local storage
-                task_id = id(task)
                 with self._lock:
-                    if task_id not in self._task_local:
-                        self._task_local[task_id] = _OperationState()
-                    return self._task_local[task_id]
+                    state = self._task_local.get(task)
+                    if state is None:
+                        state = self._task_local[task] = _OperationState()
+                    return state
         except RuntimeError:
             # Not in async context, fall through to thread-local
             pass
@@ -172,6 +177,20 @@ class ResultCollector:
         state.branch_count = 0
         state.start_time = 0.0
         state.end_time = 0.0
+        state.pool_wait_time = 0.0
+
+    def set_recording(self, enabled: bool) -> None:
+        """Turn recording on or off for the calling thread only.
+
+        While off, flush_record() and record_failure() drop their data. Used
+        for warm-up ops: each worker discards only its own warm-up results,
+        without touching what other threads have already recorded. Async
+        tasks run on their worker's thread, so this covers them too.
+        """
+        self._thread_local.recording_disabled = not enabled
+
+    def _recording_enabled(self) -> bool:
+        return not getattr(self._thread_local, "recording_disabled", False)
 
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
@@ -179,14 +198,6 @@ class ResultCollector:
             self.results = []
             self.iteration_counter = 0
             self.failed_operations = []
-
-    def cleanup_task_local_storage(self):
-        """Clean up task-local storage for completed async operations.
-
-        Call this after all async operations are complete to free memory.
-        """
-        with self._lock:
-            self._task_local.clear()
 
     def set_context(
         self,
@@ -247,6 +258,10 @@ class ResultCollector:
         state = self._get_thread_state()
         state.num_keys_touched = num_keys
 
+    def record_pool_wait(self, seconds: float) -> None:
+        state = self._get_thread_state()
+        state.pool_wait_time += seconds
+
     def record_disk_size_before(self, size: int) -> None:
         state = self._get_thread_state()
         state.disk_size_before = size
@@ -272,9 +287,13 @@ class ResultCollector:
         Create a Result proto with all current context and metrics, save it, and reset.
 
         Uses the thread-local thread_id set via set_current_thread_id().
-        For async operations, cleans up task-local storage after recording.
+        For async operations, the task-local state is dropped with its task.
         """
         try:
+            if not self._recording_enabled():
+                self._reset_metrics()
+                return
+
             state = self._get_thread_state()
 
             # Create and fill the Result proto
@@ -298,6 +317,7 @@ class ResultCollector:
             result.step_id = state.step_id
             result.start_time = state.start_time
             result.end_time = state.end_time
+            result.pool_wait_time = state.pool_wait_time
 
             # Append to results (thread-safe)
             # Set iteration_number inside lock to avoid race condition
@@ -326,6 +346,9 @@ class ResultCollector:
             error: The exception that caused the failure
             operation_number: Optional operation number (e.g., 5 out of 1000)
         """
+        if not self._recording_enabled():
+            return
+
         state = self._get_thread_state()
 
         failure_info = {
@@ -379,6 +402,7 @@ class ResultCollector:
                 "step_id": result.step_id,
                 "start_time": result.start_time,
                 "end_time": result.end_time,
+                "pool_wait_time": result.pool_wait_time,
             }
             rows.append(row)
 
@@ -389,7 +413,11 @@ class ResultCollector:
         if os.path.exists(filepath):
             try:
                 existing_table = pq.read_table(filepath)
-                combined_table = pa.concat_tables([existing_table, new_table])
+                # Fill columns missing from older files (e.g. pool_wait_time)
+                # with nulls instead of failing and overwriting the file.
+                combined_table = pa.concat_tables(
+                    [existing_table, new_table], promote_options="default"
+                )
                 pq.write_table(combined_table, filepath)
                 print(
                     f"Appended {len(rows)} results to {filepath} "

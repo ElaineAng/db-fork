@@ -1,3 +1,4 @@
+import contextvars
 import functools
 import time
 from psycopg2.extensions import connection as _pgconn
@@ -14,6 +15,12 @@ try:
     _AsyncConnection = AsyncConnection
 except ImportError:
     _AsyncConnection = None
+
+# Pool connection held by the current asyncio task, if any. Multi-statement
+# operations (e.g. checkout parent, then create child) pin one connection so
+# every statement runs in the same session. Each task has its own context, so
+# concurrent tasks never see each other's pinned connection.
+_pinned_async_conn = contextvars.ContextVar("_pinned_async_conn", default=None)
 
 
 def _require_connection(func):
@@ -44,6 +51,9 @@ class DBToolSuite(ABC):
     ):
         self.conn = connection  # Sync connection (psycopg2)
         self.async_conn = async_connection  # Async connection (psycopg3)
+        # Async connection pool, one connection per concurrent request.
+        # Opened by open_async_pool().
+        self.async_pool = None
         self.result_collector = result_collector
         if not self.result_collector:
             print("Result collector is not provided.")
@@ -435,21 +445,76 @@ class DBToolSuite(ABC):
     # Async public methods
     #########################################################################
 
+    async def open_async_pool(self, conninfo: str, size: int, configure=None) -> None:
+        """Open a psycopg async pool of `size` autocommit connections.
+
+        With one connection per concurrent request, requests run in parallel
+        on the server instead of queueing on a single connection.
+
+        Args:
+            conninfo: Connection URI.
+            size: Number of connections (fixed; min_size == max_size).
+            configure: Optional async callback run on each new connection,
+                e.g. to check out the worker's branch.
+        """
+        from psycopg_pool import AsyncConnectionPool
+
+        self.async_pool = AsyncConnectionPool(
+            conninfo,
+            min_size=size,
+            max_size=size,
+            kwargs={"autocommit": True},
+            configure=configure,
+            open=False,
+        )
+        await self.async_pool.open(wait=True)
+
+    def _pool_connection(self):
+        """Return an async context manager that borrows a pool connection."""
+        return self.async_pool.connection()
+
+    @asynccontextmanager
+    async def _acquire_async_conn(self, record_wait: bool = False):
+        """Borrow a pool connection and pin it for the current task.
+
+        Reuses the task's pinned connection if there is one, so nested calls
+        stay in the same session. When record_wait is set, the time spent
+        waiting for a free connection is recorded as pool_wait_time. It is
+        kept out of the op latency, which only covers the server round trip.
+        """
+        conn = _pinned_async_conn.get()
+        if conn is not None:
+            yield conn
+            return
+        if not self.async_pool:
+            raise ValueError("Async pool not open. Cannot execute async SQL.")
+
+        start = time.perf_counter()
+        async with self._pool_connection() as conn:
+            if record_wait:
+                self.result_collector.record_pool_wait(time.perf_counter() - start)
+            token = _pinned_async_conn.set(conn)
+            try:
+                yield conn
+            finally:
+                _pinned_async_conn.reset(token)
+
     async def close_connection_async(self) -> None:
-        """Closes the async database connection."""
-        if self.async_conn:
-            await self.async_conn.close()
-            self.async_conn = None
+        """Closes the async connection pool."""
+        if self.async_pool:
+            await self.async_pool.close()
+            self.async_pool = None
 
     async def create_branch_async(
         self, branch_name: str, parent_id: str = None, timed: bool = True, storage: bool = False
     ) -> None:
         """Async version of create_branch."""
         try:
-            async with self._async_measure_ops(
-                op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
-            ):
-                await self._create_branch_impl_async(branch_name, parent_id)
+            async with self._acquire_async_conn(record_wait=timed):
+                async with self._async_measure_ops(
+                    op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
+                ):
+                    await self._create_branch_impl_async(branch_name, parent_id)
         except Exception as e:
             raise Exception(f"Error creating branch: {e}")
         if timed:
@@ -459,10 +524,11 @@ class DBToolSuite(ABC):
     async def connect_branch_async(self, branch_name: str, timed: bool = False, storage: bool = False) -> None:
         """Async version of connect_branch."""
         try:
-            async with self._async_measure_ops(
-                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
-            ):
-                await self._connect_branch_impl_async(branch_name)
+            async with self._acquire_async_conn(record_wait=timed):
+                async with self._async_measure_ops(
+                    op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
+                ):
+                    await self._connect_branch_impl_async(branch_name)
         except Exception as e:
             raise Exception(f"Error connecting to branch: {e}")
         if timed:
@@ -482,10 +548,11 @@ class DBToolSuite(ABC):
     ) -> None:
         """Async version of delete_branch."""
         try:
-            async with self._async_measure_ops(
-                op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
-            ):
-                await self._delete_branch_impl_async(branch_name, branch_id)
+            async with self._acquire_async_conn(record_wait=timed):
+                async with self._async_measure_ops(
+                    op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
+                ):
+                    await self._delete_branch_impl_async(branch_name, branch_id)
         except Exception as e:
             raise Exception(f"Error deleting branch '{branch_name}': {e}")
         if timed:
@@ -500,21 +567,22 @@ class DBToolSuite(ABC):
         storage: bool = False,
     ) -> list[tuple]:
         """
-        Async version of execute_sql. Runs an SQL query using async connection.
-        """
-        if not self.async_conn:
-            raise ValueError("Async connection not established. Cannot execute async SQL.")
+        Async version of execute_sql. Runs an SQL query on a pool connection.
 
+        The connection is acquired before the timer starts, so latency covers
+        only execute + fetch. Pool wait is recorded separately.
+        """
         res = None
         try:
-            async with self.async_conn.cursor() as cur:
-                # Timing both the execute and fetchall together
-                op_type = rc.GetOpTypeFromSQL(query)
-                async with self._async_measure_ops(timed, op_type, storage=storage):
-                    await cur.execute(query, vars)
-                    # cur.description is None for INSERT/UPDATE (no results to fetch)
-                    if cur.description is not None:
-                        res = await cur.fetchall()
+            async with self._acquire_async_conn(record_wait=timed) as conn:
+                async with conn.cursor() as cur:
+                    # Timing both the execute and fetchall together
+                    op_type = rc.GetOpTypeFromSQL(query)
+                    async with self._async_measure_ops(timed, op_type, storage=storage):
+                        await cur.execute(query, vars)
+                        # cur.description is None for INSERT/UPDATE (no results to fetch)
+                        if cur.description is not None:
+                            res = await cur.fetchall()
         except Exception as e:
             raise Exception(f"Error executing async sql query: {query}; {vars}; {e}")
         if timed:

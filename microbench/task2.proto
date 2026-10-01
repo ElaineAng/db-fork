@@ -123,10 +123,16 @@ message TaskConfig {
   bool measure_storage = 8;
 
   // Async execution configuration
-  // Number of concurrent requests per connection (default 1 = synchronous)
-  // When > 1, enables async mode with that many concurrent requests
+  // Number of concurrent requests per thread (default 1 = synchronous)
+  // When > 1, enables async mode with that many concurrent requests, each on
+  // its own connection from a per-thread pool of the same size
   // Requires autocommit = true when > 1
   int32 concurrent_requests = 10;
+
+  // Run in async mode even with concurrent_requests = 1, so a sweep over
+  // concurrent_requests uses the same runner and drivers at every point.
+  // Async mode is always used when concurrent_requests > 1.
+  bool use_async = 11;
 
   // Single operation benchmark configuration
   OperationBenchmark operation_benchmark = 9;

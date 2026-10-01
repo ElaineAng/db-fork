@@ -18,6 +18,7 @@ dependencies = [
     "pymysql",
     "aiomysql",  # For async operations on the dolt_mysql backend
     "psycopg[binary]>=3.0",  # For async database operations
+    "psycopg-pool",  # Connection pool for async mode (one connection per concurrent request)
     "python-dotenv",
     "requests",  # Neon, Xata and Tiger HTTP APIs
     "scipy",
