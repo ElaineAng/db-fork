@@ -869,6 +869,47 @@ class SharedProgress:
 # ============================================================================
 
 
+class TimedPhase:
+    """Start barrier and timed window shared by all worker threads.
+
+    Each worker connects, opens its async pool (if any) and runs its warm-up,
+    then calls wait(). The timed phase starts when the last worker arrives,
+    so all workers start their timed ops together and per-worker setup is
+    kept out of the throughput window. Each worker calls finish() when its
+    timed ops are done; the window ends at the last one.
+    """
+
+    def __init__(self, num_workers: int):
+        self.start_time: Optional[float] = None
+        self._end_times: List[float] = []
+        self._lock = threading.Lock()
+        self._barrier = threading.Barrier(num_workers, action=self._mark_start)
+
+    def _mark_start(self) -> None:
+        # Runs once, in the last worker to arrive, before any are released.
+        self.start_time = time.time()
+
+    def wait(self) -> None:
+        self._barrier.wait()
+
+    def abort(self) -> None:
+        """Release workers blocked in wait() with BrokenBarrierError.
+
+        Called when a worker fails before reaching the barrier, so the others
+        fail instead of waiting forever.
+        """
+        self._barrier.abort()
+
+    def finish(self) -> None:
+        with self._lock:
+            self._end_times.append(time.time())
+
+    @property
+    def end_time(self) -> Optional[float]:
+        with self._lock:
+            return max(self._end_times) if self._end_times else None
+
+
 class WorkerContext:
     """Context object providing services to operations.
 
@@ -1341,36 +1382,48 @@ class OperationRunner:
                 )
             raise
 
-    def execute_multiple(self, num_ops: int, warmup_ops: int = 0) -> None:
+    def execute_multiple(
+        self,
+        num_ops: int,
+        warmup_ops: int = 0,
+        timed_phase: Optional['TimedPhase'] = None,
+    ) -> None:
         """Execute the operation N times with optional warm-up.
 
         Args:
             num_ops: Number of operations to execute (timed)
             warmup_ops: Number of warm-up operations to execute first (not counted in results)
+            timed_phase: Shared start barrier and timed window. The timed ops
+                start only once every worker has finished its warm-up.
         """
-        # Execute warm-up operations (if any)
+        # Execute warm-up operations (if any). They are not recorded, so the
+        # results only ever hold timed ops.
         if warmup_ops > 0:
             if self.context.thread_id == 0:
                 print(f"Executing {warmup_ops} warm-up operations per thread...")
 
-            for i in range(warmup_ops):
-                try:
-                    self.operation.execute(self.context)
-                except Exception as e:
-                    # Build detailed error message for warmup
-                    op_name = self.context.config.operation_name
-                    error_type = type(e).__name__
-                    msg = f"[Thread {self.context.thread_id}] Warm-up operation {i+1}/{warmup_ops} failed: {op_name} - {error_type}: {e}"
-                    if self.context.shared_progress:
-                        self.context.shared_progress.write(msg)
-                    else:
-                        print(msg)
-
-            # Clear warm-up results from collector
-            self.context.result_collector.reset()
+            self.context.result_collector.set_recording(False)
+            try:
+                for i in range(warmup_ops):
+                    try:
+                        self.operation.execute(self.context)
+                    except Exception as e:
+                        # Build detailed error message for warmup
+                        op_name = self.context.config.operation_name
+                        error_type = type(e).__name__
+                        msg = f"[Thread {self.context.thread_id}] Warm-up operation {i+1}/{warmup_ops} failed: {op_name} - {error_type}: {e}"
+                        if self.context.shared_progress:
+                            self.context.shared_progress.write(msg)
+                        else:
+                            print(msg)
+            finally:
+                self.context.result_collector.set_recording(True)
 
             if self.context.thread_id == 0:
                 print(f"Warm-up complete. Starting timed measurement of {num_ops} operations...")
+
+        if timed_phase:
+            timed_phase.wait()
 
         # Execute timed operations
         for i in range(num_ops):
@@ -1398,6 +1451,9 @@ class OperationRunner:
                 # Update progress even for failed ops
                 if self.context.shared_progress:
                     self.context.shared_progress.update(1)
+
+        if timed_phase:
+            timed_phase.finish()
 
 
 class AsyncOperationRunner:
@@ -1456,16 +1512,20 @@ class AsyncOperationRunner:
             # Branch operations and others without parameters
             return OperationRegistry.create(op_type)
 
-    async def _execute_single_async(self, semaphore: asyncio.Semaphore, op_number: int) -> dict:
+    async def _execute_single_async(
+        self, semaphore: asyncio.Semaphore, op_number: int, warmup: bool = False
+    ) -> dict:
         """Execute a single operation asynchronously with semaphore control.
 
         Args:
             semaphore: Semaphore to limit concurrent execution
             op_number: Operation number for error reporting
+            warmup: Warm-up op; not counted in the progress bar
 
         Returns:
             dict with status information for debugging
         """
+        progress = None if warmup else self.context.shared_progress
         async with semaphore:
             try:
                 # Check if operation has async version
@@ -1477,8 +1537,8 @@ class AsyncOperationRunner:
                     await loop.run_in_executor(None, self.operation.execute, self.context)
 
                 # Update progress
-                if self.context.shared_progress:
-                    self.context.shared_progress.update(1)
+                if progress:
+                    progress.update(1)
 
                 return {"status": "success", "op_number": op_number}
 
@@ -1497,8 +1557,8 @@ class AsyncOperationRunner:
                     print(msg)
 
                 # Update progress even for failed ops
-                if self.context.shared_progress:
-                    self.context.shared_progress.update(1)
+                if progress:
+                    progress.update(1)
 
                 return {"status": "failed", "op_number": op_number, "error": str(e)}
 
@@ -1589,12 +1649,20 @@ class AsyncOperationRunner:
         # Create the pool with the same URI as the sync connection
         await self.context.db_tools.open_async_pool(uri, pool_size, configure)
 
-    async def execute_multiple_async(self, num_ops: int, warmup_ops: int = 0) -> None:
+    async def execute_multiple_async(
+        self,
+        num_ops: int,
+        warmup_ops: int = 0,
+        timed_phase: Optional['TimedPhase'] = None,
+    ) -> None:
         """Execute operations asynchronously with configurable concurrency.
 
         Args:
             num_ops: Number of operations to execute (timed)
             warmup_ops: Number of warm-up operations to execute first (not counted in results)
+            timed_phase: Shared start barrier and timed window. The timed ops
+                start only once every worker has opened its pool and finished
+                its warm-up.
         """
         # Ensure async connection pool is initialized
         await self._ensure_async_pool()
@@ -1608,16 +1676,23 @@ class AsyncOperationRunner:
                 print(f"Executing {warmup_ops} warm-up operations with concurrency={self.concurrent_limit}...")
 
             warmup_tasks = [
-                self._execute_single_async(semaphore, i+1)
+                self._execute_single_async(semaphore, i+1, warmup=True)
                 for i in range(warmup_ops)
             ]
-            await asyncio.gather(*warmup_tasks, return_exceptions=True)
-
-            # Clear warm-up results from collector
-            self.context.result_collector.reset()
+            # Warm-up ops are not recorded. The tasks run on this thread, so
+            # the per-thread switch covers all of them.
+            self.context.result_collector.set_recording(False)
+            try:
+                await asyncio.gather(*warmup_tasks, return_exceptions=True)
+            finally:
+                self.context.result_collector.set_recording(True)
 
             if self.context.thread_id == 0:
                 print(f"Warm-up complete. Starting timed measurement of {num_ops} operations...")
+
+        if timed_phase:
+            # Wait off the event loop so the pool's background tasks keep running.
+            await asyncio.get_running_loop().run_in_executor(None, timed_phase.wait)
 
         # Execute timed operations concurrently
         tasks = [
@@ -1627,6 +1702,8 @@ class AsyncOperationRunner:
 
         # Wait for all operations to complete
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        if timed_phase:
+            timed_phase.finish()
 
         # Analyze results
         successes = [r for r in results if isinstance(r, dict) and r.get("status") == "success"]
@@ -1695,12 +1772,18 @@ class AsyncOperationRunner:
             "has_issues": has_issues
         }
 
-    def execute_multiple(self, num_ops: int, warmup_ops: int = 0) -> dict:
+    def execute_multiple(
+        self,
+        num_ops: int,
+        warmup_ops: int = 0,
+        timed_phase: Optional['TimedPhase'] = None,
+    ) -> dict:
         """Synchronous wrapper that runs async execution in event loop.
 
         Args:
             num_ops: Number of operations to execute (timed)
             warmup_ops: Number of warm-up operations to execute first
+            timed_phase: Shared start barrier and timed window
 
         Returns:
             dict with execution statistics (successes, failures, etc.)
@@ -1711,7 +1794,9 @@ class AsyncOperationRunner:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            return loop.run_until_complete(self.execute_multiple_async(num_ops, warmup_ops))
+            return loop.run_until_complete(
+                self.execute_multiple_async(num_ops, warmup_ops, timed_phase)
+            )
         finally:
             # Close the async pool on its own loop, before that loop is
             # closed, so the server sees clean disconnects. This must come
@@ -1791,8 +1876,9 @@ class BenchmarkExecutor:
         print(f"Seed: {fixed_seed}")
         print(f"{'='*60}\n")
 
-        # Track start time
-        start_time = time.time()
+        # All workers start their timed ops together; see TimedPhase.
+        self._timed_phase = TimedPhase(num_threads)
+        wall_start = time.time()
 
         try:
             if num_threads == 1:
@@ -1808,11 +1894,20 @@ class BenchmarkExecutor:
         finally:
             shared_progress.close()
 
-        # Calculate metrics
-        end_time = time.time()
+        # Throughput window: from the start barrier (every worker connected
+        # and warmed up) to the last worker finishing its timed ops. Thread
+        # start-up, connection/pool setup and teardown are excluded.
+        start_time = self._timed_phase.start_time
+        end_time = self._timed_phase.end_time
+        if start_time is None or end_time is None:
+            raise RuntimeError(
+                "No worker completed the timed phase; see the worker errors above."
+            )
         elapsed_time = end_time - start_time
+        wall_time = time.time() - wall_start
 
         metrics = self._calculate_metrics(total_ops, elapsed_time)
+        metrics["wall_time"] = wall_time
         self._print_metrics(metrics)
 
         return metrics
@@ -1882,12 +1977,16 @@ class BenchmarkExecutor:
             # Use async runner if concurrent_requests > 1, otherwise sync runner
             if self.config.concurrent_requests > 1:
                 runner = AsyncOperationRunner(self.config, ctx)
-                stats = runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                stats = runner.execute_multiple(
+                    self.config.num_ops, self.config.warmup_ops, self._timed_phase
+                )
                 # Print aggregate summary for async execution
                 self._print_aggregate_summary([stats])
             else:
                 runner = OperationRunner(self.config, ctx)
-                runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                runner.execute_multiple(
+                    self.config.num_ops, self.config.warmup_ops, self._timed_phase
+                )
 
     def _execute_multi_threaded(
         self,
@@ -1903,6 +2002,16 @@ class BenchmarkExecutor:
             Returns:
                 dict with stats if using async runner, None otherwise
             """
+            try:
+                return run_worker(thread_id, assigned_branches)
+            except BaseException:
+                # If this worker never reaches the start barrier, release the
+                # others instead of leaving them waiting forever. No-op once
+                # the timed phase has started.
+                self._timed_phase.abort()
+                raise
+
+        def run_worker(thread_id: int, assigned_branches: List[str]):
             rc.set_current_thread_id(thread_id)
             worker_seed = fixed_seed + thread_id
 
@@ -1941,10 +2050,14 @@ class BenchmarkExecutor:
                 # Use async runner if concurrent_requests > 1, otherwise sync runner
                 if self.config.concurrent_requests > 1:
                     runner = AsyncOperationRunner(self.config, ctx)
-                    return runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                    return runner.execute_multiple(
+                        self.config.num_ops, self.config.warmup_ops, self._timed_phase
+                    )
                 else:
                     runner = OperationRunner(self.config, ctx)
-                    runner.execute_multiple(self.config.num_ops, self.config.warmup_ops)
+                    runner.execute_multiple(
+                        self.config.num_ops, self.config.warmup_ops, self._timed_phase
+                    )
                     return None
 
         # Execute with thread pool
@@ -1967,7 +2080,7 @@ class BenchmarkExecutor:
                     if stats is not None:  # Async runner returns stats
                         thread_stats.append(stats)
                 except Exception as e:
-                    print(f"Worker thread failed: {e}")
+                    print(f"Worker thread failed: {type(e).__name__}: {e}")
 
             # Print aggregate summary for async execution
             if thread_stats:
@@ -2052,7 +2165,8 @@ class BenchmarkExecutor:
             print(f" ({100*metrics['failed_ops']/metrics['intended_ops']:.1f}%)")
         else:
             print()
-        print(f"  Total time: {metrics['elapsed_time']:.2f}s")
+        print(f"  Timed window: {metrics['elapsed_time']:.2f}s (all workers started together)")
+        print(f"  Wall time incl. worker setup: {metrics['wall_time']:.2f}s")
         print(f"  Throughput: {metrics['throughput']:.2f} ops/sec (successful ops only)")
         print(f"\n  Data operations only (excluding branch ops):")
         print(f"    Count: {metrics['data_ops_count']}")
@@ -2106,7 +2220,8 @@ class ResultManager:
             "intended_ops": self.metrics["intended_ops"],  # num_ops * num_threads
             "total_ops": self.metrics["total_ops"],  # Actual successful operations
             "failed_ops": self.metrics["failed_ops"],  # Failed operations
-            "elapsed_time": self.metrics["elapsed_time"],
+            "elapsed_time": self.metrics["elapsed_time"],  # Timed window (start barrier to last worker done)
+            "wall_time": self.metrics["wall_time"],  # Incl. worker connect/warm-up/teardown
             "throughput": self.metrics["throughput"],  # Based on successful ops only
             "data_ops_count": self.metrics["data_ops_count"],
             "data_ops_time": self.metrics["data_ops_time"],

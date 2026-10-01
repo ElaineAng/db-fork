@@ -86,6 +86,10 @@ class DoltToolSuite(DBToolSuite):
         db_name: str = None,
     ):
         super().__init__(connection, result_collector=collector)
+        # Branch checked out on the sync connection, tracked client-side so
+        # get_current_branch() needs no round trip (it runs before most ops).
+        # Only the sync checkout methods below change it.
+        self._current_branch = None
         self._connect_branch_impl(default_branch_name)
         self.autocommit = autocommit
         self.db_name = db_name
@@ -115,6 +119,8 @@ class DoltToolSuite(DBToolSuite):
             self._connect_branch_impl(parent_id)
         cmd = f"SELECT dolt_checkout('-b', '{branch_name}');"
         super().execute_sql(cmd)
+        # dolt_checkout('-b') also switches the session to the new branch.
+        self._current_branch = branch_name
 
     def _connect_branch_impl(self, branch_name: str) -> None:
         """
@@ -123,13 +129,11 @@ class DoltToolSuite(DBToolSuite):
         """
         cmd = f"SELECT dolt_checkout('{branch_name}');"
         super().execute_sql(cmd)
+        self._current_branch = branch_name
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
-        # TODO: Consider cache the current branch name to avoid querying.
-        cmd = "SELECT active_branch();"
-        result = super().execute_sql(cmd)
         # Dolt's branch name is unique and can be used as an ID.
-        return (result[0][0], result[0][0])
+        return (self._current_branch, self._current_branch)
 
     def _merge_branch_impl(self, source_branch: str, message: str = "") -> dict:
         """Merge source_branch into the currently checked-out branch.

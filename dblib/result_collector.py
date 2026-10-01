@@ -175,6 +175,19 @@ class ResultCollector:
         state.end_time = 0.0
         state.pool_wait_time = 0.0
 
+    def set_recording(self, enabled: bool) -> None:
+        """Turn recording on or off for the calling thread only.
+
+        While off, flush_record() and record_failure() drop their data. Used
+        for warm-up ops: each worker discards only its own warm-up results,
+        without touching what other threads have already recorded. Async
+        tasks run on their worker's thread, so this covers them too.
+        """
+        self._thread_local.recording_disabled = not enabled
+
+    def _recording_enabled(self) -> bool:
+        return not getattr(self._thread_local, "recording_disabled", False)
+
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
         with self._lock:
@@ -281,6 +294,10 @@ class ResultCollector:
         For async operations, cleans up task-local storage after recording.
         """
         try:
+            if not self._recording_enabled():
+                self._reset_metrics()
+                return
+
             state = self._get_thread_state()
 
             # Create and fill the Result proto
@@ -333,6 +350,9 @@ class ResultCollector:
             error: The exception that caused the failure
             operation_number: Optional operation number (e.g., 5 out of 1000)
         """
+        if not self._recording_enabled():
+            return
+
         state = self._get_thread_state()
 
         failure_info = {
