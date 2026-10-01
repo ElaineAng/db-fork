@@ -129,7 +129,7 @@ run_one_benchmark() {
     echo ""
 
     echo "Starting benchmark..."
-    python -m microbench.runner --config "$config_file" --seed "$seed" --output-dir "$output_dir"
+    uv run python -m microbench.runner --config "$config_file" --seed "$seed" --output-dir "$output_dir"
 
     # Clean up dropped databases to prevent disk space explosion
     rm -rf "${DOLT_DATA_DIR:-/tmp/doltgres_data/databases}/.dolt_dropped_databases"/*

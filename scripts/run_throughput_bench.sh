@@ -2,23 +2,23 @@
 # run_throughput_bench.sh - Dedicated script for throughput experiments
 #
 # Usage:
-#   ./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-concurrency --threads <N> --branches <N> [options]
-#   ./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [options]
-#   ./run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [options]
+#   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-concurrency --threads <N> --branches <N> [options]
+#   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [options]
+#   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [options]
 #
 # Examples:
 #   # Fix threads at 8 and branches at 1, vary concurrency: 1,2,4,8,16,32,64,128
-#   ./run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1
 #
 #   # Fix threads at 128, vary branches: 1,2,4,8,16,32
-#   ./run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128
 #
 #   # Vary both threads and branches proportionally (default: 4 threads per branch)
-#   ./run_throughput_bench.sh dolt db.sql --sweep-proportional
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-proportional
 #
 #   # Custom concurrency/branch lists
-#   ./run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1 --concurrency-list "1,2,4,8,16,32"
-#   ./run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1 --concurrency-list "1,2,4,8,16,32"
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
 
 set -e
 
@@ -441,7 +441,7 @@ EOF
 
             # Run the benchmark
             echo "Starting benchmark..."
-            python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+            uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
             # Clean up dropped databases to prevent disk space explosion (Dolt only)
             if [ "$BACKEND" = "dolt" ]; then
@@ -561,7 +561,7 @@ EOF
 
             # Run the benchmark
             echo "Starting benchmark..."
-            python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+            uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
             # Clean up dropped databases to prevent disk space explosion (Dolt only)
             if [ "$BACKEND" = "dolt" ]; then
@@ -686,7 +686,7 @@ EOF
 
                 # Run the benchmark
                 echo "Starting benchmark..."
-                python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+                uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
                 # Clean up dropped databases to prevent disk space explosion (Dolt only)
                 if [ "$BACKEND" = "dolt" ]; then

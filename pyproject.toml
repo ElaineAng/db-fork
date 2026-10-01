@@ -10,27 +10,37 @@ authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
 requires-python = ">=3.11"
 dependencies = [
     "anytree",
-    "coolname",
-    "faker",
-    "microbench",
+    "faker>=37,<38",  # Generates benchmark rows; a new major can change the data
     "neon-api",
     "numpy",
-    "protobuf",
+    "protobuf>=6.32,<7",  # Matches the protoc 32 (6.x) generated *_pb2.py
     "psycopg2-binary",
     "pymysql",
     "aiomysql",  # For async operations on the dolt_mysql backend
     "psycopg[binary]>=3.0",  # For async database operations
     "python-dotenv",
-    "langchain",
-    "langgraph",
-    "langchain-google-genai",
-    "langchain-openai",
+    "requests",  # Neon, Xata and Tiger HTTP APIs
     "scipy",
     "matplotlib",
-    "pyarrow",
+    "pyarrow>=22,<23",  # Writes result parquet files
     "tqdm",
     "setuptools",
-    "pandas",
+    "pandas>=2.3,<3",  # pandas 3 has breaking API changes (plot scripts)
+]
+
+[project.optional-dependencies]
+# LLM agent workloads under agent/. Install with `uv sync --extra agent`.
+# Capped below langchain 1.0 / langgraph 0.7: agent/ uses pre-1.0 APIs
+# (e.g. langchain.tools.StructuredTool), which 1.0 removed.
+agent = [
+    "coolname",
+    "datasets",
+    "langchain>=0.3,<0.4",
+    "langchain-core>=0.3,<0.4",
+    "langchain-anthropic<0.4",
+    "langchain-google-genai>=2,<3",
+    "langchain-openai>=0.3,<0.4",
+    "langgraph>=0.6,<0.7",
 ]
 
 [tool.setuptools]
@@ -42,3 +52,13 @@ dblib = ["*.proto", "*_pb2.py"]
 
 [tool.setuptools.cmdclass]
 build_py = "build_protos.BuildWithProtos"
+
+[tool.uv]
+# The build step compiles the .proto files into the (untracked) *_pb2.py
+# modules. Rebuild the project whenever a .proto file changes, not only when
+# pyproject.toml does, so `uv sync` / `uv run` regenerate them.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "build_protos.py" },
+    { file = "**/*.proto" },
+]

@@ -13,7 +13,7 @@ Reads parquet files from two backend directories and produces:
   6. Steps completion over time.
 
 Usage:
-    python scripts/macro_comparison.py \
+    uv run python scripts/plotting/macro_comparison.py \
         --dolt-dir run_stats/dolt_mini \
         --neon-dir run_stats/neon_mini \
         --outdir macro-analysis/figures_comparison

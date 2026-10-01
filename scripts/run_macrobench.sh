@@ -2,7 +2,7 @@
 # Run a macrobenchmark experiment with custom backend, scale, and SQL path.
 #
 # Usage:
-#   ./run_macrobench.sh [--mini] [--outdir DIR] <workflow> <backend> <db_scale> <sql_path>
+#   ./scripts/run_macrobench.sh [--mini] [--outdir DIR] <workflow> <backend> <db_scale> <sql_path>
 #
 # Arguments:
 #   --mini              Use the mini config (fewer workers/steps for Neon)
@@ -14,9 +14,9 @@
 #   sql_path     Path to the schema SQL dump file
 #
 # Example:
-#   ./run_macrobench.sh mcts neon 10 db_setup/ch_benchmark_schema.sql
-#   ./run_macrobench.sh --mini --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
-#   ./run_macrobench.sh --max-runtime-sec 600 mcts neon 10 db_setup/ch_benchmark_schema.sql
+#   ./scripts/run_macrobench.sh mcts neon 10 db_setup/ch_benchmark_schema.sql
+#   ./scripts/run_macrobench.sh --mini --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
+#   ./scripts/run_macrobench.sh --max-runtime-sec 600 mcts neon 10 db_setup/ch_benchmark_schema.sql
 
 set -euo pipefail
 
@@ -123,7 +123,7 @@ if $MEASURE_STORAGE; then
     EXTRA_FLAGS+=(--measure-storage)
 fi
 
-python -m macrobench.runner \
+uv run python -m macrobench.runner \
     --config "$TMP_CONFIG" \
     --outdir "$OUTDIR" \
     --max-runtime-sec "$MAX_RUNTIME_SEC" \

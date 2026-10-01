@@ -1,9 +1,9 @@
 #!/bin/bash
 # run_multithread_bench.sh - Multi-threaded benchmark script for nth-op measurements
 #
-# Usage: ./run_multithread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]
-# Example: ./run_multithread_bench.sh dolt db_setup/tpcc_schema.sql
-#          ./run_multithread_bench.sh neon db_setup/tpcc_schema.sql --seed 12345 --max-branches 128 --shape bushy
+# Usage: ./scripts/run_multithread_bench.sh <backend> <sql_dump_path> [--seed <seed>] [--max-branches <max>] [--shape <shape>]
+# Example: ./scripts/run_multithread_bench.sh dolt db_setup/tpcc_schema.sql
+#          ./scripts/run_multithread_bench.sh neon db_setup/tpcc_schema.sql --seed 12345 --max-branches 128 --shape bushy
 #
 # Number of threads always equals number of branches (threads = branches).
 # For throughput experiments with independent thread/branch control, use run_throughput_bench.sh
@@ -265,7 +265,7 @@ EOF
 
         # Run the benchmark
         echo "Starting benchmark..."
-        python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
+        uv run python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
 
         # Clean up dropped databases to prevent disk space explosion
         DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
