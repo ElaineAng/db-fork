@@ -3,6 +3,7 @@ import uuid
 import time
 import threading
 import asyncio
+import weakref
 from contextlib import contextmanager
 from typing import Any
 import pyarrow as pa
@@ -122,9 +123,12 @@ class ResultCollector:
         # Thread-local storage for per-thread context and metrics
         self._thread_local = threading.local()
 
-        # Task-local storage for async operations (dict[task_id -> state])
+        # Task-local storage for async operations (task -> state), shared by
+        # every worker thread's event loop. Weakly keyed, so a task's entry is
+        # dropped once the task is gone; nothing ever clears the whole map
+        # while other threads' tasks are still in flight.
         # Protected by _lock for thread-safety
-        self._task_local = {}
+        self._task_local = weakref.WeakKeyDictionary()
 
         # Shared results list (protected by lock)
         self.results = []
@@ -147,11 +151,11 @@ class ResultCollector:
             task = asyncio.current_task()
             if task is not None:
                 # Async mode: use task-local storage
-                task_id = id(task)
                 with self._lock:
-                    if task_id not in self._task_local:
-                        self._task_local[task_id] = _OperationState()
-                    return self._task_local[task_id]
+                    state = self._task_local.get(task)
+                    if state is None:
+                        state = self._task_local[task] = _OperationState()
+                    return state
         except RuntimeError:
             # Not in async context, fall through to thread-local
             pass
@@ -194,14 +198,6 @@ class ResultCollector:
             self.results = []
             self.iteration_counter = 0
             self.failed_operations = []
-
-    def cleanup_task_local_storage(self):
-        """Clean up task-local storage for completed async operations.
-
-        Call this after all async operations are complete to free memory.
-        """
-        with self._lock:
-            self._task_local.clear()
 
     def set_context(
         self,
@@ -291,7 +287,7 @@ class ResultCollector:
         Create a Result proto with all current context and metrics, save it, and reset.
 
         Uses the thread-local thread_id set via set_current_thread_id().
-        For async operations, cleans up task-local storage after recording.
+        For async operations, the task-local state is dropped with its task.
         """
         try:
             if not self._recording_enabled():

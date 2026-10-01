@@ -1758,9 +1758,6 @@ class AsyncOperationRunner:
             if has_missing_results:
                 print(f"  WARNING: Results returned ({total_returned}) != tasks created ({num_ops})")
 
-        # Clean up task-local storage now that all operations are complete
-        self.context.result_collector.cleanup_task_local_storage()
-
         # Return stats for aggregation
         return {
             "thread_id": self.context.thread_id,
