@@ -225,15 +225,15 @@ Latency benchmark results are saved to the output directory:
 
 ### Throughput Benchmarks
 
-Measure throughput (operations per second) with independent control over threads and branches.
+Measure throughput (operations per second) with independent control over threads, branches and concurrent requests.
 
 #### Running Throughput Benchmarks
 
 Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 
 ```bash
-# Sweep threads (fix branches, vary threads)
-./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-threads --branches <N> [OPTIONS]
+# Sweep concurrency (fix threads and branches, vary concurrent requests per thread)
+./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-concurrency --threads <N> --branches <N> [OPTIONS]
 
 # Sweep branches (fix threads, vary branches)
 ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [OPTIONS]
@@ -242,13 +242,23 @@ Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [OPTIONS]
 ```
 
+The script runs in **async mode** by default: each thread keeps
+`--concurrent-requests` ops in flight, each on its own pooled connection
+checked out on the thread's branch. Async mode supports `dolt`, `dolt_mysql`
+and `neon`; use `--mode sync` for the other backends (one op at a time per
+thread). Every point of a sweep uses the same mode, including concurrency 1.
+
+Each thread works on one branch, assigned round-robin. With fewer threads
+than branches, the extra branches exist but get no load; with more threads
+than branches, threads share branches.
+
 #### Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `neon`, `kpg`, `xata`, `txn`, `file_copy`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `txn`, `file_copy`, `tiger` |
 | `sql_dump_path` | Path to SQL dump file |
-| `--sweep-threads` | Fix branches, vary threads (requires `--branches`) |
+| `--sweep-concurrency` | Fix threads and branches, vary concurrent requests (requires `--threads` and `--branches`; async only) |
 | `--sweep-branches` | Fix threads, vary branches (requires `--threads`) |
 | `--sweep-proportional` | Vary both threads and branches proportionally |
 
@@ -256,34 +266,37 @@ Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 
 | Option | Description |
 |--------|-------------|
-| `--threads <N>` | Fixed thread count (for `--sweep-branches` mode) |
-| `--branches <N>` | Fixed branch count (for `--sweep-threads` mode) |
+| `--mode <async\|sync>` | Runner to use (default: `async`; `sync` for backends without async support) |
+| `--threads <N>` | Fixed thread count (for `--sweep-concurrency` and `--sweep-branches`) |
+| `--branches <N>` | Fixed branch count (for `--sweep-concurrency`) |
 | `--threads-per-branch <N>` | Threads per branch ratio for `--sweep-proportional` (default: 4) |
-| `--thread-list <list>` | Comma-separated thread counts (e.g., `1,2,4,8,16`) |
 | `--branch-list <list>` | Comma-separated branch counts (e.g., `1,2,4,8,16`) |
-| `--seed <seed>` | Random seed for reproducibility |
-| `--num-ops <n>` | Number of operations per test |
+| `--concurrency-list <list>` | Comma-separated concurrency levels for `--sweep-concurrency` (default: `1,2,4,...,1024`) |
+| `--concurrent-requests <n>` | Ops in flight per thread for the other sweeps (default: 1; > 1 needs async) |
+| `--num-ops <n>` | Number of operations per thread (overrides the per-operation defaults) |
+| `--point-ops <n>` / `--range-ops <n>` | Operations per thread for point / range operations |
+| `--warmup-ops <n>` / `--warmup-fraction <f>` | Warm-up operations per thread, not counted in throughput |
 | `--operations <ops>` | Comma-separated list (e.g., `READ,RANGE_READ`) |
 | `--output-dir <dir>` | Output directory (default: `/tmp/run_stats`) |
+
+Total timed operations per run are `num_ops x threads`; concurrent requests
+overlap them but do not add to the count. Keep `threads x (concurrent requests + 1)`
+below the server's connection limit.
 
 #### Examples
 
 ```bash
-# Fix branches at 1, vary threads: 1,2,4,8,16,32,64,128
-./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 1
+# Fix 8 threads on 1 branch, vary concurrency: 1,2,4,8,16,32
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-concurrency --threads 8 --branches 1 --concurrency-list "1,2,4,8,16,32"
 
-# Fix threads at 128, vary branches: 1,2,4,8,16,32
-./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128
+# Fix 4 threads x 16 concurrent requests, vary branches (4 active, the rest idle)
+./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 4 --concurrent-requests 16 --branch-list "4,16,64,256,1024"
 
-# Vary both proportionally (default: 4 threads per branch)
-./scripts/run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional
+# One thread per branch with 4 requests in flight each, 1-128 branches
+./scripts/run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional --threads-per-branch 1 --concurrent-requests 4
 
-# Custom thread/branch lists
-./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-threads --branches 16 --thread-list "1,2,4,8,16,32"
-./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
-
-# Proportional with custom ratio (8 threads per branch)
-./scripts/run_throughput_bench.sh neon db_setup/ch-w1.sql --sweep-proportional --threads-per-branch 8
+# Backend without async support
+./scripts/run_throughput_bench.sh xata db_setup/ch-w1.sql --sweep-branches --threads 16 --mode sync
 
 # Run only specific operations
 ./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional --operations READ,RANGE_READ
@@ -295,10 +308,13 @@ Throughput benchmark results are saved to the output directory:
 
 ```
 <output_dir>/
-├── <backend>_<dataset>_tp_t<threads>_b<branches>.parquet
-├── <backend>_<dataset>_tp_t<threads>_b<branches>_<operation>_threads<threads>_summary.json
-└── <backend>_<dataset>_tp_t<threads>_b<branches>_setup.parquet
+├── <backend>_<dataset>_tp_t<threads>_b<branches>[_cr<concurrency>].parquet
+├── <backend>_<dataset>_tp_t<threads>_b<branches>[_cr<concurrency>]_<operation>_threads<threads>_summary.json
+└── <backend>_<dataset>_tp_t<threads>_b<branches>[_cr<concurrency>]_setup.parquet
 ```
+
+Async runs include `_cr<concurrency>` in the name (also at concurrency 1); sync
+runs do not. The summary JSON records `execution_mode` and `concurrent_requests`.
 
 ---
 

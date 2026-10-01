@@ -6,30 +6,30 @@
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [options]
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [options]
 #
+# Runs in async mode by default (dolt, dolt_mysql, neon): each thread keeps
+# --concurrent-requests ops in flight, one pooled connection each. Use
+# --mode sync for the other backends; sync mode runs one op at a time per
+# thread.
+#
 # Examples:
-#   # Fix threads at 8 and branches at 1, vary concurrency: 1,2,4,8,16,32,64,128
-#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1
-#
-#   # Fix threads at 128, vary branches: 1,2,4,8,16,32
-#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128
-#
-#   # Vary both threads and branches proportionally (default: 4 threads per branch)
-#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-proportional
-#
-#   # Custom concurrency/branch lists
+#   # Fix threads at 8 and branches at 1, vary concurrency: 1,2,4,8,16,32
 #   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-concurrency --threads 8 --branches 1 --concurrency-list "1,2,4,8,16,32"
-#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-branches --threads 128 --branch-list "1,2,4,8,16"
+#
+#   # Fix 4 threads x 16 concurrent requests, vary branches: 4 stay active, the rest idle
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-branches --threads 4 --concurrent-requests 16
+#
+#   # One thread per branch with 4 requests in flight each, 1-128 branches
+#   ./scripts/run_throughput_bench.sh dolt db.sql --sweep-proportional --threads-per-branch 1 --concurrent-requests 4
 
 set -e
 
 # Parse arguments
 BACKEND=""
 SQL_DUMP_PATH=""
-SEED=""
 SWEEP_MODE=""  # "concurrency", "branches", or "proportional"
+MODE="async"   # "async" or "sync"
 FIXED_THREADS=""
 FIXED_BRANCHES=""
-THREAD_LIST=""
 BRANCH_LIST=""
 CONCURRENCY_LIST=""
 THREADS_PER_BRANCH="4"  # Default ratio for proportional mode
@@ -39,15 +39,11 @@ POINT_OPS_OVERRIDE=""
 RANGE_OPS_OVERRIDE=""
 WARMUP_OPS=""
 WARMUP_FRACTION=""
-CONCURRENT_REQUESTS="1"  # Default: 1 (synchronous mode)
+CONCURRENT_REQUESTS="1"
 OUTPUT_DIR="/tmp/run_stats"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --seed)
-            SEED="$2"
-            shift 2
-            ;;
         --sweep-concurrency)
             SWEEP_MODE="concurrency"
             shift
@@ -60,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             SWEEP_MODE="proportional"
             shift
             ;;
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
         --threads)
             FIXED_THREADS="$2"
             shift 2
@@ -70,10 +70,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --threads-per-branch)
             THREADS_PER_BRANCH="$2"
-            shift 2
-            ;;
-        --thread-list)
-            THREAD_LIST="$2"
             shift 2
             ;;
         --branch-list)
@@ -116,6 +112,10 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        -*)
+            echo "Error: Unknown option '$1'"
+            exit 1
+            ;;
         *)
             if [ -z "$BACKEND" ]; then
                 BACKEND="$1"
@@ -135,47 +135,41 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> {--sweep-concurrency | --sweep-branches | --sweep-proportional} [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, neon, kpg, xata, postgres transaction (txn), file_copy, tiger"
+    echo "  backend: dolt, dolt_mysql, neon, kpg, xata, txn (postgres transactions), file_copy, tiger"
     echo "  sql_dump_path: Path to SQL dump file"
-    echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches)"
+    echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
     echo "  --sweep-proportional: Vary both threads and branches proportionally"
     echo ""
     echo "Options:"
+    echo "  --mode <async|sync>: Runner to use (default: async). Async supports dolt, dolt_mysql and neon;"
+    echo "                       use sync for the other backends. Sync runs one op at a time per thread."
     echo "  --threads <N>: Fixed thread count (for --sweep-concurrency and --sweep-branches modes)"
     echo "  --branches <N>: Fixed branch count (for --sweep-concurrency mode)"
     echo "  --threads-per-branch <N>: Threads per branch ratio for --sweep-proportional (default: 4)"
-    echo "  --thread-list <list>: Comma-separated thread counts (e.g., '1,2,4,8,16')"
     echo "  --branch-list <list>: Comma-separated branch counts (e.g., '1,2,4,8,16')"
     echo "  --concurrency-list <list>: Comma-separated concurrency levels (e.g., '1,2,4,8,16')"
-    echo "  --seed <seed>: Random seed for reproducibility"
-    echo "  --num-ops <n>: Number of operations per test (overrides all operation-specific settings)"
+    echo "  --concurrent-requests <n>: Ops in flight per thread, one pooled connection each (default: 1; async only if > 1)"
+    echo "  --num-ops <n>: Number of operations per thread (overrides all operation-specific settings)"
     echo "  --point-ops <n>: Number of operations for point operations (READ, INSERT, UPDATE, DELETE)"
     echo "  --range-ops <n>: Number of operations for range operations (RANGE_READ, RANGE_UPDATE)"
     echo "  --warmup-ops <n>: Number of warm-up operations per thread (not counted in throughput)"
     echo "  --warmup-fraction <f>: Warm-up as fraction of num-ops (e.g., 0.2 for 20%)"
-    echo "  --concurrent-requests <n>: Number of concurrent requests per thread, one pooled connection each (default: 1)"
-    echo "                            Values > 1 enable async mode (requires autocommit)"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,RANGE_READ)"
     echo "  --output-dir <dir>: Output directory (default: /tmp/run_stats)"
     echo ""
     echo "Examples:"
-    echo "  # 8 threads, 1 branch, varying concurrency (1,2,4,8,16,32,64,128)"
-    echo "  $0 dolt db.sql --sweep-concurrency --threads 8 --branches 1"
-    echo ""
-    echo "  # 128 threads, varying branches (1,2,4,8,16,32)"
-    echo "  $0 dolt db.sql --sweep-branches --threads 128"
-    echo ""
-    echo "  # Vary both proportionally (4 threads per branch, 1-128 branches)"
-    echo "  $0 neon db.sql --sweep-proportional"
-    echo ""
-    echo "  # Custom lists"
+    echo "  # 8 threads, 1 branch, varying concurrency"
     echo "  $0 dolt db.sql --sweep-concurrency --threads 8 --branches 1 --concurrency-list '1,2,4,8,16,32'"
-    echo "  $0 dolt db.sql --sweep-branches --threads 128 --branch-list '1,2,4,8,16'"
     echo ""
-    echo "  # With specific concurrent requests"
-    echo "  $0 dolt db.sql --sweep-branches --threads 1 --concurrent-requests 10"
-    echo "  (Enables 10 concurrent requests per connection for capacity testing)"
+    echo "  # 4 threads x 16 concurrent requests, varying branches (1,2,4,...,1024)"
+    echo "  $0 dolt db.sql --sweep-branches --threads 4 --concurrent-requests 16"
+    echo ""
+    echo "  # One thread per branch, 4 requests in flight each, 1-128 branches"
+    echo "  $0 neon db.sql --sweep-proportional --threads-per-branch 1 --concurrent-requests 4"
+    echo ""
+    echo "  # Backend without async support"
+    echo "  $0 xata db.sql --sweep-branches --threads 16 --mode sync"
     exit 1
 fi
 
@@ -196,12 +190,32 @@ if [ "$SWEEP_MODE" = "branches" ] && [ -z "$FIXED_THREADS" ]; then
     exit 1
 fi
 
-# Convert backend to uppercase
+# Convert backend to uppercase/lowercase
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
+BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'"
+    exit 1
+fi
+
+# Validate execution mode. Async needs a backend whose async path checks out
+# the worker's branch on every pooled connection.
+if [ "$MODE" = "async" ]; then
+    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON)$ ]]; then
+        echo "Error: async mode supports dolt, dolt_mysql and neon only; use --mode sync for '$BACKEND'"
+        exit 1
+    fi
+    USE_ASYNC="true"
+elif [ "$MODE" = "sync" ]; then
+    if [ "$SWEEP_MODE" = "concurrency" ] || [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
+        echo "Error: concurrent requests need async mode; drop --mode sync"
+        exit 1
+    fi
+    USE_ASYNC="false"
+else
+    echo "Error: Invalid --mode '$MODE' (expected async or sync)"
     exit 1
 fi
 
@@ -209,11 +223,6 @@ fi
 if [ ! -f "$SQL_DUMP_PATH" ]; then
     echo "Error: SQL dump file not found: $SQL_DUMP_PATH"
     exit 1
-fi
-
-# Generate random seed if not provided
-if [ -z "$SEED" ]; then
-    SEED=$(( (RANDOM * 32768 + RANDOM) % 2147483647 ))
 fi
 
 # Default operation lists
@@ -224,14 +233,9 @@ fi
 # Convert operations to array
 IFS=',' read -ra OPS_ARRAY <<< "$OPERATIONS"
 
-# Determine thread and branch lists based on sweep mode
+# Determine thread, branch and concurrency lists based on sweep mode
 if [ "$SWEEP_MODE" = "concurrency" ]; then
     # Fix threads and branches, vary concurrency
-    NUM_THREADS=$FIXED_THREADS
-    NUM_BRANCHES=$FIXED_BRANCHES
-    THREAD_COUNTS=($NUM_THREADS)
-    BRANCH_COUNTS=($NUM_BRANCHES)
-
     if [ -n "$CONCURRENCY_LIST" ]; then
         IFS=',' read -ra CONCURRENCY_LEVELS <<< "$CONCURRENCY_LIST"
     else
@@ -241,14 +245,11 @@ if [ "$SWEEP_MODE" = "concurrency" ]; then
 
     echo "==================================================="
     echo "Throughput Benchmark: SWEEP CONCURRENCY"
-    echo "Fixed threads: $NUM_THREADS"
-    echo "Fixed branches: $NUM_BRANCHES"
+    echo "Fixed threads: $FIXED_THREADS"
+    echo "Fixed branches: $FIXED_BRANCHES"
     echo "Concurrency levels: ${CONCURRENCY_LEVELS[*]}"
 elif [ "$SWEEP_MODE" = "branches" ]; then
     # Fix threads, vary branches
-    NUM_THREADS=$FIXED_THREADS
-    THREAD_COUNTS=($NUM_THREADS)
-
     if [ -n "$BRANCH_LIST" ]; then
         IFS=',' read -ra BRANCH_COUNTS <<< "$BRANCH_LIST"
     else
@@ -258,12 +259,11 @@ elif [ "$SWEEP_MODE" = "branches" ]; then
 
     echo "==================================================="
     echo "Throughput Benchmark: SWEEP BRANCHES"
-    echo "Fixed threads: $NUM_THREADS"
+    echo "Fixed threads: $FIXED_THREADS"
     echo "Branch counts: ${BRANCH_COUNTS[*]}"
 elif [ "$SWEEP_MODE" = "proportional" ]; then
-    # Vary both threads and branches proportionally
-    # Default: 1,2,4,8,16,32,64,128 branches with threads = branches * threads_per_branch
-
+    # Vary both threads and branches proportionally:
+    # threads = branches * threads_per_branch
     if [ -n "$BRANCH_LIST" ]; then
         IFS=',' read -ra BRANCH_COUNTS <<< "$BRANCH_LIST"
     else
@@ -271,27 +271,18 @@ elif [ "$SWEEP_MODE" = "proportional" ]; then
         BRANCH_COUNTS=(1 2 4 8 16 32 64 128)
     fi
 
-    # Calculate thread counts proportionally
-    THREAD_COUNTS=()
-    for branches in "${BRANCH_COUNTS[@]}"; do
-        threads=$((branches * THREADS_PER_BRANCH))
-        THREAD_COUNTS+=($threads)
-    done
-
     echo "==================================================="
     echo "Throughput Benchmark: SWEEP PROPORTIONAL"
     echo "Threads per branch: $THREADS_PER_BRANCH"
     echo "Branch counts: ${BRANCH_COUNTS[*]}"
-    echo "Thread counts: ${THREAD_COUNTS[*]}"
 fi
 
 echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPS_ARRAY[*]}"
-echo "Random Seed: $SEED"
-echo "Concurrent Requests per Thread: $CONCURRENT_REQUESTS"
-if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
-    echo "  (Async mode enabled - one pooled connection per concurrent request)"
+echo "Execution mode: $MODE"
+if [ "$SWEEP_MODE" != "concurrency" ]; then
+    echo "Concurrent Requests per Thread: $CONCURRENT_REQUESTS"
 fi
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"
@@ -315,7 +306,7 @@ SHAPE_UPPER="FAN_OUT"
 
 # Create temporary config file
 TEMP_CONFIG=$(mktemp /tmp/${BACKEND}_throughput_bench_config_XXXXXX)
-    
+
 cleanup() {
     rm -f "$TEMP_CONFIG"
 }
@@ -325,18 +316,21 @@ trap cleanup EXIT
 SQL_BASENAME=$(basename "$SQL_DUMP_PATH" .sql)
 SQL_PREFIX=${SQL_BASENAME:0:4}
 
-# Function to get num_ops based on operation type
+# get_num_ops OPERATION NUM_THREADS
+# Default number of timed operations per thread.
 get_num_ops() {
     local op=$1
+    local num_threads=$2
     case $op in
-        BRANCH)
+        BRANCH_CREATE)
             echo 1
+            ;;
+        BRANCH_CONNECT|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
+            # Scale connect ops with the number of threads (2x)
+            echo $((num_threads * 2))
             ;;
         RANGE_UPDATE|RANGE_READ)
             echo 1000
-            ;;
-        CONNECT|READ|INSERT|UPDATE|DELETE)
-            echo 5000
             ;;
         *)
             echo 5000
@@ -344,185 +338,102 @@ get_num_ops() {
     esac
 }
 
-# Main loop: iterate through all combinations
-if [ "$SWEEP_MODE" = "concurrency" ]; then
-    # For concurrency mode, fix threads and branches, vary concurrent requests
-    NUM_THREADS=$FIXED_THREADS
-    NUM_BRANCHES=$FIXED_BRANCHES
-
-    for CONCURRENT_REQUESTS in "${CONCURRENCY_LEVELS[@]}"; do
-        # Generate run_id that includes thread, branch, and concurrency counts
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_tp_t${NUM_THREADS}_b${NUM_BRANCHES}_cr${CONCURRENT_REQUESTS}"
-
-        echo ""
-        echo "==================================================="
-        echo "Configuration: $NUM_THREADS threads, $NUM_BRANCHES branches, $CONCURRENT_REQUESTS concurrent requests"
-        echo "==================================================="
-
-        for OPERATION in "${OPS_ARRAY[@]}"; do
-            # Use override if provided
-            if [ -n "$NUM_OPS_OVERRIDE" ]; then
-                NUM_OPS="$NUM_OPS_OVERRIDE"
-            # Use range-ops override for range operations
-            elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^RANGE ]]; then
-                NUM_OPS="$RANGE_OPS_OVERRIDE"
-            # Use point-ops override for point operations
-            elif [ -n "$POINT_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^(READ|INSERT|UPDATE|DELETE)$ ]]; then
-                NUM_OPS="$POINT_OPS_OVERRIDE"
-            # For CONNECT operations, scale with number of threads (2x)
-            elif [[ "$OPERATION" =~ ^CONNECT ]]; then
-                NUM_OPS=$((NUM_THREADS * 2))
-            else
-                NUM_OPS=$(get_num_ops "$OPERATION")
-            fi
-
-            # Calculate warmup_ops
-            CALCULATED_WARMUP_OPS=0
-            if [ -n "$WARMUP_OPS" ]; then
-                CALCULATED_WARMUP_OPS=$WARMUP_OPS
-            elif [ -n "$WARMUP_FRACTION" ]; then
-                CALCULATED_WARMUP_OPS=$(awk "BEGIN {print int($NUM_OPS * $WARMUP_FRACTION)}")
-            fi
-
-            # For BRANCH operation, num_branches in setup should be 0
-            # For all other operations, setup num_branches matches the target
-            if [ "$OPERATION" = "BRANCH" ]; then
-                SETUP_NUM_BRANCHES=0
-            else
-                SETUP_NUM_BRANCHES=$NUM_BRANCHES
-            fi
-
-            echo ""
-            echo "---------------------------------------------------"
-            echo "Running: $RUN_ID, Operation: $OPERATION"
-            echo "  Num Ops: $NUM_OPS, Warmup Ops: $CALCULATED_WARMUP_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
-            echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES, Concurrency: $CONCURRENT_REQUESTS"
-            echo "---------------------------------------------------"
-
-            # Generate config file (task2.proto format for runner2.py)
-            cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for throughput benchmark (task2.proto)
-run_id: "${RUN_ID}"
-backend: ${BACKEND_UPPER}
-table_name: "${TABLE_NAME}"
-scale_factor: 1
-
-database_setup {
-  db_name: "${DB_NAME}"
-  cleanup: true
-  sql_dump {
-    sql_dump_path: "${SQL_DUMP_PATH}"
-  }
+# cleanup_dropped_databases
+# Clean up dropped databases to prevent disk space explosion (Dolt only).
+cleanup_dropped_databases() {
+    local dolt_dir
+    if [ "$BACKEND_LOWER" = "dolt" ]; then
+        dolt_dir="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
+    elif [ "$BACKEND_LOWER" = "dolt_mysql" ]; then
+        dolt_dir="${DOLT_MYSQL_DATA_DIR:-$HOME/dolt/databases}"
+    else
+        return 0
+    fi
+    if [ -d "$dolt_dir/.dolt_dropped_databases" ]; then
+        local dropped_count
+        dropped_count=$(ls -1 "$dolt_dir/.dolt_dropped_databases" 2>/dev/null | wc -l)
+        if [ "$dropped_count" -gt 0 ]; then
+            echo "Cleaning up $dropped_count dropped database(s) from $dolt_dir/.dolt_dropped_databases"
+            rm -rf "$dolt_dir/.dolt_dropped_databases"/*
+            echo "Cleanup complete"
+        fi
+    fi
+    # Explicit success: with set -e, a failed test above would end the sweep.
+    return 0
 }
 
-autocommit: true
-num_threads: ${NUM_THREADS}
-measure_storage: false
-concurrent_requests: ${CONCURRENT_REQUESTS}
+# run_config NUM_THREADS NUM_BRANCHES CONCURRENT_REQUESTS
+# Runs every operation in OPS_ARRAY for one (threads, branches, concurrency)
+# configuration.
+run_config() {
+    local num_threads=$1
+    local num_branches=$2
+    local concurrent_requests=$3
 
-operation_benchmark {
-  operation: ${OPERATION}
-  num_ops: ${NUM_OPS}
-  warmup_ops: ${CALCULATED_WARMUP_OPS}
+    # run_id carries thread, branch and (async only) concurrency counts. Sync
+    # runs keep the plain name, which plotting treats as concurrency 1.
+    local run_id="${BACKEND}_${SQL_PREFIX}_tp_t${num_threads}_b${num_branches}"
+    if [ "$USE_ASYNC" = "true" ]; then
+        run_id="${run_id}_cr${concurrent_requests}"
+    fi
 
-  setup {
-    num_branches: ${SETUP_NUM_BRANCHES}
-    branch_shape: ${SHAPE_UPPER}
-    inserts_per_branch: ${INSERTS_PER_BRANCH}
-    updates_per_branch: ${UPDATES_PER_BRANCH}
-    deletes_per_branch: ${DELETES_PER_BRANCH}
-  }
+    echo ""
+    echo "==================================================="
+    echo "Configuration: $num_threads threads, $num_branches branches, $concurrent_requests concurrent requests ($MODE)"
+    # Each thread works on the first branch assigned to it (round-robin).
+    if [ "$num_branches" -eq 0 ]; then
+        echo "Distribution: no setup branches; all threads work on the root branch"
+    elif [ "$num_threads" -lt "$num_branches" ]; then
+        echo "Distribution: one thread per branch on $num_threads branches; the other $((num_branches - num_threads)) branches get no load"
+    elif [ "$num_threads" -eq "$num_branches" ]; then
+        echo "Distribution: one thread per branch"
+    else
+        echo "Distribution: ~$((num_threads / num_branches)) threads share each branch (cyclic)"
+    fi
+    echo "==================================================="
 
-  range_config {
-    range_size: ${RANGE_SIZE}
-  }
-}
-EOF
+    local operation num_ops warmup_ops setup_num_branches
+    for operation in "${OPS_ARRAY[@]}"; do
+        # Use override if provided
+        if [ -n "$NUM_OPS_OVERRIDE" ]; then
+            num_ops="$NUM_OPS_OVERRIDE"
+        # Use range-ops override for range operations
+        elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$operation" =~ ^RANGE ]]; then
+            num_ops="$RANGE_OPS_OVERRIDE"
+        # Use point-ops override for point operations
+        elif [ -n "$POINT_OPS_OVERRIDE" ] && [[ "$operation" =~ ^(READ|INSERT|UPDATE|DELETE)$ ]]; then
+            num_ops="$POINT_OPS_OVERRIDE"
+        else
+            num_ops=$(get_num_ops "$operation" "$num_threads")
+        fi
 
-            # Run the benchmark
-            echo "Starting benchmark..."
-            uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+        # Calculate warmup_ops
+        warmup_ops=0
+        if [ -n "$WARMUP_OPS" ]; then
+            warmup_ops=$WARMUP_OPS
+        elif [ -n "$WARMUP_FRACTION" ]; then
+            warmup_ops=$(awk "BEGIN {print int($num_ops * $WARMUP_FRACTION)}")
+        fi
 
-            # Clean up dropped databases to prevent disk space explosion (Dolt only)
-            if [ "$BACKEND" = "dolt" ]; then
-                DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-                if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-                    DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
-                    if [ "$DROPPED_COUNT" -gt 0 ]; then
-                        echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
-                        rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
-                        echo "Cleanup complete"
-                    fi
-                fi
-            fi
-
-            echo "Completed: $RUN_ID, Operation: $OPERATION"
-        done  # OPERATION loop
-    done  # CONCURRENT_REQUESTS loop
-elif [ "$SWEEP_MODE" = "proportional" ]; then
-    # For proportional mode, iterate through paired (threads, branches) values
-    num_configs=${#BRANCH_COUNTS[@]}
-    for ((i=0; i<num_configs; i++)); do
-        NUM_BRANCHES=${BRANCH_COUNTS[$i]}
-        NUM_THREADS=${THREAD_COUNTS[$i]}
-
-        # Generate run_id that includes both thread and branch counts
-        RUN_ID="${BACKEND}_${SQL_PREFIX}_tp_t${NUM_THREADS}_b${NUM_BRANCHES}"
-        # Append concurrent requests if > 1 (async mode)
-        if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
-            RUN_ID="${RUN_ID}_cr${CONCURRENT_REQUESTS}"
+        # For BRANCH_CREATE, num_branches in setup should be 0
+        # For all other operations, setup num_branches matches the target
+        if [ "$operation" = "BRANCH_CREATE" ]; then
+            setup_num_branches=0
+        else
+            setup_num_branches=$num_branches
         fi
 
         echo ""
-        echo "==================================================="
-        echo "Configuration: $NUM_THREADS threads, $NUM_BRANCHES branches"
-        echo "Distribution: ${THREADS_PER_BRANCH} threads per branch (proportional)"
-        echo "==================================================="
+        echo "---------------------------------------------------"
+        echo "Running: $run_id, Operation: $operation"
+        echo "  Num Ops: $num_ops, Warmup Ops: $warmup_ops, Setup Branches: $setup_num_branches"
+        echo "  Threads: $num_threads, Branches: $num_branches, Concurrency: $concurrent_requests"
+        echo "---------------------------------------------------"
 
-        for OPERATION in "${OPS_ARRAY[@]}"; do
-            # Use override if provided
-            if [ -n "$NUM_OPS_OVERRIDE" ]; then
-                NUM_OPS="$NUM_OPS_OVERRIDE"
-            # Use range-ops override for range operations
-            elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^RANGE ]]; then
-                NUM_OPS="$RANGE_OPS_OVERRIDE"
-            # Use point-ops override for point operations
-            elif [ -n "$POINT_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^(READ|INSERT|UPDATE|DELETE)$ ]]; then
-                NUM_OPS="$POINT_OPS_OVERRIDE"
-            # For CONNECT operations, scale with number of threads (2x)
-            elif [[ "$OPERATION" =~ ^CONNECT ]]; then
-                NUM_OPS=$((NUM_THREADS * 2))
-            else
-                NUM_OPS=$(get_num_ops "$OPERATION")
-            fi
-
-            # Calculate warmup_ops
-            CALCULATED_WARMUP_OPS=0
-            if [ -n "$WARMUP_OPS" ]; then
-                CALCULATED_WARMUP_OPS=$WARMUP_OPS
-            elif [ -n "$WARMUP_FRACTION" ]; then
-                CALCULATED_WARMUP_OPS=$(awk "BEGIN {print int($NUM_OPS * $WARMUP_FRACTION)}")
-            fi
-
-            # For BRANCH operation, num_branches in setup should be 0
-            # For all other operations, setup num_branches matches the target
-            if [ "$OPERATION" = "BRANCH" ]; then
-                SETUP_NUM_BRANCHES=0
-            else
-                SETUP_NUM_BRANCHES=$NUM_BRANCHES
-            fi
-
-            echo ""
-            echo "---------------------------------------------------"
-            echo "Running: $RUN_ID, Operation: $OPERATION"
-            echo "  Num Ops: $NUM_OPS, Warmup Ops: $CALCULATED_WARMUP_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
-            echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES"
-            echo "---------------------------------------------------"
-
-            # Generate config file (task2.proto format for runner2.py)
-            cat > "$TEMP_CONFIG" << EOF
+        # Generate config file (task2.proto format for runner2.py)
+        cat > "$TEMP_CONFIG" << EOF
 # Auto-generated config for throughput benchmark (task2.proto)
-run_id: "${RUN_ID}"
+run_id: "${run_id}"
 backend: ${BACKEND_UPPER}
 table_name: "${TABLE_NAME}"
 scale_factor: 1
@@ -536,17 +447,18 @@ database_setup {
 }
 
 autocommit: true
-num_threads: ${NUM_THREADS}
+num_threads: ${num_threads}
 measure_storage: false
-concurrent_requests: ${CONCURRENT_REQUESTS}
+concurrent_requests: ${concurrent_requests}
+use_async: ${USE_ASYNC}
 
 operation_benchmark {
-  operation: ${OPERATION}
-  num_ops: ${NUM_OPS}
-  warmup_ops: ${CALCULATED_WARMUP_OPS}
+  operation: ${operation}
+  num_ops: ${num_ops}
+  warmup_ops: ${warmup_ops}
 
   setup {
-    num_branches: ${SETUP_NUM_BRANCHES}
+    num_branches: ${setup_num_branches}
     branch_shape: ${SHAPE_UPPER}
     inserts_per_branch: ${INSERTS_PER_BRANCH}
     updates_per_branch: ${UPDATES_PER_BRANCH}
@@ -559,153 +471,30 @@ operation_benchmark {
 }
 EOF
 
-            # Run the benchmark
-            echo "Starting benchmark..."
-            uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+        # Run the benchmark
+        echo "Starting benchmark..."
+        uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
-            # Clean up dropped databases to prevent disk space explosion (Dolt only)
-            if [ "$BACKEND" = "dolt" ]; then
-                DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-                if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-                    DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
-                    if [ "$DROPPED_COUNT" -gt 0 ]; then
-                        echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
-                        rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
-                        echo "Cleanup complete"
-                    fi
-                fi
-            fi
+        cleanup_dropped_databases
 
-            echo "Completed: $RUN_ID, Operation: $OPERATION"
-        done  # OPERATION loop
-    done  # Proportional mode loop
+        echo "Completed: $run_id, Operation: $operation"
+    done
+}
+
+# Main loop: iterate through all configurations
+if [ "$SWEEP_MODE" = "concurrency" ]; then
+    for concurrency in "${CONCURRENCY_LEVELS[@]}"; do
+        run_config "$FIXED_THREADS" "$FIXED_BRANCHES" "$concurrency"
+    done
+elif [ "$SWEEP_MODE" = "proportional" ]; then
+    for branches in "${BRANCH_COUNTS[@]}"; do
+        run_config "$((branches * THREADS_PER_BRANCH))" "$branches" "$CONCURRENT_REQUESTS"
+    done
 else
-    # For threads/branches mode, use nested loops
-    for NUM_BRANCHES in "${BRANCH_COUNTS[@]}"; do
-        for NUM_THREADS in "${THREAD_COUNTS[@]}"; do
-
-            # Generate run_id that includes both thread and branch counts
-            RUN_ID="${BACKEND}_${SQL_PREFIX}_tp_t${NUM_THREADS}_b${NUM_BRANCHES}"
-            # Append concurrent requests if > 1 (async mode)
-            if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
-                RUN_ID="${RUN_ID}_cr${CONCURRENT_REQUESTS}"
-            fi
-
-            echo ""
-            echo "==================================================="
-            echo "Configuration: $NUM_THREADS threads, $NUM_BRANCHES branches"
-
-            # Calculate distribution
-            if [ $NUM_THREADS -le $NUM_BRANCHES ]; then
-                echo "Distribution: Each thread handles multiple branches (round-robin)"
-            else
-                CALC_THREADS_PER_BRANCH=$((NUM_THREADS / NUM_BRANCHES))
-                echo "Distribution: ~${CALC_THREADS_PER_BRANCH} threads per branch (cyclic)"
-            fi
-            echo "==================================================="
-
-            for OPERATION in "${OPS_ARRAY[@]}"; do
-                # Use override if provided
-                if [ -n "$NUM_OPS_OVERRIDE" ]; then
-                    NUM_OPS="$NUM_OPS_OVERRIDE"
-                # Use range-ops override for range operations
-                elif [ -n "$RANGE_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^RANGE ]]; then
-                    NUM_OPS="$RANGE_OPS_OVERRIDE"
-                # Use point-ops override for point operations
-                elif [ -n "$POINT_OPS_OVERRIDE" ] && [[ "$OPERATION" =~ ^(READ|INSERT|UPDATE|DELETE)$ ]]; then
-                    NUM_OPS="$POINT_OPS_OVERRIDE"
-                # For CONNECT operations, scale with number of threads (2x)
-                elif [[ "$OPERATION" =~ ^CONNECT ]]; then
-                    NUM_OPS=$((NUM_THREADS * 2))
-                else
-                    NUM_OPS=$(get_num_ops "$OPERATION")
-                fi
-
-                # Calculate warmup_ops
-                CALCULATED_WARMUP_OPS=0
-                if [ -n "$WARMUP_OPS" ]; then
-                    CALCULATED_WARMUP_OPS=$WARMUP_OPS
-                elif [ -n "$WARMUP_FRACTION" ]; then
-                    CALCULATED_WARMUP_OPS=$(awk "BEGIN {print int($NUM_OPS * $WARMUP_FRACTION)}")
-                fi
-
-                # For BRANCH operation, num_branches in setup should be 0
-                # For all other operations, setup num_branches matches the target
-                if [ "$OPERATION" = "BRANCH" ]; then
-                    SETUP_NUM_BRANCHES=0
-                else
-                    SETUP_NUM_BRANCHES=$NUM_BRANCHES
-                fi
-
-                echo ""
-                echo "---------------------------------------------------"
-                echo "Running: $RUN_ID, Operation: $OPERATION"
-                echo "  Num Ops: $NUM_OPS, Warmup Ops: $CALCULATED_WARMUP_OPS, Setup Branches: $SETUP_NUM_BRANCHES"
-                echo "  Threads: $NUM_THREADS, Branches: $NUM_BRANCHES"
-                echo "---------------------------------------------------"
-
-                # Generate config file (task2.proto format for runner2.py)
-                cat > "$TEMP_CONFIG" << EOF
-# Auto-generated config for throughput benchmark (task2.proto)
-run_id: "${RUN_ID}"
-backend: ${BACKEND_UPPER}
-table_name: "${TABLE_NAME}"
-scale_factor: 1
-
-database_setup {
-  db_name: "${DB_NAME}"
-  cleanup: true
-  sql_dump {
-    sql_dump_path: "${SQL_DUMP_PATH}"
-  }
-}
-
-autocommit: true
-num_threads: ${NUM_THREADS}
-measure_storage: false
-concurrent_requests: ${CONCURRENT_REQUESTS}
-
-operation_benchmark {
-  operation: ${OPERATION}
-  num_ops: ${NUM_OPS}
-  warmup_ops: ${CALCULATED_WARMUP_OPS}
-
-  setup {
-    num_branches: ${SETUP_NUM_BRANCHES}
-    branch_shape: ${SHAPE_UPPER}
-    inserts_per_branch: ${INSERTS_PER_BRANCH}
-    updates_per_branch: ${UPDATES_PER_BRANCH}
-    deletes_per_branch: ${DELETES_PER_BRANCH}
-  }
-
-  range_config {
-    range_size: ${RANGE_SIZE}
-  }
-}
-EOF
-
-                # Run the benchmark
-                echo "Starting benchmark..."
-                uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
-
-                # Clean up dropped databases to prevent disk space explosion (Dolt only)
-                if [ "$BACKEND" = "dolt" ]; then
-                    DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"
-                    if [ -d "$DOLT_DIR/.dolt_dropped_databases" ]; then
-                        DROPPED_COUNT=$(ls -1 "$DOLT_DIR/.dolt_dropped_databases" 2>/dev/null | wc -l)
-                        if [ "$DROPPED_COUNT" -gt 0 ]; then
-                            echo "Cleaning up $DROPPED_COUNT dropped database(s) from $DOLT_DIR/.dolt_dropped_databases"
-                            rm -rf "$DOLT_DIR/.dolt_dropped_databases"/*
-                            echo "Cleanup complete"
-                        fi
-                    fi
-                fi
-
-                echo "Completed: $RUN_ID, Operation: $OPERATION"
-            done  # OPERATION loop
-        done  # NUM_THREADS loop
-    done  # NUM_BRANCHES loop
-fi  # End of sweep mode conditional
+    for branches in "${BRANCH_COUNTS[@]}"; do
+        run_config "$FIXED_THREADS" "$branches" "$CONCURRENT_REQUESTS"
+    done
+fi
 
 echo ""
 echo "==================================================="

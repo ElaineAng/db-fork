@@ -129,6 +129,11 @@ message TaskConfig {
   // Requires autocommit = true when > 1
   int32 concurrent_requests = 10;
 
+  // Run in async mode even with concurrent_requests = 1, so a sweep over
+  // concurrent_requests uses the same runner and drivers at every point.
+  // Async mode is always used when concurrent_requests > 1.
+  bool use_async = 11;
+
   // Single operation benchmark configuration
   OperationBenchmark operation_benchmark = 9;
 }

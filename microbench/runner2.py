@@ -147,11 +147,12 @@ class BenchmarkConfig:
             )
 
         # Validate async mode configuration
-        if self._proto.concurrent_requests > 1:
+        if self.use_async:
             if not self._proto.autocommit:
                 raise ValueError(
-                    "concurrent_requests > 1 requires autocommit = true. "
-                    "Async mode does not support transaction management."
+                    "Async mode (use_async or concurrent_requests > 1) requires "
+                    "autocommit = true. Async mode does not support transaction "
+                    "management."
                 )
 
         # Backend-specific validation
@@ -206,8 +207,13 @@ class BenchmarkConfig:
 
     @property
     def concurrent_requests(self) -> int:
-        """Number of concurrent requests per connection (default 1 = sync mode)."""
+        """Number of concurrent requests per thread (default 1)."""
         return max(1, self._proto.concurrent_requests)
+
+    @property
+    def use_async(self) -> bool:
+        """Whether to run the async runner (use_async or concurrent_requests > 1)."""
+        return self._proto.use_async or self.concurrent_requests > 1
 
     @property
     def database_setup(self) -> tp.DatabaseSetup:
@@ -1971,8 +1977,8 @@ class BenchmarkExecutor:
             )
 
             # Create and execute operations
-            # Use async runner if concurrent_requests > 1, otherwise sync runner
-            if self.config.concurrent_requests > 1:
+            # Use async runner if use_async or concurrent_requests > 1
+            if self.config.use_async:
                 runner = AsyncOperationRunner(self.config, ctx)
                 stats = runner.execute_multiple(
                     self.config.num_ops, self.config.warmup_ops, self._timed_phase
@@ -2044,8 +2050,8 @@ class BenchmarkExecutor:
                 )
 
                 # Create and execute operations
-                # Use async runner if concurrent_requests > 1, otherwise sync runner
-                if self.config.concurrent_requests > 1:
+                # Use async runner if use_async or concurrent_requests > 1
+                if self.config.use_async:
                     runner = AsyncOperationRunner(self.config, ctx)
                     return runner.execute_multiple(
                         self.config.num_ops, self.config.warmup_ops, self._timed_phase
@@ -2213,6 +2219,8 @@ class ResultManager:
             "num_ops": self.config.num_ops,
             "num_threads": self.config.num_threads,
             "num_branches": self.config.num_branches,
+            "execution_mode": "async" if self.config.use_async else "sync",
+            "concurrent_requests": self.config.concurrent_requests,
             "scale_factor": self.config.scale_factor,
             "intended_ops": self.metrics["intended_ops"],  # num_ops * num_threads
             "total_ops": self.metrics["total_ops"],  # Actual successful operations
