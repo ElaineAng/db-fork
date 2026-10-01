@@ -5,10 +5,9 @@ A parametrized and extensible benchmarking framework for testing PostgreSQL-comp
 ## Quick Start
 
 ```bash
-# 1. Setup environment
-python3 -m venv venv
-source venv/bin/activate
-pip3 install .
+# 1. Setup environment (installs Python 3.13 and all dependencies into .venv)
+#    Requires uv (https://docs.astral.sh/uv/) and protoc (brew install protobuf)
+uv sync
 
 # 2. Run a macrobenchmark 
 # Mini config, always start with this
@@ -18,7 +17,7 @@ pip3 install .
 ./run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
 
 # 3. Generate comparison plots
-python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
+uv run python scripts/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
 
 # 4. Run a microbenchmark (latency)
 ./run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
@@ -297,7 +296,7 @@ After running benchmarks, use the plotting scripts in the `scripts/` directory t
 Compare macrobenchmark results between Dolt and Neon:
 
 ```bash
-python scripts/macro_comparison.py \
+uv run python scripts/macro_comparison.py \
     --dolt-dir <dolt_results_dir> \
     --neon-dir <neon_results_dir> \
     --outdir <output_figures_dir>
@@ -328,7 +327,7 @@ The script generates the following figures in the output directory:
 Plot microbenchmark latency results:
 
 ```bash
-python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plot_branch_latency_micro.py \
     --data-dir <data_directory> \
     --outdir <output_figures_dir> \
     --operation <operation_type>
@@ -348,19 +347,19 @@ python scripts/plot_branch_latency_micro.py \
 
 ```bash
 # Plot branch creation latency only
-python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plot_branch_latency_micro.py \
     --data-dir run_stats_final/micro/single_thread/branch \
     --outdir figures/ \
     --operation branch
 
 # Plot branch connection latency only
-python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plot_branch_latency_micro.py \
     --data-dir run_stats_final/micro/single_thread/connect \
     --outdir figures/ \
     --operation connect
 
 # Plot combined (branch and connect on single plot)
-python scripts/plot_branch_latency_micro.py \
+uv run python scripts/plot_branch_latency_micro.py \
     --branch-dir run_stats_final/micro/single_thread/branch \
     --connect-dir run_stats_final/micro/single_thread/connect \
     --outdir figures/ \
@@ -372,7 +371,7 @@ python scripts/plot_branch_latency_micro.py \
 Plot throughput vs threads/branches:
 
 ```bash
-python scripts/plot_throughput_experiments.py \
+uv run python scripts/plot_throughput_experiments.py \
     --data-dir <data_directory> \
     --output <output_figures_path> 
 ```
@@ -417,12 +416,22 @@ run_stats_final/micro/
 
 ## Prerequisites
 
-1. **Python 3.11+** with virtual environment
-2. **PostgreSQL-compatible backend**:
+1. **[uv](https://docs.astral.sh/uv/)**: manages Python (3.13, pinned in
+   `.python-version`) and the dependencies (locked in `uv.lock`)
+2. **protoc** (`brew install protobuf`): the install step compiles the
+   `.proto` files into the untracked `*_pb2.py` modules
+3. **PostgreSQL-compatible backend**:
    - **Dolt**: Follow setup at https://github.com/dolthub/doltgresql
    - **Neon**: Configure via Neon console
-3. **psql** client for database setup
-4. **Required Python packages**: Install with `pip install .`
+4. **psql** client for database setup
+
+Install with `uv sync`, or `uv sync --extra agent` to also get the LLM agent
+dependencies used by `agent/`. The project is installed in editable mode, and
+`uv sync` / `uv run` recompile the protos whenever a `.proto` file changes.
+Run Python through `uv run` (e.g. `uv run python scripts/...`), or activate
+the environment with `source .venv/bin/activate`. The `run_*.sh` scripts
+already use `uv run`. To add a dependency, use `uv add <package>` and commit
+the updated `uv.lock`.
 
 ---
 

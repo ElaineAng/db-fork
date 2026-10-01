@@ -123,7 +123,7 @@ if $MEASURE_STORAGE; then
     EXTRA_FLAGS+=(--measure-storage)
 fi
 
-python -m macrobench.runner \
+uv run python -m macrobench.runner \
     --config "$TMP_CONFIG" \
     --outdir "$OUTDIR" \
     --max-runtime-sec "$MAX_RUNTIME_SEC" \

@@ -265,7 +265,7 @@ EOF
 
         # Run the benchmark
         echo "Starting benchmark..."
-        python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
+        uv run python -m microbench.runner --config "$TEMP_CONFIG" --seed $SEED --no-progress --output-dir "$OUTPUT_DIR"
 
         # Clean up dropped databases to prevent disk space explosion
         DOLT_DIR="${DOLT_DATA_DIR:-$HOME/doltgres/databases}"

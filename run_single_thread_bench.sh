@@ -281,7 +281,7 @@ EOF
 
     # Run the benchmark
     echo "Starting benchmark..."
-    python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
+    uv run python -m microbench.runner2 --config "$TEMP_CONFIG" --output-dir "$OUTPUT_DIR"
 
         # Clean up dropped databases to prevent disk space explosion (Dolt only)
         if [ "$BACKEND" = "dolt" ] || [ "$BACKEND" = "dolt_mysql" ]; then

@@ -17,16 +17,16 @@ The BIRD-Critic benchmark presents buggy SQL queries that need to be corrected. 
 
 ```bash
 # Run with Gemini (default)
-python -m agent.bird_critic.run --limit 10
+uv run --extra agent python -m agent.bird_critic.run --limit 10
 
 # Run with OpenAI GPT-4o
-python -m agent.bird_critic.run --model gpt-4o --limit 10
+uv run --extra agent python -m agent.bird_critic.run --model gpt-4o --limit 10
 
 # Run with Claude
-python -m agent.bird_critic.run --model claude-3-5-sonnet-20241022 --limit 10
+uv run --extra agent python -m agent.bird_critic.run --model claude-3-5-sonnet-20241022 --limit 10
 
 # Run with verbose output
-python -m agent.bird_critic.run --model gpt-4o --limit 5 --verbose
+uv run --extra agent python -m agent.bird_critic.run --model gpt-4o --limit 5 --verbose
 ```
 
 ### Supported Models
@@ -84,14 +84,9 @@ agent/bird_critic/
 
 ## Requirements
 
-```
-datasets
-psycopg2
-langchain
-langgraph
-langchain-google-genai
-python-dotenv
-```
+The agent dependencies are in the `agent` extra of the project's
+`pyproject.toml`. Install them with `uv sync --extra agent`, or let
+`uv run --extra agent ...` (as in the commands above) install them.
 
 ## Environment Variables
 
