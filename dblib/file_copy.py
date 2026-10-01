@@ -211,7 +211,7 @@ class FileCopyToolSuite(DBToolSuite):
 
     def _get_current_branch_impl(self) -> tuple[str, str]:
         # branch_name substituted for branch_id, allows _create_branch_impl to
-        # work correctly with the way the API is called in runner.py
+        # work correctly with the way the runners call the API
         return (self.current_branch_name, self.current_branch_name)
 
     def delete_db(self, db_name: str) -> None:
