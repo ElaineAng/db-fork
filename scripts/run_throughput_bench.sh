@@ -154,7 +154,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  --range-ops <n>: Number of operations for range operations (RANGE_READ, RANGE_UPDATE)"
     echo "  --warmup-ops <n>: Number of warm-up operations per thread (not counted in throughput)"
     echo "  --warmup-fraction <f>: Warm-up as fraction of num-ops (e.g., 0.2 for 20%)"
-    echo "  --concurrent-requests <n>: Number of concurrent requests per connection (default: 1)"
+    echo "  --concurrent-requests <n>: Number of concurrent requests per thread, one pooled connection each (default: 1)"
     echo "                            Values > 1 enable async mode (requires autocommit)"
     echo "  --operations <ops>: Comma-separated list (e.g., READ,RANGE_READ)"
     echo "  --output-dir <dir>: Output directory (default: /tmp/run_stats)"
@@ -289,9 +289,9 @@ echo "Backend: $BACKEND"
 echo "SQL Dump: $SQL_DUMP_PATH"
 echo "Operations: ${OPS_ARRAY[*]}"
 echo "Random Seed: $SEED"
-echo "Concurrent Requests per Connection: $CONCURRENT_REQUESTS"
+echo "Concurrent Requests per Thread: $CONCURRENT_REQUESTS"
 if [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
-    echo "  (Async mode enabled - concurrent requests on single connection)"
+    echo "  (Async mode enabled - one pooled connection per concurrent request)"
 fi
 if [ -n "$NUM_OPS_OVERRIDE" ]; then
     echo "Num Ops (override): $NUM_OPS_OVERRIDE"

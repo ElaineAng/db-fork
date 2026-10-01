@@ -123,8 +123,9 @@ message TaskConfig {
   bool measure_storage = 8;
 
   // Async execution configuration
-  // Number of concurrent requests per connection (default 1 = synchronous)
-  // When > 1, enables async mode with that many concurrent requests
+  // Number of concurrent requests per thread (default 1 = synchronous)
+  // When > 1, enables async mode with that many concurrent requests, each on
+  // its own connection from a per-thread pool of the same size
   // Requires autocommit = true when > 1
   int32 concurrent_requests = 10;
 

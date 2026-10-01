@@ -34,6 +34,7 @@ class _OperationState:
         self.storage_fn = None
         self.start_time = 0.0
         self.end_time = 0.0
+        self.pool_wait_time = 0.0
 
 
 def set_current_thread_id(thread_id: int) -> None:
@@ -172,6 +173,7 @@ class ResultCollector:
         state.branch_count = 0
         state.start_time = 0.0
         state.end_time = 0.0
+        state.pool_wait_time = 0.0
 
     def reset(self):
         """Reset all collected timing data and proto messages (shared state only)."""
@@ -247,6 +249,10 @@ class ResultCollector:
         state = self._get_thread_state()
         state.num_keys_touched = num_keys
 
+    def record_pool_wait(self, seconds: float) -> None:
+        state = self._get_thread_state()
+        state.pool_wait_time += seconds
+
     def record_disk_size_before(self, size: int) -> None:
         state = self._get_thread_state()
         state.disk_size_before = size
@@ -298,6 +304,7 @@ class ResultCollector:
             result.step_id = state.step_id
             result.start_time = state.start_time
             result.end_time = state.end_time
+            result.pool_wait_time = state.pool_wait_time
 
             # Append to results (thread-safe)
             # Set iteration_number inside lock to avoid race condition
@@ -379,6 +386,7 @@ class ResultCollector:
                 "step_id": result.step_id,
                 "start_time": result.start_time,
                 "end_time": result.end_time,
+                "pool_wait_time": result.pool_wait_time,
             }
             rows.append(row)
 
@@ -389,7 +397,11 @@ class ResultCollector:
         if os.path.exists(filepath):
             try:
                 existing_table = pq.read_table(filepath)
-                combined_table = pa.concat_tables([existing_table, new_table])
+                # Fill columns missing from older files (e.g. pool_wait_time)
+                # with nulls instead of failing and overwriting the file.
+                combined_table = pa.concat_tables(
+                    [existing_table, new_table], promote_options="default"
+                )
                 pq.write_table(combined_table, filepath)
                 print(
                     f"Appended {len(rows)} results to {filepath} "

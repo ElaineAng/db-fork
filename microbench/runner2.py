@@ -1403,12 +1403,16 @@ class OperationRunner:
 class AsyncOperationRunner:
     """Executes operations asynchronously with configurable concurrency.
 
-    This runner uses asyncio to execute multiple operations concurrently
-    within a single connection, controlled by a semaphore to limit the
-    number of concurrent requests.
+    This runner uses asyncio to execute multiple operations concurrently,
+    controlled by a semaphore to limit the number of concurrent requests.
+    Each worker opens a pool with one connection per concurrent request, so
+    the requests run in parallel on the server rather than queueing on a
+    single connection.
 
     Each operation is timed independently with accurate start/end timestamps,
     ensuring correct performance measurement even with overlapping execution.
+    Latency starts after a pool connection is acquired; the wait for one is
+    recorded separately as pool_wait_time.
     """
 
     def __init__(self, config: BenchmarkConfig, context: WorkerContext):
@@ -1498,24 +1502,32 @@ class AsyncOperationRunner:
 
                 return {"status": "failed", "op_number": op_number, "error": str(e)}
 
-    async def _ensure_async_connection(self):
-        """Ensure async connection is initialized for the database tools."""
-        if self.context.db_tools.async_conn:
+    async def _ensure_async_pool(self):
+        """Ensure the async connection pool is open for the database tools.
+
+        The pool has one connection per concurrent request
+        (concurrent_requests), so a request never waits for a connection.
+        """
+        if self.context.db_tools.async_pool:
             return  # Already initialized
 
+        pool_size = self.concurrent_limit
+
         if self.config.backend == tp.Backend.DOLT_MYSQL:
-            # MySQL protocol, so aiomysql instead of psycopg. Start the async
+            # MySQL protocol, so aiomysql instead of psycopg. Start every pool
             # session on the branch the sync connection has checked out.
             branch_name, _ = self.context.db_tools.get_current_branch()
-            await self.context.db_tools.open_async_connection(branch_name)
+            await self.context.db_tools.open_async_pool(pool_size, branch_name)
             return
 
-        # Import psycopg for async connections
+        # Check psycopg and its pool are available for async connections
         try:
-            import psycopg
+            import psycopg  # noqa: F401
+            import psycopg_pool  # noqa: F401
         except ImportError:
             raise ImportError(
-                "psycopg (v3) is required for async mode. Install with: pip install 'psycopg[binary]>=3.0'"
+                "psycopg (v3) and psycopg-pool are required for async mode. "
+                "Install with: pip install 'psycopg[binary]>=3.0' psycopg-pool"
             )
 
         backend = self.config.backend
@@ -1564,15 +1576,18 @@ class AsyncOperationRunner:
                     f"Connection object has no DSN attribute."
                 )
 
-        # Create async connection with the same URI as the sync connection
-        async_conn = await psycopg.AsyncConnection.connect(uri, autocommit=True)
-        self.context.db_tools.async_conn = async_conn
-
+        configure = None
         if backend == tp.Backend.DOLT:
             # A new Dolt session starts on the default branch. Check out the
-            # branch the sync connection is on, or async ops would run on main.
+            # branch the sync connection is on in every pool connection, or
+            # async ops would run on main.
             branch_name, _ = self.context.db_tools.get_current_branch()
-            await self.context.db_tools.connect_branch_async(branch_name, timed=False)
+
+            async def configure(conn):
+                await conn.execute("SELECT dolt_checkout(%s);", (branch_name,))
+
+        # Create the pool with the same URI as the sync connection
+        await self.context.db_tools.open_async_pool(uri, pool_size, configure)
 
     async def execute_multiple_async(self, num_ops: int, warmup_ops: int = 0) -> None:
         """Execute operations asynchronously with configurable concurrency.
@@ -1581,8 +1596,8 @@ class AsyncOperationRunner:
             num_ops: Number of operations to execute (timed)
             warmup_ops: Number of warm-up operations to execute first (not counted in results)
         """
-        # Ensure async connection is initialized
-        await self._ensure_async_connection()
+        # Ensure async connection pool is initialized
+        await self._ensure_async_pool()
 
         # Create semaphore to limit concurrent executions
         semaphore = asyncio.Semaphore(self.concurrent_limit)
@@ -1698,6 +1713,14 @@ class AsyncOperationRunner:
         try:
             return loop.run_until_complete(self.execute_multiple_async(num_ops, warmup_ops))
         finally:
+            # Close the async pool on its own loop, before that loop is
+            # closed, so the server sees clean disconnects. This must come
+            # before cancelling leftover tasks: the pool's background workers
+            # are tasks on this loop, and close() waits for them to stop.
+            try:
+                loop.run_until_complete(self.context.db_tools.close_connection_async())
+            except (Exception, asyncio.CancelledError) as e:
+                print(f"[Thread {self.context.thread_id}] Failed to close async pool: {e!r}")
             try:
                 # Cancel any remaining tasks
                 pending = asyncio.all_tasks(loop)
@@ -1709,13 +1732,6 @@ class AsyncOperationRunner:
             except Exception:
                 pass
             finally:
-                # Close the async connection on its own loop, before that loop
-                # is closed, so the server sees a clean disconnect.
-                if self.config.backend == tp.Backend.DOLT_MYSQL:
-                    try:
-                        loop.run_until_complete(self.context.db_tools.close_connection_async())
-                    except Exception as e:
-                        print(f"[Thread {self.context.thread_id}] Failed to close async connection: {e}")
                 loop.close()
 
 

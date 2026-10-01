@@ -462,7 +462,8 @@ The loader reads Postgres `pg_dump` files (e.g. `ch-w1.sql`) directly and
 converts them to MySQL, so no separate MySQL schema is needed.
 
 Supports single-threaded, multi-threaded, and async (`concurrent_requests > 1`)
-microbenchmark runs via `runner2.py`.
+microbenchmark runs via `runner2.py`. In async mode each thread opens a pool
+of `concurrent_requests` connections, all checked out on the thread's branch.
 
 ---
 
