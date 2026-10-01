@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 from dblib import result_pb2 as rslt
 from microbench.operations.base import Operation
-from microbench import task2_pb2 as tp
 
 if TYPE_CHECKING:
     from microbench.runner2 import WorkerContext
@@ -200,7 +199,7 @@ class ConnectFirstOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         """Execute a timed connection to the first branch."""
         # Use the db_tools method that connects to a specific position
-        context.db_tools.connect_specific_branch(tp.OperationType.CONNECT_FIRST)
+        context.db_tools.connect_specific_branch(rslt.OpType.CONNECT_FIRST)
 
         # Clear cached primary keys since we're on a different branch
         context.clear_pk_cache()
@@ -225,7 +224,7 @@ class ConnectMidOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         """Execute a timed connection to a middle branch."""
         # Use the db_tools method that connects to a specific position
-        context.db_tools.connect_specific_branch(tp.OperationType.CONNECT_MID)
+        context.db_tools.connect_specific_branch(rslt.OpType.CONNECT_MID)
 
         # Clear cached primary keys since we're on a different branch
         context.clear_pk_cache()
@@ -251,7 +250,7 @@ class ConnectLastOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         """Execute a timed connection to the last branch."""
         # Use the db_tools method that connects to a specific position
-        context.db_tools.connect_specific_branch(tp.OperationType.CONNECT_LAST)
+        context.db_tools.connect_specific_branch(rslt.OpType.CONNECT_LAST)
 
         # Clear cached primary keys since we're on a different branch
         context.clear_pk_cache()
