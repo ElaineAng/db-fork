@@ -299,14 +299,35 @@ class BackendInfo:
     setup_branches: list = None
 
 
+@dataclass
+class BackendSetup:
+    """The parts of a config that BackendManager reads.
+
+    Lets callers without a full BenchmarkConfig (e.g. the macrobench runner)
+    set up a backend. ``database_setup`` may be the microbench or the
+    macrobench DatabaseSetup message; both have the same fields.
+    """
+
+    backend: int
+    database_setup: object
+
+    @property
+    def db_name(self) -> str:
+        return self.database_setup.db_name
+
+    @property
+    def cleanup(self) -> bool:
+        return self.database_setup.cleanup
+
+
 class BackendManager:
     """Manages backend-specific setup and cleanup.
 
-    Extracted from create_backend_project() and cleanup_backend() for
-    better organization and testability.
+    Accepts a BenchmarkConfig or a BackendSetup; only backend,
+    database_setup, db_name and cleanup are read.
     """
 
-    def __init__(self, config: BenchmarkConfig, output_dir: str = "/tmp/run_stats"):
+    def __init__(self, config, output_dir: str = "/tmp/run_stats"):
         self.config = config
         self.output_dir = output_dir
         self.backend_info: Optional[BackendInfo] = None

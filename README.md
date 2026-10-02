@@ -37,7 +37,7 @@ macrobench/         # Macrobenchmark workflows and runner
 util/               # Shared helpers (SQL loading, DB utilities)
 agent/              # LLM agent workloads (install with `uv sync --extra agent`)
 db_setup/           # SQL dumps/schemas and database setup scripts
-scripts/            # Benchmark entry points (run_*.sh) and bench_lib.sh
+scripts/            # Benchmark entry points (run_*.sh)
 scripts/plotting/   # Plotting and analysis scripts
 ```
 
@@ -121,7 +121,8 @@ Microbenchmarks measure latency and throughput for specific database operations 
 
 ### Latency Benchmarks
 
-Measure operation latency with varying numbers of branches and threads.
+Measure single-threaded operation latency with varying numbers of branches. For
+multi-threaded load, use the throughput benchmarks.
 
 #### Single-Threaded Latency
 
@@ -163,47 +164,6 @@ Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation la
 ./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16 --operations RANGE_UPDATE --range-size 500
 ```
 
-#### Multi-Threaded Latency
-
-Use `scripts/run_multithread_bench.sh` to measure multi-threaded operation latency:
-
-```bash
-./scripts/run_multithread_bench.sh <backend> <sql_dump_path> [OPTIONS]
-```
-
-##### Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `backend` | Database backend: `dolt`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
-| `sql_dump_path` | Path to SQL dump file |
-
-##### Options
-
-| Option | Description |
-|--------|-------------|
-| `--seed <seed>` | Random seed for reproducibility |
-| `--max-branches <max>` | Maximum number of branches (default: 1024) |
-| `--shape <shape>` | Branch tree shape: `spine`, `bushy`, or `fan_out` (default: `spine`) |
-| `--num-ops <n>` | Number of operations to perform |
-| `--operations <ops>` | Comma-separated list (e.g., `READ,UPDATE`) |
-| `--output-dir <dir>` | Output directory (default: `/tmp/run_stats`) |
-
-##### Examples
-
-```bash
-# Sweep from 2 to 1024 branches (threads = branches at each configuration)
-./scripts/run_multithread_bench.sh dolt db_setup/tpcc_schema.sql
-
-# Test up to 128 branches
-./scripts/run_multithread_bench.sh dolt db_setup/tpcc_schema.sql --max-branches 128
-
-# Run only READ and UPDATE operations with 100 ops per test
-./scripts/run_multithread_bench.sh neon db_setup/tpcc_schema.sql --operations READ,UPDATE --num-ops 100
-```
-
-**Note:** In multi-threaded latency benchmarks, the number of threads always equals the number of branches. For independent thread/branch control, use throughput benchmarks.
-
 #### Output Files
 
 Latency benchmark results are saved to the output directory:
@@ -217,8 +177,6 @@ Latency benchmark results are saved to the output directory:
 │   │   └── <backend>_<dataset>_<N>_<shape>_branch_summary.json
 │   └── connect/
 │       └── (similar structure)
-└── multithread/
-    └── (similar structure for multi-threaded runs)
 ```
 
 ---

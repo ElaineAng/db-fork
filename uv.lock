@@ -210,15 +210,6 @@ wheels = [
 ]
 
 [[package]]
-name = "anytree"
-version = "2.13.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/bc/a8/eb55fab589c56f9b6be2b3fd6997aa04bb6f3da93b01154ce6fc8e799db2/anytree-2.13.0.tar.gz", hash = "sha256:c9d3aa6825fdd06af7ebb05b4ef291d2db63e62bb1f9b7d9b71354be9d362714", size = 48389, upload-time = "2025-04-08T21:06:30.662Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/98/f6aa7fe0783e42be3093d8ef1b0ecdc22c34c0d69640dfb37f56925cb141/anytree-2.13.0-py3-none-any.whl", hash = "sha256:4cbcf10df36b1f1cba131b7e487ff3edafc9d6e932a3c70071b5b768bab901ff", size = 45077, upload-time = "2025-04-08T21:06:29.494Z" },
-]
-
-[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -796,7 +787,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiomysql" },
-    { name = "anytree" },
     { name = "faker" },
     { name = "matplotlib" },
     { name = "neon-api" },
@@ -832,7 +822,6 @@ agent = [
 [package.metadata]
 requires-dist = [
     { name = "aiomysql" },
-    { name = "anytree" },
     { name = "coolname", marker = "extra == 'agent'" },
     { name = "datasets", marker = "extra == 'agent'" },
     { name = "faker", specifier = ">=37,<38" },

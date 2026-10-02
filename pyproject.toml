@@ -9,7 +9,6 @@ description = "Database branching related mess."
 authors = [{ name = "Elaine", email = "ra3448@columbia.edu" }]
 requires-python = ">=3.11"
 dependencies = [
-    "anytree",
     "faker>=37,<38",  # Generates benchmark rows; a new major can change the data
     "neon-api",
     "numpy",

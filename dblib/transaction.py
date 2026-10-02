@@ -5,7 +5,6 @@ from dblib.db_api import DBToolSuite
 import dblib.result_collector as rc
 from dblib import result_pb2 as rslt
 import dblib.util as dbutil
-from microbench import task_pb2 as tp
 
 PGSQL_USER = "elaineang"
 PGSQL_PASSWORD = "password"
@@ -178,21 +177,20 @@ class TxnToolSuite(DBToolSuite):
 
     def connect_specific_branch(self, op: rslt.OpType) -> None:
         """
-        Connects to an existing branch to allow reading and writing data to that
-        branch. Return a bool indicating whether the operation was successful.
+        Connects to the first, middle or last branch (by creation order), as
+        selected by op: rslt.OpType.CONNECT_FIRST, CONNECT_MID or CONNECT_LAST.
+        The connect is timed and recorded under that op type.
         """
         timed = True
-        branch = ""
-        op_type = 0
-        if op == tp.OperationType.CONNECT_FIRST:
+        op_type = op
+        if op == rslt.OpType.CONNECT_FIRST:
             branch = self._all_branches[0]
-            op_type = rslt.OpType.CONNECT_FIRST
-        elif op == tp.OperationType.CONNECT_MID:
+        elif op == rslt.OpType.CONNECT_MID:
             branch = self._all_branches[int(len(self._all_branches) / 2)]
-            op_type = rslt.OpType.CONNECT_MID
-        elif op == tp.OperationType.CONNECT_LAST:
+        elif op == rslt.OpType.CONNECT_LAST:
             branch = self._all_branches[len(self._all_branches) - 1]
-            op_type = rslt.OpType.CONNECT_LAST
+        else:
+            raise ValueError(f"Unsupported connect op type: {op}")
         try:
             with self.result_collector.maybe_measure_ops(
                 timed=timed, op_type=op_type
