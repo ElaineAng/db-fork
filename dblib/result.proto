@@ -77,4 +77,5 @@ enum OpType {
   CONNECT_FIRST = 10;
   CONNECT_MID = 11;
   CONNECT_LAST = 12; 
+  MERGE = 13;
 }
