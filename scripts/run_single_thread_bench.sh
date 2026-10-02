@@ -125,7 +125,7 @@ if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
     exit 1
 fi
 
-if [[ "$BACKEND" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
+if [[ "$BACKEND_UPPER" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
     echo "Error: PostgreSQL Save Point only works with spine shape"
     exit 1
 fi
@@ -143,7 +143,7 @@ fi
 
 # Default operations (using runner2 operation names)
 OPERATIONS=(BRANCH_CREATE READ BRANCH_CONNECT INSERT UPDATE RANGE_READ RANGE_UPDATE)
-if [[ "$BACKEND" == "TXN" ]]; then
+if [[ "$BACKEND_UPPER" == "TXN" ]]; then
     OPERATIONS=(BRANCH_CREATE READ INSERT UPDATE RANGE_READ RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
 fi
 
