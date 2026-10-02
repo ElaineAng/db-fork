@@ -135,7 +135,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> {--sweep-concurrency | --sweep-branches | --sweep-proportional} [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, dolt_mysql, neon, kpg, xata, txn (postgres transactions), file_copy, tiger"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, kpg, xata, txn (postgres transactions), file_copy, tiger"
     echo "  sql_dump_path: Path to SQL dump file"
     echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
@@ -195,7 +195,7 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'"
     exit 1
 fi
