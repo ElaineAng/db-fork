@@ -17,13 +17,16 @@ A branch's ID is its database name.
                      for each table
     delete_branch    DROP DATABASE <branch db>
 
-Merging differs from Dolt: it is per table, in effect insert-only (the
-source's updates and deletes aren't merged), merges no schema changes and needs
-a primary key. See SeekDBToolSuite._merge_branch_impl.
+Merging is per table and, unlike Dolt's, in effect insert-only (the source's
+updates and deletes aren't merged). Tables whose schemas differ between the
+branches, or that have no primary key, are skipped. See
+SeekDBToolSuite._merge_branch_impl.
 """
 
 import os
+from contextlib import asynccontextmanager
 
+import aiomysql
 import pymysql
 from pymysql.constants import CLIENT
 
@@ -65,6 +68,20 @@ def connect(db_name: str = None, autocommit: bool = True, **kwargs):
         database=db_name,
         autocommit=autocommit,
         **kwargs,
+    )
+
+
+async def create_pool_async(db_name: str, size: int, autocommit: bool = True):
+    """Open an aiomysql pool of `size` connections to the SeekDB server."""
+    return await aiomysql.create_pool(
+        minsize=size,
+        maxsize=size,
+        host=SEEKDB_HOST,
+        port=SEEKDB_PORT,
+        user=SEEKDB_USER,
+        password=SEEKDB_PASSWORD,
+        db=db_name,
+        autocommit=autocommit,
     )
 
 
@@ -258,10 +275,10 @@ class SeekDBToolSuite(DBToolSuite):
           source's updates but also undo the target's own changes.)
         - SeekDB doesn't report how many conflicts it resolved, so
           "conflicts" is None.
-        - No schema merge: tables that exist only on the source aren't
-          created on the target, and MERGE TABLE refuses (error 4029) when
-          the two tables' columns or primary key differ. Such tables are
-          skipped with a warning.
+        - Tables whose schemas differ are skipped: MERGE TABLE refuses
+          (error 4029) when the two tables' columns or primary key differ,
+          and tables that exist only on the source aren't created on the
+          target. Such tables are skipped with a warning.
         - Needs a primary key: tables without one (e.g. CH's history) are
           skipped with a warning.
         - Not transactional: each MERGE TABLE takes effect at once, even
@@ -363,3 +380,70 @@ class SeekDBToolSuite(DBToolSuite):
         directory, so this covers the whole server.
         """
         return dbutil.get_directory_size_bytes(SEEKDB_DATA_DIR)
+
+    # ========================================================================
+    # Async implementations
+    # ========================================================================
+
+    async def open_async_pool(self, size: int, branch_name: str) -> None:
+        """Open an aiomysql pool of `size` connections on branch_name.
+
+        Each pool connection is opened on the branch's database, so unlike
+        dolt_mysql no per-connection checkout is needed: a connection the
+        pool opens to replace a dropped one starts on the same branch.
+        """
+        self.async_pool = await create_pool_async(self._db_for(branch_name), size)
+
+    @asynccontextmanager
+    async def _pool_connection(self):
+        """Borrow a pool connection (aiomysql's API differs from psycopg's)."""
+        async with self.async_pool.acquire() as conn:
+            yield conn
+
+    async def close_connection_async(self) -> None:
+        if self.async_pool:
+            self.async_pool.close()
+            await self.async_pool.wait_closed()
+            self.async_pool = None
+
+    # Branch hooks run on one pinned pool connection (see
+    # DBToolSuite._acquire_async_conn), so forking and switching to the fork
+    # happen in the same session. They leave the sync connection's
+    # _current_branch/_current_db alone, like dolt_mysql's.
+
+    async def _current_db_async(self) -> str:
+        """Database the pinned pool connection is on."""
+        result = await self.execute_sql_async("SELECT DATABASE();")
+        return result[0][0]
+
+    async def _create_branch_impl_async(
+        self, branch_name: str, parent_id: str = None
+    ) -> None:
+        """Async version of _create_branch_impl."""
+        source_db = (
+            self._db_for(parent_id) if parent_id else await self._current_db_async()
+        )
+        new_db = branch_db_name(self.db_name, branch_name)
+        await self.execute_sql_async(
+            f"FORK DATABASE {_quote(source_db)} TO {_quote(new_db)};"
+        )
+        await self.execute_sql_async(f"USE {_quote(new_db)};")
+
+    async def _connect_branch_impl_async(self, branch_name: str) -> None:
+        """Async version of _connect_branch_impl."""
+        await self.execute_sql_async(f"USE {_quote(self._db_for(branch_name))};")
+
+    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
+        """Async version of _get_current_branch_impl."""
+        db = await self._current_db_async()
+        return (self._branch_for(db), db)
+
+    async def _delete_branch_impl_async(
+        self, branch_name: str, branch_id: str
+    ) -> None:
+        """Async version of _delete_branch_impl; must NOT be on the branch
+        being deleted (checked on the pinned pool connection)."""
+        db = self._db_for(branch_id or branch_name)
+        if db == await self._current_db_async():
+            raise ValueError(f"Cannot delete the current branch '{branch_name}'")
+        await self.execute_sql_async(f"DROP DATABASE {_quote(db)};")

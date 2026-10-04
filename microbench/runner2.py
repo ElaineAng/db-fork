@@ -156,11 +156,6 @@ class BenchmarkConfig:
                     "autocommit = true. Async mode does not support transaction "
                     "management."
                 )
-            if self._proto.backend == tp.Backend.SEEKDB:
-                raise ValueError(
-                    "Async mode (use_async or concurrent_requests > 1) is not "
-                    "supported for the seekdb backend."
-                )
 
         # Backend-specific validation
         if self._proto.backend == tp.Backend.NEON:
@@ -1630,7 +1625,7 @@ class AsyncOperationRunner:
 
         pool_size = self.concurrent_limit
 
-        if self.config.backend == tp.Backend.DOLT_MYSQL:
+        if self.config.backend in (tp.Backend.DOLT_MYSQL, tp.Backend.SEEKDB):
             # MySQL protocol, so aiomysql instead of psycopg. Start every pool
             # session on the branch the sync connection has checked out.
             branch_name, _ = self.context.db_tools.get_current_branch()

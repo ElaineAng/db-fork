@@ -202,8 +202,8 @@ Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 
 The script runs in **async mode** by default: each thread keeps
 `--concurrent-requests` ops in flight, each on its own pooled connection
-checked out on the thread's branch. Async mode supports `dolt`, `dolt_mysql`
-and `neon`; use `--mode sync` for the other backends (one op at a time per
+checked out on the thread's branch. Async mode supports `dolt`, `dolt_mysql`,
+`seekdb` and `neon`; use `--mode sync` for the other backends (one op at a time per
 thread). Every point of a sweep uses the same mode, including concurrency 1.
 
 Each thread works on one branch, assigned round-robin. With fewer threads
@@ -467,8 +467,9 @@ Merging is a draft and differs from Dolt's. It runs
   differ between branches, are skipped with a warning.
 - Tables without a primary key (e.g. `history`) are skipped with a warning.
 
-Sync mode only: async mode (`use_async` / `concurrent_requests > 1`) is
-rejected; use `--mode sync` with `run_throughput_bench.sh`.
+Async mode (`use_async` / `concurrent_requests > 1`) uses an aiomysql pool,
+like `dolt_mysql`. Each pool connection is opened on the worker's branch
+database.
 
 ---
 

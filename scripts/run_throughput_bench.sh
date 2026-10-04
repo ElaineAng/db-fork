@@ -6,7 +6,7 @@
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [options]
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [options]
 #
-# Runs in async mode by default (dolt, dolt_mysql, neon): each thread keeps
+# Runs in async mode by default (dolt, dolt_mysql, seekdb, neon): each thread keeps
 # --concurrent-requests ops in flight, one pooled connection each. Use
 # --mode sync for the other backends; sync mode runs one op at a time per
 # thread.
@@ -142,7 +142,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  --sweep-proportional: Vary both threads and branches proportionally"
     echo ""
     echo "Options:"
-    echo "  --mode <async|sync>: Runner to use (default: async). Async supports dolt, dolt_mysql and neon;"
+    echo "  --mode <async|sync>: Runner to use (default: async). Async supports dolt, dolt_mysql, seekdb and neon;"
     echo "                       use sync for the other backends. Sync runs one op at a time per thread."
     echo "  --threads <N>: Fixed thread count (for --sweep-concurrency and --sweep-branches modes)"
     echo "  --branches <N>: Fixed branch count (for --sweep-concurrency mode)"
@@ -203,8 +203,8 @@ fi
 # Validate execution mode. Async needs a backend whose async path checks out
 # the worker's branch on every pooled connection.
 if [ "$MODE" = "async" ]; then
-    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON)$ ]]; then
-        echo "Error: async mode supports dolt, dolt_mysql and neon only; use --mode sync for '$BACKEND'"
+    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON)$ ]]; then
+        echo "Error: async mode supports dolt, dolt_mysql, seekdb and neon only; use --mode sync for '$BACKEND'"
         exit 1
     fi
     USE_ASYNC="true"
