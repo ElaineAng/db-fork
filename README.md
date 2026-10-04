@@ -458,13 +458,13 @@ database: `main` is `<db_name>`, and branch `X` is `<db_name>__X`. Creating a
 branch runs `FORK DATABASE`, connecting runs `USE`, and deleting runs
 `DROP DATABASE` (forked databases can take several seconds to drop).
 
-Merging is a draft and differs from Dolt's. It runs
-`MERGE TABLE ... STRATEGY OURS` per table, with no common ancestor:
+Merging is a draft. It runs `MERGE TABLE ... STRATEGY OURS` per table, with no
+common ancestor:
 
-- In effect insert-only: rows whose key is missing from the target are added,
-  but the source's updates and deletes are not applied.
-- No schema merge: tables that exist only on the source, or whose columns
-  differ between branches, are skipped with a warning.
+- Unlike Dolt's, in effect insert-only: rows whose key is missing from the
+  target are added, but the source's updates and deletes are not applied.
+- Tables whose schemas (columns or primary key) differ between branches, or
+  that exist only on the source, are skipped with a warning.
 - Tables without a primary key (e.g. `history`) are skipped with a warning.
 
 Async mode (`use_async` / `concurrent_requests > 1`) uses an aiomysql pool,
