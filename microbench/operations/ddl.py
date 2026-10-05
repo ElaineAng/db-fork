@@ -653,34 +653,35 @@ class AddForeignKeyOperation(Operation):
 
 
 class AddCheckOperation(Operation):
+    _check_counter = 0
+    _counter_lock = threading.Lock()
+
     def __init__(self, table_name: str, check_expression: str = "1=1"):
         self.table_name = table_name
         self.check_expression = check_expression or "1=1"
 
-    def execute(self, context: 'WorkerContext') -> None:
-        constraint_name = f"chk_{self.table_name}_{id(self)}"
-        sql = (
+    def _build_sql(self) -> str:
+        with AddCheckOperation._counter_lock:
+            AddCheckOperation._check_counter += 1
+            n = AddCheckOperation._check_counter
+        return (
             f"ALTER TABLE {self.table_name} "
-            f"ADD CONSTRAINT {constraint_name} "
+            f"ADD CONSTRAINT chk_{self.table_name}_{n} "
             f"CHECK ({self.check_expression})"
         )
-        context.db_tools.execute_sql(sql, timed=True)
+
+    def execute(self, context: 'WorkerContext') -> None:
+        context.db_tools.execute_sql(self._build_sql(), timed=True)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
-        constraint_name = f"chk_{self.table_name}_{id(self)}"
-        sql = (
-            f"ALTER TABLE {self.table_name} "
-            f"ADD CONSTRAINT {constraint_name} "
-            f"CHECK ({self.check_expression})"
-        )
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.db_tools.execute_sql_async(self._build_sql(), timed=True)
 
     def requires_setup_data(self) -> bool:
         return True
 
     def get_operation_type(self) -> rslt.OpType:
         return rslt.OpType.DDL
-
+    
 class SetDefaultOperation(Operation):
     def __init__(self, table_name: str, column_name: Optional[str] = None,
                  default_value: str = "0"):
