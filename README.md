@@ -71,7 +71,7 @@ Use the `scripts/run_macrobench.sh` script (run it from the repository root):
 | Argument | Description | Options |
 |----------|-------------|---------|
 | `workflow` | Workflow type | `software_dev`, `failure_repro`, `data_cleaning`, `mcts`, `simulation` |
-| `backend` | Database backend | `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `file_copy`, `txn` |
+| `backend` | Database backend | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `file_copy`, `txn` |
 | `db_scale` | Database scale (number of warehouses) | Integer (e.g., `1`, `5`, `10`) |
 | `sql_path` | Path to SQL schema dump | e.g., `db_setup/ch-w1.sql`, `db_setup/ch-w5.sql` |
 
@@ -136,7 +136,7 @@ Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation la
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
 | `sql_dump_path` | Path to SQL dump file (e.g., `db_setup/tpcc_schema.sql`) |
 | `num_branches` | Number of branches to create for testing |
 
@@ -202,8 +202,8 @@ Use `scripts/run_throughput_bench.sh` with one of three sweep modes:
 
 The script runs in **async mode** by default: each thread keeps
 `--concurrent-requests` ops in flight, each on its own pooled connection
-checked out on the thread's branch. Async mode supports `dolt`, `dolt_mysql`
-and `neon`; use `--mode sync` for the other backends (one op at a time per
+checked out on the thread's branch. Async mode supports `dolt`, `dolt_mysql`,
+`seekdb` and `neon`; use `--mode sync` for the other backends (one op at a time per
 thread). Every point of a sweep uses the same mode, including concurrency 1.
 
 Each thread works on one branch, assigned round-robin. With fewer threads
@@ -214,7 +214,7 @@ than branches, threads share branches.
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `neon`, `kpg`, `xata`, `txn`, `file_copy`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `txn`, `file_copy`, `tiger` |
 | `sql_dump_path` | Path to SQL dump file |
 | `--sweep-concurrency` | Fix threads and branches, vary concurrent requests (requires `--threads` and `--branches`; async only) |
 | `--sweep-branches` | Fix threads, vary branches (requires `--threads`) |
@@ -438,6 +438,38 @@ converts them to MySQL, so no separate MySQL schema is needed.
 Supports single-threaded, multi-threaded, and async (`concurrent_requests > 1`)
 microbenchmark runs via `runner2.py`. In async mode each thread opens a pool
 of `concurrent_requests` connections, all checked out on the thread's branch.
+
+## SeekDB backend — `seekdb`
+
+Runs against SeekDB (OceanBase's MySQL-compatible server, port 2881). Install
+and start it with:
+
+`brew tap oceanbase/seekdb && brew install seekdb && seekdb-start`
+
+Connection settings come from `SEEKDB_HOST` (default `127.0.0.1`),
+`SEEKDB_PORT` (`2881`), `SEEKDB_USER` (`root`) and `SEEKDB_PASSWORD` (empty).
+Storage is measured on the server's data directory, `SEEKDB_DATA_DIR`
+(default `/opt/homebrew/var/seekdb/data`); it covers the whole server, since
+SeekDB has no per-database directory. It uses the same `pg_dump` loader as
+`dolt_mysql`.
+
+SeekDB branches by forking whole databases, so each branch is its own
+database: `main` is `<db_name>`, and branch `X` is `<db_name>__X`. Creating a
+branch runs `FORK DATABASE`, connecting runs `USE`, and deleting runs
+`DROP DATABASE` (forked databases can take several seconds to drop).
+
+Merging is a draft. It runs `MERGE TABLE ... STRATEGY OURS` per table, with no
+common ancestor:
+
+- Unlike Dolt's, in effect insert-only: rows whose key is missing from the
+  target are added, but the source's updates and deletes are not applied.
+- Tables whose schemas (columns or primary key) differ between branches, or
+  that exist only on the source, are skipped with a warning.
+- Tables without a primary key (e.g. `history`) are skipped with a warning.
+
+Async mode (`use_async` / `concurrent_requests > 1`) uses an aiomysql pool,
+like `dolt_mysql`. Each pool connection is opened on the worker's branch
+database.
 
 ---
 

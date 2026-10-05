@@ -12,6 +12,7 @@ enum Backend {
     TIGER = 5;
     TXN = 6;
     DOLT_MYSQL = 7;
+    SEEKDB = 8;
 }
 
 // The five representative workflow categories from Section 3.1

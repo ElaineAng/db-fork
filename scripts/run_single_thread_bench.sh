@@ -4,7 +4,7 @@
 # Usage: ./scripts/run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
 #
 # Required Arguments:
-#   backend:        dolt, dolt_mysql, neon, kpg, xata, file_copy, txn, tiger
+#   backend:        dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn, tiger
 #   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql)
 #   branch_counts:  Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)
 #
@@ -88,7 +88,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$NUM_BRANCHES" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> <branch_counts> [options]"
     echo ""
     echo "Required:"
-    echo "  backend: dolt, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  branch_counts: Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)"
     echo ""
@@ -113,8 +113,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, dolt_mysql, neon, kpg, xata, file_copy, txn, tiger"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn, tiger"
     exit 1
 fi
 

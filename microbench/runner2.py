@@ -45,6 +45,8 @@ from dblib import result_pb2 as rslt
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib import dolt_mysql
 from dblib.dolt_mysql import DoltMySQLToolSuite
+from dblib import seekdb
+from dblib.seekdb import SeekDBToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
@@ -360,6 +362,13 @@ class BackendManager:
             info.default_branch_name = "main"
             print(f"Default Dolt MySQL connection URI: {info.default_uri}")
 
+        elif backend == tp.Backend.SEEKDB:
+            info.default_uri = SeekDBToolSuite.get_default_connection_uri()
+            info.default_branch_name = seekdb.MAIN_BRANCH
+            # A SeekDB branch's ID is its database name; main is db_name.
+            info.default_branch_id = db_name
+            print(f"Default SeekDB connection URI: {info.default_uri}")
+
         elif backend == tp.Backend.KPG:
             info.default_uri = KpgToolSuite.get_default_connection_uri()
             info.default_branch_name = "main"
@@ -451,6 +460,10 @@ class BackendManager:
             dolt_mysql.setup_database(
                 db_name, config.database_setup.sql_dump.sql_dump_path
             )
+        elif require_db_setup and backend == tp.Backend.SEEKDB:
+            seekdb.setup_database(
+                db_name, config.database_setup.sql_dump.sql_dump_path
+            )
         elif require_db_setup:
             if not info.tiger:
                 self._create_database(info.default_uri, db_name)
@@ -496,6 +509,12 @@ class BackendManager:
         elif self.config.backend == tp.Backend.DOLT_MYSQL and db_name:
             try:
                 dolt_mysql.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.SEEKDB and db_name:
+            try:
+                # Also drops every branch database forked from db_name.
+                seekdb.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
@@ -552,6 +571,8 @@ class BackendManager:
             return DoltToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.DOLT_MYSQL:
             return DoltMySQLToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.SEEKDB:
+            return SeekDBToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.KPG:
             return KpgToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
@@ -1003,6 +1024,10 @@ class WorkerContext:
             )
         elif backend == tp.Backend.DOLT_MYSQL:
             self.db_tools = DoltMySQLToolSuite.init_for_bench(
+                result_collector, db_name, config.autocommit, default_branch_name
+            )
+        elif backend == tp.Backend.SEEKDB:
+            self.db_tools = SeekDBToolSuite.init_for_bench(
                 result_collector, db_name, config.autocommit, default_branch_name
             )
         elif backend == tp.Backend.KPG:
@@ -1600,7 +1625,7 @@ class AsyncOperationRunner:
 
         pool_size = self.concurrent_limit
 
-        if self.config.backend == tp.Backend.DOLT_MYSQL:
+        if self.config.backend in (tp.Backend.DOLT_MYSQL, tp.Backend.SEEKDB):
             # MySQL protocol, so aiomysql instead of psycopg. Start every pool
             # session on the branch the sync connection has checked out.
             branch_name, _ = self.context.db_tools.get_current_branch()
