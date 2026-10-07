@@ -41,6 +41,7 @@ WARMUP_OPS=""
 WARMUP_FRACTION=""
 CONCURRENT_REQUESTS="1"
 OUTPUT_DIR="/tmp/run_stats"
+TABLE_NAME=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -102,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --concurrent-requests)
             CONCURRENT_REQUESTS="$2"
+            shift 2
+            ;;
+        --table-name)
+            TABLE_NAME="$2"
             shift 2
             ;;
         --operations)
@@ -296,7 +301,7 @@ fi
 echo "==================================================="
 
 # Fixed config values
-TABLE_NAME="orders"
+TABLE_NAME="${TABLE_NAME:-orders}"
 DB_NAME="throughput_bench"
 INSERTS_PER_BRANCH=0
 UPDATES_PER_BRANCH=0
@@ -331,6 +336,9 @@ get_num_ops() {
             ;;
         RANGE_UPDATE|RANGE_READ)
             echo 1000
+            ;;
+        DDL_ADD_INDEX|DDL_REMOVE_INDEX|DDL_VACUUM|DDL_ADD_COLUMN|DDL_REMOVE_COLUMN|DDL_BACKFILL|DDL_ADD_COLUMN_WITH_DEFAULT|DDL_TYPE_CHANGE|DDL_RENAME_COLUMN|DDL_RENAME_TABLE|DDL_ADD_FK|DDL_ADD_CHECK|DDL_SET_DEFAULT|DDL_SET_NOT_NULL|DDL_EXPAND_CONTRACT)
+            echo 10
             ;;
         *)
             echo 5000

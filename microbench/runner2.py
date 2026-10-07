@@ -73,6 +73,22 @@ from microbench.operations import (
     AddIndexOperation,
     RemoveIndexOperation,
     VacuumOperation,
+    AddColumnOperation,
+    RemoveColumnOperation,
+    BackfillOperation,
+    AddColumnWithDefaultOperation,
+    AddColumnOperation,
+    RemoveColumnOperation,
+    BackfillOperation,
+    AddColumnWithDefaultOperation,
+    TypeChangeOperation,
+    RenameColumnOperation,
+    RenameTableOperation,
+    AddForeignKeyOperation,
+    AddCheckOperation,
+    SetDefaultOperation,
+    SetNotNullOperation,
+    ExpandContractOperation,
 )
 
 # Utility imports
@@ -1001,6 +1017,7 @@ class WorkerContext:
 
         # Index tracking for DDL operations
         self._created_indexes: Dict[str, List[str]] = {}  # table -> [index_names]
+        self._created_columns: Dict[str, List[str]] = {}  # table -> [column_names]
 
     def __enter__(self) -> 'WorkerContext':
         """Initialize database connection and tools."""
@@ -1208,6 +1225,19 @@ class WorkerContext:
         """Clear cached primary keys (e.g., after branch switch)."""
         self._existing_pks = []
 
+    def get_existing_key_count(self, table_name: str) -> int:
+        """Number of existing primary keys in the table.
+
+        Used to turn a backfill fraction into a concrete row count.
+        """
+        pk_columns = self.get_pk_columns(table_name)
+        existing_pks = self._existing_pks or dbh.get_pk_values(
+            self.db_tools.get_current_connection(), table_name, pk_columns
+        )
+        if not self._existing_pks and existing_pks:
+            self._existing_pks = existing_pks
+        return len(existing_pks) if existing_pks else 0
+
     def prepare_range_query(
         self, table_name: str, range_size: int, operation_name: str
     ) -> dict:
@@ -1278,6 +1308,27 @@ class WorkerContext:
         if table_name in self._created_indexes:
             if index_name in self._created_indexes[table_name]:
                 self._created_indexes[table_name].remove(index_name)
+
+    def track_created_column(self, table_name: str, column_name: str) -> None:
+        """Track a benchmark-created column so it can be safely dropped later."""
+        self._created_columns.setdefault(table_name, []).append(column_name)
+
+    def untrack_column(self, table_name: str, column_name: str) -> None:
+        """Remove a column from tracking."""
+        if table_name in self._created_columns:
+            if column_name in self._created_columns[table_name]:
+                self._created_columns[table_name].remove(column_name)
+
+    def get_random_created_column(self, table_name: str) -> Optional[str]:
+        """Get a random benchmark-created column for this table.
+
+        Only returns columns this benchmark added, never original schema
+        columns, so DROP COLUMN can never corrupt the base dataset.
+        """
+        columns = self._created_columns.get(table_name, [])
+        if columns:
+            return self.rnd.choice(columns)
+        return None
 
     def get_random_index(self, table_name: str) -> Optional[str]:
         """Get a random index name from the table."""
@@ -1412,6 +1463,79 @@ class OperationRunner:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.DDL_VACUUM:
             return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"),)
+        elif op_type == tp.OperationType.DDL_REMOVE_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,)
+        elif op_type == tp.OperationType.DDL_BACKFILL:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                backfill_fraction=(
+                    self.config.ddl_config.backfill_fraction or 1.0),
+                column_name=self.config.ddl_config.column_name or None,)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN_WITH_DEFAULT:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+                default_value=self.config.ddl_config.default_value or "0",)
+        elif op_type == tp.OperationType.DDL_TYPE_CHANGE:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                new_type=self.config.ddl_config.column_type or "BIGINT",
+            )
+        elif op_type == tp.OperationType.DDL_RENAME_COLUMN:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                new_column_name=self.config.ddl_config.new_column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_RENAME_TABLE:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                new_table_name=self.config.ddl_config.new_table_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_ADD_FK:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                ref_table_name=self.config.ddl_config.ref_table_name or None,
+                ref_column_name=self.config.ddl_config.ref_column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_ADD_CHECK:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                check_expression=self.config.ddl_config.check_expression or "1=1",
+            )
+        elif op_type == tp.OperationType.DDL_SET_DEFAULT:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                default_value=self.config.ddl_config.default_value or "0",
+            )
+        elif op_type == tp.OperationType.DDL_SET_NOT_NULL:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_EXPAND_CONTRACT:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_type=self.config.ddl_config.column_type or "INTEGER",
+            )
         elif op_type in [
             tp.OperationType.READ,
             tp.OperationType.INSERT,
@@ -1553,6 +1677,84 @@ class AsyncOperationRunner:
             return OperationRegistry.create(op_type, table_name=table_name)
         elif op_type == tp.OperationType.DDL_VACUUM:
             return OperationRegistry.create(op_type, table_name=table_name)
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+            )
+        elif op_type == tp.OperationType.DDL_REMOVE_COLUMN:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_BACKFILL:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                backfill_fraction=(
+                    self.config.ddl_config.backfill_fraction or 1.0),
+                column_name=self.config.ddl_config.column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_ADD_COLUMN_WITH_DEFAULT:
+            return OperationRegistry.create(
+                op_type,
+                table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                column_type=(
+                    self.config.ddl_config.column_type or "INTEGER"
+                ),
+                default_value=self.config.ddl_config.default_value or "0",
+            )
+        elif op_type == tp.OperationType.DDL_TYPE_CHANGE:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                new_type=self.config.ddl_config.column_type or "BIGINT",
+            )
+        elif op_type == tp.OperationType.DDL_RENAME_COLUMN:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                new_column_name=self.config.ddl_config.new_column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_RENAME_TABLE:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                new_table_name=self.config.ddl_config.new_table_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_ADD_FK:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                ref_table_name=self.config.ddl_config.ref_table_name or None,
+                ref_column_name=self.config.ddl_config.ref_column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_ADD_CHECK:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                check_expression=self.config.ddl_config.check_expression or "1=1",
+            )
+        elif op_type == tp.OperationType.DDL_SET_DEFAULT:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+                default_value=self.config.ddl_config.default_value or "0",
+            )
+        elif op_type == tp.OperationType.DDL_SET_NOT_NULL:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_name=self.config.ddl_config.column_name or None,
+            )
+        elif op_type == tp.OperationType.DDL_EXPAND_CONTRACT:
+            return OperationRegistry.create(
+                op_type, table_name=table_name,
+                column_type=self.config.ddl_config.column_type or "INTEGER",
+            )
         elif op_type in [
             tp.OperationType.READ,
             tp.OperationType.INSERT,
@@ -2345,6 +2547,18 @@ def register_all_operations() -> None:
     OperationRegistry.register(tp.OperationType.DDL_ADD_INDEX, AddIndexOperation)
     OperationRegistry.register(tp.OperationType.DDL_REMOVE_INDEX, RemoveIndexOperation)
     OperationRegistry.register(tp.OperationType.DDL_VACUUM, VacuumOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_COLUMN, AddColumnOperation)
+    OperationRegistry.register(tp.OperationType.DDL_REMOVE_COLUMN, RemoveColumnOperation)
+    OperationRegistry.register(tp.OperationType.DDL_BACKFILL, BackfillOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_COLUMN_WITH_DEFAULT,AddColumnWithDefaultOperation,)
+    OperationRegistry.register(tp.OperationType.DDL_TYPE_CHANGE, TypeChangeOperation)
+    OperationRegistry.register(tp.OperationType.DDL_RENAME_COLUMN, RenameColumnOperation)
+    OperationRegistry.register(tp.OperationType.DDL_RENAME_TABLE, RenameTableOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_FK, AddForeignKeyOperation)
+    OperationRegistry.register(tp.OperationType.DDL_ADD_CHECK, AddCheckOperation)
+    OperationRegistry.register(tp.OperationType.DDL_SET_DEFAULT, SetDefaultOperation)
+    OperationRegistry.register(tp.OperationType.DDL_SET_NOT_NULL, SetNotNullOperation)
+    OperationRegistry.register(tp.OperationType.DDL_EXPAND_CONTRACT, ExpandContractOperation)
 
 
 # ============================================================================

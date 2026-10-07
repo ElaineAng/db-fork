@@ -25,10 +25,23 @@ from microbench.operations.branch import (
     ConnectLastOperation,
 )
 from microbench.operations.ddl import (
+    AddColumnOperation,
     AddIndexOperation,
+    RemoveColumnOperation,
     RemoveIndexOperation,
     VacuumOperation,
+    BackfillOperation,
+    AddColumnWithDefaultOperation,
+    TypeChangeOperation,
+    RenameColumnOperation,
+    RenameTableOperation,
+    AddForeignKeyOperation,
+    AddCheckOperation,
+    SetDefaultOperation,
+    SetNotNullOperation,
+    ExpandContractOperation,
 )
+
 
 __all__ = [
     "Operation",
@@ -45,7 +58,19 @@ __all__ = [
     "ConnectFirstOperation",
     "ConnectMidOperation",
     "ConnectLastOperation",
+    "AddColumnOperation",
     "AddIndexOperation",
+    "RemoveColumnOperation",
     "RemoveIndexOperation",
     "VacuumOperation",
+    "BackfillOperation",
+    "AddColumnWithDefaultOperation",
+    "TypeChangeOperation",
+    "RenameColumnOperation",
+    "RenameTableOperation",
+    "AddForeignKeyOperation",
+    "AddCheckOperation",
+    "SetDefaultOperation",
+    "SetNotNullOperation",
+    "ExpandContractOperation",
 ]

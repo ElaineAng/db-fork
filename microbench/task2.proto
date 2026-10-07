@@ -39,6 +39,16 @@ enum OperationType {
   DDL_ADD_COLUMN = 22;
   DDL_REMOVE_COLUMN = 23;
   DDL_VACUUM = 24;
+  DDL_BACKFILL = 25;
+  DDL_ADD_COLUMN_WITH_DEFAULT = 26;
+  DDL_TYPE_CHANGE = 27;
+  DDL_RENAME_COLUMN = 28;
+  DDL_RENAME_TABLE = 29;
+  DDL_ADD_FK = 30;
+  DDL_ADD_CHECK = 31;
+  DDL_SET_DEFAULT = 32;
+  DDL_SET_NOT_NULL = 33;
+  DDL_EXPAND_CONTRACT = 34;
 }
 
 // Branch tree shapes for setup phase
@@ -93,6 +103,13 @@ message DdlConfig {
   string index_column_name = 1;  // For ADD_INDEX operations
   string column_name = 2;         // For ADD_COLUMN/REMOVE_COLUMN
   string column_type = 3;         // For ADD_COLUMN (e.g., "VARCHAR(100)")
+  float backfill_fraction = 4;    // For BACKFILL: fraction of the table's rows to rewrite (0.0-1.0)
+  string default_value = 5;       // For ADD_COLUMN_WITH_DEFAULT: the default value expression.
+  string new_column_name = 6;   // for RENAME_COLUMN
+  string new_table_name = 7;    // for RENAME_TABLE
+  string ref_table_name = 8;    // for ADD_FK, the table being referenced
+  string ref_column_name = 9;   // for ADD_FK, the column being referenced
+  string check_expression = 10; // for ADD_CHECK, e.g. "quantity > 0"
 }
 
 // Single operation benchmark configuration
