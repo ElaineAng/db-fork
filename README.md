@@ -16,21 +16,21 @@ microbenchmark workloads.
 #    Requires uv (https://docs.astral.sh/uv/) and protoc (brew install protobuf)
 uv sync
 
-# 2. Run a macrobenchmark 
+# 2. Run a macrobenchmark scenario (schema and data are generated)
 # Mini config, always start with this
-./scripts/run_macrobench.sh --mini --outdir run_stats software_dev dolt 1 db_setup/ch-w1.sql
+./scripts/run_macrobench.sh --mini --outdir run_stats rl_env dolt
 
-# Full config with 2hr timeout
-./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 software_dev dolt 5 db_setup/ch-w5.sql
+# Full config at W=5 with a 2h timeout
+./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 data_agent dolt 5
 
-# 3. Generate comparison plots
-uv run python scripts/plotting/macro_comparison.py --dolt-dir run_stats_final/macro/dolt_full --neon-dir run_stats_final/macro/neon_full --outdir figures/
-
-# 4. Run a microbenchmark (latency)
+# 3. Run a microbenchmark (latency)
 ./scripts/run_single_thread_bench.sh dolt db_setup/tpcc_schema.sql 16
 
-# 5. Run a microbenchmark (throughput)
+# 4. Run a microbenchmark (throughput)
 ./scripts/run_throughput_bench.sh dolt db_setup/ch-w1.sql --sweep-proportional
+
+# 5. Run the unit tests (fake backend, no server needed)
+uv run python -m pytest tests/
 ```
 
 All commands are run from the repository root.
@@ -40,7 +40,7 @@ All commands are run from the repository root.
 ```
 dblib/              # The git-like DB API, backend implementations, result collection
 microbench/         # Microbenchmark runner and operations
-macrobench/         # Macrobenchmark workflows and runner
+macrobench/         # Macrobenchmark scenarios, schema generators and runner
 util/               # Shared helpers (SQL loading, DB utilities)
 db_setup/           # SQL dumps/schemas and database setup scripts
 scripts/            # Benchmark entry points (run_*.sh)
@@ -77,8 +77,8 @@ public verbs wrap them with timing, storage measurement and result recording.
 | `commit(ref, message)` | snapshot the branch's working state | commit id |
 | `diff(ref_a, ref_b)` | differences between two refs | backend-specific summary |
 | `log(ref, limit)` | recent commits | list of dicts |
-| `merge(into, source, message)` | merge `source` into `into` | backend-specific info |
-| `rebase(ref, onto)` | replay `ref`'s commits on `onto` | |
+| `merge(into, source, message, on_conflict)` | merge `source` into `into` | `fast_forward`, `conflicts`, `conflict_tables` (Dolt) |
+| `rebase(ref, onto, on_conflict)` | replay `ref`'s commits on `onto` | `conflicts`, `conflict_tables` (Dolt) |
 | `revert(ref, commit)` | add a commit undoing `commit` | |
 | `reset(ref, to)` | move `ref` to a commit (or restore point) | |
 | `delete(ref)` | delete a branch | |
@@ -86,6 +86,15 @@ public verbs wrap them with timing, storage measurement and result recording.
 A ref is a branch name or `branch@commit` on backends with commits. On a
 backend without commits, a commit ref falls back to the branch head with a
 warning and the row is flagged `commit_ref_fallback`.
+
+`merge()` and `rebase()` take `on_conflict`: `"ours"` (default), `"theirs"`,
+or a callable `resolve(db, conflicts)` that the backend calls on the
+half-merged working set with a session and a list of
+`{"table": name, "rows": [...]}` entries (Dolt's base/our/their columns).
+The callable resolves conflicts with SQL through `db.sql()`; anything it
+leaves is resolved as "ours". Schema conflicts (a dropped table modified on
+the other side, two indexes on the same columns) cannot be resolved in place:
+the backend aborts and the verb is recorded as FAILED with the reason.
 
 Every verb returns an `OpResult` with `status` OK, UNSUPPORTED (the backend
 has no such operation: zero latency, workload continues) or FAILED (the
@@ -143,62 +152,108 @@ thread). Run summaries include `workflow_supported`, the list of
 
 ## Macrobenchmarks
 
-Macrobenchmarks simulate real-world workflows with multiple concurrent workers performing sequences of database operations.
+The macrobenchmark runs one of six agent-workflow scenarios (BranchBench
+S1-S6) against a backend through the git-like API, and records every branch
+op and every statement, which verbs the backend could not perform, and
+whether the sentinel-based invariance checks held.
 
-### Running Macrobenchmarks
+| Scenario | Key | Shape | Branch ops |
+|----------|-----|-------|------------|
+| S1 Agentic RL environment | `rl_env` | T task branches, G rollout leaves each, forks from recorded steps | branch (from commit), commit, diff, delete |
+| S2 Agent context management | `context_mgmt` | long spine, candidate branches per compaction | branch, commit, merge (ff), revert, rebase, delete |
+| S3 Multi-agent collaboration | `multi_agent` | N agents merging into a spine that keeps changing | branch, commit, log, merge (with conflicts), delete |
+| S4 Development agent | `dev_agent` | dev branches off a busy production spine, never merged | branch, commit, rebase (with conflicts), delete |
+| S5 Operations agent | `ops_agent` | dense commits, bad deploy, investigation branches, PITR | branch (from commit), commit, diff, reset, delete |
+| S6 Data agent | `data_agent` | ingestion batches rebased and merged into a warehouse | branch, commit, reset, rebase, merge, delete |
 
-Use the `scripts/run_macrobench.sh` script (run it from the repository root):
+Each scenario lives in `macrobench/scenarios/s<N>_<key>.py` with its
+parametrized SQL and exec() scripts; `macrobench/faults.py` holds the fault
+catalog and the TPC-C consistency conditions S1 and S5 use;
+`macrobench/tpcc.py` holds the TPC-C transactions and CH queries that the
+optional spine load runs.
 
-```bash
-./scripts/run_macrobench.sh [OPTIONS] <workflow> <backend> <db_scale> <sql_path>
+### Configuration
+
+A run is one `MacroBenchConfig` textproto (`macrobench/task.proto`):
+
+```
+run_id: "macro_data_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_data_agent" cleanup: true generated {} }
+schema { base: CH_BENCH scale_factor: 1 }                 # generated CH-benCHmark at W=1
+workload {
+  branch_ops { commit_interval: 2 }                        # commit every 2 steps
+  data_ops { statements_per_step: 8 rows_per_write: 5     # exec() intensity
+             write_fraction: 0.8 spine_clients: 4 analytical_fraction: 0.8 }
+  data_agent { batches: 32 concurrent_batches: 4 batch_rows: 2000
+               days_back: 3 steps_per_batch: 10 reset_prob: 0.1 }
+}
 ```
 
-#### Arguments
+- `schema` picks the base (CH-benCHmark or none), the scale factor W and
+  row-density knobs, and the extension tables (`macrobench/schema/*.sql`;
+  by default the scenario's own). With `database_setup.generated`, the
+  runner creates an empty database and seeds it with the generators in
+  `macrobench/datagen/`; `sql_dump` and `existing_db` still work.
+- `workload.branch_ops` and `workload.data_ops` set the shared intensity
+  (commit interval, retention, live-branch cap; statements per step, rows per
+  write, read/write/DDL mix, worker threads, background spine clients).
+- The scenario message holds the paper's structural parameters (T/G/S, N,
+  fan-out, cycles, D, p, ...).
+- `workload.branch_intensity` and `workload.data_intensity` are multipliers
+  applied on top of the explicit knobs before the run (0 or 1 = unchanged).
+  Branch intensity scales the number of branch verbs (branches, forks,
+  rounds, rebases, investigation points) and divides `commit_interval`;
+  data intensity scales the SQL per branch (statements per step, rows per
+  write, spine clients, per-branch steps and rows). Thread counts, caps and
+  probabilities are not scaled. `macrobench/intensity.py` lists the exact
+  fields; the effective values are printed and written to the e2e stats.
+- `invariants { disabled: true }` turns the sentinel checks off;
+  `fail_fast: true` stops at the first failure.
 
-| Argument | Description | Options |
-|----------|-------------|---------|
-| `workflow` | Workflow type | `software_dev`, `failure_repro`, `data_cleaning`, `mcts`, `simulation` |
-| `backend` | Database backend | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
-| `db_scale` | Database scale (number of warehouses) | Integer (e.g., `1`, `5`, `10`) |
-| `sql_path` | Path to SQL schema dump | e.g., `db_setup/ch-w1.sql`, `db_setup/ch-w5.sql` |
+`macrobench/configs/<key>.textproto` holds the paper-scale parameters and
+`<key>_mini.textproto` a smoke-test size.
 
-#### Options
-
-| Option | Description |
-|--------|-------------|
-| `--mini` | Use mini config (fewer workers/steps, suitable for testing) |
-| `--outdir DIR` | Output directory (default: `run_stats/`) |
-| `--max-runtime-sec N` | Cap total runtime in seconds (0 = no limit) |
-| `--measure-storage` | Enable Neon storage measurement (15-min sleep before/after) |
-
-#### Examples
+### Running
 
 ```bash
-# Run software development workflow on Dolt with 5 warehouses
-./scripts/run_macrobench.sh software_dev dolt 5 db_setup/ch-w5.sql
-
-# Run MCTS workflow on Neon with mini config
-./scripts/run_macrobench.sh --mini mcts neon 1 db_setup/ch-w1.sql
-
-# Run simulation workflow on Neon with custom output directory
-./scripts/run_macrobench.sh --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
-
-# Run with runtime limit (10 minutes)
-./scripts/run_macrobench.sh --max-runtime-sec 600 data_cleaning dolt 5 db_setup/ch-w5.sql
-
-# Run with storage measurement for Neon
-./scripts/run_macrobench.sh --measure-storage mcts neon 5 db_setup/ch-w5.sql
+./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] \
+    [--branch-intensity X] [--data-intensity Y] <scenario> <backend> [scale_factor]
 ```
 
-#### Output Files
+| Argument | Description |
+|----------|-------------|
+| `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
+| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
+| `scale_factor` | W warehouses for the generated data (default: the config's) |
 
-Macrobenchmark results are saved to the output directory (default: `run_stats/`):
+```bash
+./scripts/run_macrobench.sh --mini rl_env dolt
+./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 multi_agent dolt
+# twice the branch churn, half the SQL per branch
+./scripts/run_macrobench.sh --mini --branch-intensity 2 --data-intensity 0.5 rl_env dolt
+./scripts/run_macrobench.sh --measure-storage data_agent dolt 5
+# or directly
+uv run python -m macrobench.runner --config macrobench/configs/ops_agent_mini.textproto --outdir run_stats
+```
+
+A backend that lacks a verb still runs the whole scenario: the verb is
+recorded as UNSUPPORTED, `workflow_supported` is false in the e2e stats, and
+invariance checks that depend on it are reported as not applicable.
+
+### Output
 
 ```
 run_stats/
-├── macro_<workflow>_<backend>_<scale>.parquet           # Operation-level latency data
-└── macro_<workflow>_<backend>_<scale>_e2e_stats.json    # End-to-end statistics
+├── <run_id>.parquet            # one row per branch op, statement, exec() and connect
+└── <run_id>_e2e_stats.json     # status, support summary, invariants, scenario metrics
 ```
+
+The e2e stats carry the workload parameters, the seed statistics,
+`capabilities`, `workflow_supported` with `unsupported_ops` and
+`op_status_counts`, the `invariants` results, the scenario's own `metrics`
+(e.g. S3 merge order and conflicts, S5 time to recovery, S6 fast-forward vs
+three-way merges) and the spine load's transaction counts.
 
 ---
 
@@ -367,36 +422,34 @@ runs do not. The summary JSON records `execution_mode` and `concurrent_requests`
 
 After running benchmarks, use the plotting scripts in the `scripts/plotting/` directory to generate visualizations.
 
-### Macrobenchmark Comparison Plots
+### Macrobenchmark Report
 
-Compare macrobenchmark results between Dolt and Neon:
+`plot_macrobench.py` reads every `<run_id>_e2e_stats.json` / `<run_id>.parquet`
+pair under one or more directories, groups the runs by scenario and backend,
+and writes a summary plus comparison figures. Backends are read from the
+stats files, so a directory holding Dolt and Neon runs compares them directly:
 
 ```bash
-uv run python scripts/plotting/macro_comparison.py \
-    --dolt-dir <dolt_results_dir> \
-    --neon-dir <neon_results_dir> \
-    --outdir <output_figures_dir>
+uv run python scripts/plotting/plot_macrobench.py --data-dir run_stats --outdir figures/macro
+
+# several directories, filtered to two backends and two scenarios
+uv run python scripts/plotting/plot_macrobench.py \
+    --data-dir run_stats/dolt --data-dir run_stats/neon \
+    --backends DOLT NEON --scenarios ops_agent data_agent \
+    --outdir figures/macro
 ```
 
-#### Arguments
+| Output | Content |
+|---|---|
+| `summary.md`, `summary.csv` | per run: status, elapsed/setup time, support, invariants, op counts, median latency per verb, scenario metrics |
+| `elapsed.png` | end-to-end time per scenario, setup vs workload, backends side by side |
+| `time_breakdown.png` | summed latency by group (branch verbs, data statements, connects) |
+| `latency_by_op.png` | median latency per operation type and scenario (whisker to p90) |
+| `latency_cdf_<scenario>.png` | latency CDF of each branch verb, one line per backend |
+| `storage.png` | database size over the run (runs made with `--measure-storage`) |
 
-| Argument | Description |
-|----------|-------------|
-| `--dolt-dir` | Directory with Dolt parquet files |
-| `--neon-dir` | Directory with Neon parquet files |
-| `--outdir` | Directory to save figures (default: `macro-analysis/figures_comparison`) |
-| `--label-position` | Position for step labels as `x,y` in axes coordinates (default: `0.98,0.05`) |
-| `--label-fontsize` | Font size for step labels (default: 16) |
-
-#### Generated Plots
-
-The script generates the following figures in the output directory:
-
-- `latency_boxplot_comparison.png` - Box plots of latency by operation type
-- `time_breakdown_comparison.png` - Stacked bar chart of time breakdown by operation
-- `heatmap_comparison.png` - Heatmap showing latency comparison with ratios
-- `elapsed_time_comparison.png` - Elapsed time comparison by workflow
-- `steps_over_time.png` - Steps completion over time
+Only the newest run per (scenario, backend) is used unless `--all-runs` is
+given; `--run-glob` narrows by run id (e.g. `'macro_*_mini_*'`).
 
 ### Microbenchmark Latency Plots
 
@@ -461,16 +514,11 @@ Benchmark results are saved as Parquet files and JSON summaries.
 ### Macrobenchmark Output Structure
 
 ```
-run_stats_final/macro/
-├── dolt_full/          # Full-scale Dolt runs
-│   ├── macro_software_dev_dolt_5.parquet
-│   ├── macro_software_dev_dolt_5_e2e_stats.json
-│   ├── macro_failure_repro_dolt_5.parquet
-│   ├── macro_data_cleaning_dolt_5.parquet
-│   └── macro_mcts_dolt_5.parquet
-├── dolt_mini/          # Mini-scale Dolt runs (for testing)
-├── neon_full/          # Full-scale Neon runs
-└── neon_mini/          # Mini-scale Neon runs
+run_stats/
+├── macro_rl_env_mini_dolt.parquet
+├── macro_rl_env_mini_dolt_e2e_stats.json
+├── macro_data_agent_dolt_w5.parquet
+└── macro_data_agent_dolt_w5_e2e_stats.json
 ```
 
 ### Microbenchmark Output Structure
@@ -582,7 +630,7 @@ NEON_CONNECTION_STRING=postgresql://user:pass@host.neon.tech/dbname
 
 ## Additional Resources
 
-- **Workflow configurations**: See `macrobench/configs/` for workflow definitions
+- **Scenario configurations**: See `macrobench/configs/` and `macrobench/task.proto`
 - **Microbenchmark configs**: See `microbench/configs/` for example configurations
 - **Database schemas**: See `db_setup/` for SQL dump files
 

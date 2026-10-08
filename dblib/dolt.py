@@ -199,7 +199,71 @@ class DoltToolSuite(DBToolSuite):
             (self._spec(ref), int(limit)),
         )
 
-    def _merge_impl(self, into: Ref, source: Ref, message: str) -> dict:
+    # ------------------------------------------------------------------
+    # Conflicts (merge and rebase)
+    # ------------------------------------------------------------------
+
+    def _allow_conflicts(self) -> None:
+        """Under autocommit Dolt rolls a conflicting merge back unless the
+        session allows committing conflicts; set once per connection."""
+        if not getattr(self, "_conflicts_allowed", False):
+            self._execute("SET dolt_allow_commit_conflicts = 1;")
+            self._conflicts_allowed = True
+
+    def _conflict_tables(self) -> list:
+        rows = self._execute('SELECT "table" FROM dolt_conflicts;')
+        return [r[0] for r in rows or []]
+
+    def _schema_conflicts(self) -> list:
+        rows = self._execute(
+            "SELECT table_name, description FROM dolt_schema_conflicts;"
+        )
+        return [{"table": r[0], "description": r[1]} for r in rows or []]
+
+    def _conflict_rows(self, table: str, limit: int = 1000) -> list:
+        return self._rows_as_dicts(
+            f"SELECT * FROM dolt_conflicts_{table} LIMIT {int(limit)};"
+        )
+
+    def _resolve_conflicts(self, ref: Ref, on_conflict) -> dict:
+        """Resolve the data conflicts in the working set per on_conflict.
+        Returns {"conflict_tables", "resolved", "resolution"}."""
+        tables = self._conflict_tables()
+        info = {"conflict_tables": tables, "resolved": "", "resolution": None}
+        if not tables:
+            return info
+        if callable(on_conflict):
+            conflicts = [
+                {"table": t, "rows": self._conflict_rows(t)} for t in tables
+            ]
+            info["resolution"] = on_conflict(self._conflict_session(ref), conflicts)
+            info["resolved"] = "custom"
+            remaining = self._conflict_tables()
+            if remaining:
+                for t in remaining:
+                    self._resolve_table(t, "--ours", info)
+                info["resolved"] = f"custom+ours({','.join(remaining)})"
+        else:
+            flag = "--theirs" if on_conflict == "theirs" else "--ours"
+            for t in tables:
+                self._resolve_table(t, flag, info)
+            info["resolved"] = on_conflict
+        return info
+
+    def _resolve_table(self, table: str, flag: str, info: dict) -> None:
+        """dolt_conflicts_resolve, falling back to keeping the working
+        set's rows (ours) when Dolt cannot apply the flag because the
+        table's schema differs between the sides."""
+        try:
+            self._execute("SELECT dolt_conflicts_resolve(%s, %s);", (flag, table))
+        except Exception as e:
+            if "schema" not in str(e).lower():
+                raise
+            self._execute(f"DELETE FROM dolt_conflicts_{table}")
+            info.setdefault("fallback_ours", []).append(table)
+
+    def _merge_impl(self, into: Ref, source: Ref, message: str,
+                    on_conflict="ours") -> dict:
         self._on(into)
         # dolt_merge needs a clean working set.
         self._execute("SELECT dolt_add('-A');")
@@ -208,35 +272,96 @@ class DoltToolSuite(DBToolSuite):
         except Exception as e:
             if "nothing to commit" not in str(e).lower():
                 raise
-        if message:
-            rows = self._execute(
-                "SELECT dolt_merge(%s, '-m', %s);", (self._spec(source), message)
-            )
-        else:
-            rows = self._execute("SELECT dolt_merge(%s);", (self._spec(source),))
+        self._allow_conflicts()
+        message = message or f"Merge {source.branch} into {into.branch}"
+        rows = self._execute(
+            "SELECT dolt_merge(%s, '-m', %s);", (self._spec(source), message)
+        )
         cells = _cells(rows[0][0]) if rows else []
         info = {
             "hash": cells[0] if len(cells) > 0 else "",
             "fast_forward": bool(int(cells[1])) if len(cells) > 1 else False,
             "conflicts": int(cells[2]) if len(cells) > 2 else 0,
             "message": cells[3] if len(cells) > 3 else "",
+            "conflict_tables": [],
+            "schema_conflicts": [],
         }
         if info["conflicts"] > 0:
-            # Resolve in favour of the target branch.
-            tables = self._execute("SELECT table_name FROM dolt_conflicts;")
-            for (table_name,) in tables or []:
-                self._execute(
-                    "SELECT dolt_conflicts_resolve('--ours', %s);", (table_name,)
+            schema = self._schema_conflicts()
+            if schema:
+                # Dolt cannot resolve these in place; abort so the branch
+                # is usable again and report why.
+                self._execute("SELECT dolt_merge('--abort');")
+                names = ", ".join(c["table"] for c in schema)
+                raise RuntimeError(
+                    f"schema conflict on {names}; merge aborted: "
+                    f"{schema[0]['description']}"
                 )
-            self._execute("SELECT dolt_add('-A');")
-            self._execute("SELECT dolt_commit('-m', 'resolved merge conflicts');")
-            info["resolved"] = "ours"
+            info.update(self._resolve_conflicts(into, on_conflict))
+            rows = self._execute("SELECT dolt_commit('-Am', %s);", (message,))
+            info["hash"] = _first(rows[0][0]) if rows else ""
         return info
 
-    def _rebase_impl(self, ref: Ref, onto: Ref) -> None:
+    def _rebase_impl(self, ref: Ref, onto: Ref, on_conflict="ours") -> dict:
         self._on(ref)
-        self._execute("SELECT dolt_rebase('-i', %s);", (self._spec(onto),))
-        self._execute("SELECT dolt_rebase('--continue');")
+        self._allow_conflicts()
+        info = {"conflicts": 0, "conflict_tables": [], "resolved": "",
+                "up_to_date": False}
+        # dolt_rebase refuses to start with uncommitted changes.
+        self._execute("SELECT dolt_add('-A');")
+        try:
+            self._execute("SELECT dolt_commit('-m', 'pre-rebase commit');")
+        except Exception as e:
+            if "nothing to commit" not in str(e).lower():
+                raise
+        try:
+            self._execute("SELECT dolt_rebase('-i', %s);", (self._spec(onto),))
+        except Exception as e:
+            if "identify any commits" in str(e).lower():
+                # Nothing to replay: ref is already on top of onto.
+                info["up_to_date"] = True
+                return info
+            raise
+        plan = self._execute("SELECT COUNT(*) FROM dolt_rebase;")
+        rounds = int(plan[0][0]) + 1 if plan else 2
+        for _ in range(rounds):
+            try:
+                self._execute("SELECT dolt_rebase('--continue');")
+                self._current_ref = Ref(ref.branch)
+                return info
+            except Exception as e:
+                msg = str(e).lower()
+                if "conflict" not in msg:
+                    self._abort_rebase()
+                    raise
+                if "automatically aborted" in msg or not self._conflict_tables():
+                    # Schema conflict: Dolt aborts the rebase itself and
+                    # leaves the branch as it was.
+                    self._current_ref = None
+                    raise RuntimeError(f"rebase aborted: {e}")
+                resolved = self._resolve_conflicts(ref, on_conflict)
+                info["conflicts"] += 1
+                info["conflict_tables"] = sorted(
+                    set(info["conflict_tables"]) | set(resolved["conflict_tables"])
+                )
+                info["resolved"] = resolved["resolved"]
+                self._execute("SELECT dolt_add('-A');")
+        self._abort_rebase()
+        raise RuntimeError("rebase did not finish after resolving conflicts")
+
+    def _abort_rebase(self) -> None:
+        """Abort a rebase; a failed conflict resolution can leave the
+        replay's merge open, which must be aborted first."""
+        rb = "SELECT dolt_rebase('--abort');"
+        mg = "SELECT dolt_merge('--abort');"
+        for stmt in (rb, mg, rb):
+            try:
+                self._execute(stmt)
+                if stmt == rb:
+                    break
+            except Exception:
+                pass
+        self._current_ref = None  # Dolt leaves us on dolt_rebase_<branch>
 
     def _revert_impl(self, ref: Ref, commit: str) -> None:
         self._on(ref)

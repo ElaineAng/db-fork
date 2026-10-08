@@ -397,7 +397,13 @@ class BackendManager:
         config = self.config
         backend = config.backend
         db_name = config.db_name
-        require_db_setup = config.database_setup.WhichOneof("source") == "sql_dump"
+        source = config.database_setup.WhichOneof("source")
+        # An existing database is reused as is; a sql_dump is loaded; a
+        # "generated" (or unset) source gets an empty database the caller
+        # populates (the macrobench schema generators).
+        require_db_setup = source != "existing_db"
+        sql_dump_path = (config.database_setup.sql_dump.sql_dump_path
+                         if source == "sql_dump" else None)
 
         info = BackendInfo()
 
@@ -470,24 +476,18 @@ class BackendManager:
         # Create database and load schema if needed
         if require_db_setup and backend == tp.Backend.DOLT_MYSQL:
             # Not a Postgres server, so psql/psycopg2 can't be used to set it up.
-            dolt_mysql.setup_database(
-                db_name, config.database_setup.sql_dump.sql_dump_path
-            )
+            dolt_mysql.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.SEEKDB:
-            seekdb.setup_database(
-                db_name, config.database_setup.sql_dump.sql_dump_path
-            )
+            seekdb.setup_database(db_name, sql_dump_path)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
-            # Load SQL dump
-            db_uri = self._get_connection_uri(info)
-            sql_dump_path = config.database_setup.sql_dump.sql_dump_path
-            load_sql_file(db_uri, sql_dump_path)
-
-            # Commit schema changes for Dolt
-            if backend == tp.Backend.DOLT:
-                commit_dolt_schema(db_uri)
+            if sql_dump_path:
+                db_uri = self._get_connection_uri(info)
+                load_sql_file(db_uri, sql_dump_path)
+                # Commit schema changes for Dolt
+                if backend == tp.Backend.DOLT:
+                    commit_dolt_schema(db_uri)
 
         info.root_branch_name = info.default_branch_name
         self.backend_info = info

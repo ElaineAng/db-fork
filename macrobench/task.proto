@@ -2,6 +2,22 @@ syntax = "proto3";
 
 package macrobench;
 
+// ============================================================================
+// Macrobenchmark configuration: one scenario (workload) over one schema.
+//
+// A run is described by
+//   * database_setup  -- where the database lives and how it is created;
+//   * schema          -- the base schema (CH-benCHmark by default, generated
+//                        at a scale factor) plus per-scenario extensions;
+//   * workload        -- which scenario runs, its structural parameters
+//                        (branch-op intensity) and the data-op intensity
+//                        (how much SQL each exec() step issues, how much
+//                        concurrent spine traffic there is).
+//
+// Each scenario ships two textprotos in macrobench/configs: <name>.textproto
+// with the paper's parameters and <name>_mini.textproto for smoke runs.
+// ============================================================================
+
 // All supported database backends (mirrors microbench)
 enum Backend {
     NEON = 0;
@@ -12,27 +28,25 @@ enum Backend {
     SEEKDB = 8;
 }
 
-// The five representative workflow categories from Section 3.1
-enum WorkflowType {
-    SOFTWARE_DEV = 0;
-    FAILURE_REPRO = 1;
-    DATA_CLEANING = 2;
-    MCTS = 3;
-    SIMULATION = 4;
-}
+// ---------------------------------------------------------------------------
+// Database setup
+// ---------------------------------------------------------------------------
 
-// Configuration for reusing an existing database
+// Reuse an existing database (schema and data already in place).
 message ExistingDatabase {
     string branch_id = 1;
     string neon_project_id = 2;
 }
 
-// Configuration for creating database from SQL dump
+// Create the database from a SQL dump (Postgres backends: loaded with psql).
 message SqlDump {
     string sql_dump_path = 1;
 }
 
-// Database setup configuration
+// Create an empty database and let the schema generators populate it.
+// This is the default when no source is set.
+message GeneratedData {}
+
 message DatabaseSetup {
     string db_name = 1;
     bool cleanup = 2;
@@ -40,40 +54,223 @@ message DatabaseSetup {
     oneof source {
         ExistingDatabase existing_db = 3;
         SqlDump sql_dump = 4;
+        GeneratedData generated = 5;
     }
 }
 
-// Setup parameters (Section 3.3, Table 1 "Setup" group)
-message SetupParams {
-    int32 workers = 1;              // T: number of worker threads
-    int32 total_steps = 2;          // S: steps per worker (round-robin)
-    reserved 3;                     // was db_size
-    int32 root_fanout = 4;          // F_r: max children of root node
-    int32 max_depth = 5;            // D: max nesting level
-    int32 inner_fanout = 6;         // F_i: max children of inner nodes
-    int32 cross_branch_queries = 7; // C: cross-branch queries spread over S steps
-    int32 db_scale = 8;             // Scale factor = num warehouses (10: 10 WH, 1K items, 100 cust/district)
+// ---------------------------------------------------------------------------
+// Schema and seed data
+// ---------------------------------------------------------------------------
+
+enum BaseSchema {
+    CH_BENCH = 0;   // CH-benCHmark: TPC-C tables + region/nation/supplier
+    NO_BASE = 1;    // extension tables only (S2, S3 start without CH data)
 }
 
-// Per-step parameters (Section 3.3, Table 1 "Per-step" group)
-message StepParams {
-    int32 data_mutations = 1;   // M_d: data-mutation statements per step
-    int32 schema_changes = 2;   // M_s: schema-change statements per step
-    int32 eval_queries = 3;     // Q_v: evaluation queries per step
-    float prune_prob = 4;       // gamma: probability of pruning after evaluation
+// Per-scenario extension tables (see macrobench/schema/*.sql).
+enum SchemaExtension {
+    EXT_UNSPECIFIED = 0;
+    RL_ENV_EXT = 1;        // rl_task
+    CONTEXT_MGMT_EXT = 2;  // turn, tool_call, note
+    MULTI_AGENT_EXT = 3;   // task, dependency
+    DEV_AGENT_EXT = 4;     // migration_log
+    OPS_AGENT_EXT = 5;     // deploy_log
+    DATA_AGENT_EXT = 6;    // daily_revenue, customer_summary, nation_sales, batch_manifest
+}
+
+message SchemaConfig {
+    BaseSchema base = 1;
+
+    // W: number of warehouses. Districts are always 10 per warehouse and
+    // stock is one row per (warehouse, item).
+    int32 scale_factor = 2;
+    // Row-density knobs; 0 means the TPC-C default (100000 items, 3000
+    // customers and 3000 orders per district, 10000 suppliers). Mini
+    // configs lower these so a run seeds in seconds.
+    int32 items = 3;
+    int32 customers_per_district = 4;
+    int32 orders_per_district = 5;
+    int32 suppliers = 6;
+
+    // Extension tables to create. Empty means "the scenario's own".
+    repeated SchemaExtension extensions = 7;
+    // CH foreign keys slow seeding and merging; skip them if not needed.
+    bool skip_foreign_keys = 8;
+    // Extra DDL applied after the base schema and extensions.
+    string custom_ddl_path = 9;
+    // Rows per INSERT statement while seeding (0 = 500).
+    int32 seed_batch_rows = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Workload
+// ---------------------------------------------------------------------------
+
+// Branch-op intensity shared by every scenario. The structural parameters
+// (how many branches, how deep, how many rounds) are scenario-specific and
+// live in the scenario message.
+message BranchOps {
+    // Data-op steps between commits on a working branch (0 or 1 = commit
+    // after every step).
+    int32 commit_interval = 1;
+    // Steps a branch outlives its purpose before it is deleted (S2 candidate
+    // retention, S4 review phase tail, ...).
+    int32 retention_steps = 2;
+    // Cap on live branches (Neon allows 20); 0 = no cap. Workers wait for a
+    // slot before branching.
+    int32 max_live_branches = 3;
+    // Skip every delete (keeps the history for inspection).
+    bool keep_branches = 4;
+}
+
+// Data-op (exec) intensity shared by every scenario.
+message DataOps {
+    // SQL statements issued per exec() step on a working branch.
+    int32 statements_per_step = 1;
+    // Rows a write statement touches (range of keys per UPDATE/INSERT).
+    int32 rows_per_write = 2;
+    // Share of a step's statements that are writes (the rest are reads).
+    float write_fraction = 3;
+    // Probability that a step also includes a schema change.
+    float ddl_fraction = 4;
+    // Concurrent scenario workers (agents, pipelines, rollouts); 0 or 1 =
+    // sequential.
+    int32 worker_threads = 5;
+    // Background threads running TPC-C style traffic on the spine for the
+    // whole run; 0 = no spine load.
+    int32 spine_clients = 6;
+    // Share of spine traffic that is CH analytical queries (rest TPC-C).
+    float analytical_fraction = 7;
+    // Transactions per spine client; 0 = until the scenario finishes.
+    int32 spine_txn_limit = 8;
+}
+
+// S1 Agentic RL environment: T task states, G rollout leaves per task,
+// step budget S; rollouts fork from recorded steps.
+message RlEnvParams {
+    int32 tasks = 1;              // T
+    int32 group_size = 2;         // G: leaves per task
+    int32 step_budget = 3;        // S: max trajectory length
+    // Rollouts launched per round (default G). Rounds repeat until G leaves
+    // exist; later rounds fork from random recorded steps.
+    int32 rollouts_per_round = 4;
+    // Probability a new rollout forks from a random recorded step rather
+    // than from the task commit (0 = always the task commit).
+    float historical_fork_prob = 5;
+}
+
+// S2 Agent context management: a long-lived spine with periodic compaction.
+message ContextMgmtParams {
+    int32 compaction_interval = 1;  // interaction steps between compactions
+    int32 fanout = 2;               // candidate branches per compaction (< 10)
+    int32 compaction_cycles = 3;    // how many compaction points
+    // 1-based compaction cycle whose selected strategy is later rejected
+    // (reverted, then rebased onto a retained alternative); 0 = never.
+    int32 rejected_cycle = 4;
+}
+
+enum ResolutionPolicy {
+    FIXED_WORKFLOW = 0;   // spine wins rows; union-without-cycles on edges
+    LLM_ASSISTED = 1;     // reserved; rejected at config time
+}
+
+// S3 Multi-agent collaboration: N agents branch from a checkpoint, revise
+// the plan, and merge back with conflicts.
+message MultiAgentParams {
+    int32 agents = 1;                    // N
+    int32 rounds = 2;                    // checkpoints to collaborate on
+    // Share of an agent's edited task rows that every other agent also
+    // edits (sets the conflict rate).
+    float key_overlap = 3;
+    ResolutionPolicy resolution_policy = 4;
+    // Drop a shared table (schema conflict) instead of a private scratch
+    // table (data conflict only).
+    bool shared_scratch_table = 5;
+    // Task/progress updates the spine applies while agents work.
+    int32 spine_updates_per_round = 6;
+}
+
+// S4 Development agent: dev branches off a busy production spine, rebased
+// onto it, discarded without merging.
+message DevAgentParams {
+    int32 dev_branches = 1;            // branches created over the run
+    int32 concurrent_branches = 2;     // alive at once (arrival control)
+    int32 dev_phase_steps = 3;         // hot steps
+    int32 review_phase_steps = 4;      // quiet steps
+    float review_modification_prob = 5;
+    int32 rebases_per_branch = 6;      // 1 or 2
+    // Spine schema change every this many dev steps (0 = none).
+    int32 spine_migration_interval = 7;
+    // Probability the spine's migration targets the table the branch
+    // alters, and share of backfilled rows whose c_data the branch also
+    // rewrites (both create rebase conflicts).
+    float key_overlap = 8;
+}
+
+// S5 Operations agent: dense commits on the spine, a corrupting deploy,
+// investigation branches at historical commits, hard reset (PITR).
+message OpsAgentParams {
+    int32 spine_commits = 1;           // commits on the spine before the incident
+    // How many commits before the head the bad deployment lands.
+    int32 fault_commit_offset = 2;
+    int32 investigation_branches = 3;
+    // Investigation branches fork from the last history_offset commits.
+    int32 history_offset = 4;
+    bool load_during_investigation = 5;
+}
+
+// S6 Data agent: ingest batches on branches, derived tables, reset on
+// failure, rebase + merge into the warehouse.
+message DataAgentParams {
+    int32 batches = 1;
+    int32 concurrent_batches = 2;
+    int32 batch_rows = 3;              // order rows per batch
+    int32 days_back = 4;               // D: how far back a batch reaches
+    int32 steps_per_batch = 5;         // exec steps a batch is split into
+    float reset_prob = 6;              // p: reset to an earlier commit
+}
+
+message Workload {
+    BranchOps branch_ops = 1;
+    DataOps data_ops = 2;
+    // Multipliers applied on top of the explicit knobs before the run
+    // starts (0 or 1 = unchanged). branch_intensity scales how many branch
+    // verbs the scenario issues: the counts of branches, rounds, forks,
+    // rebases and investigation points, and it divides commit_interval.
+    // data_intensity scales how much SQL runs per branch: statements per
+    // step, rows per write, spine clients, and the scenario's per-branch
+    // step and row counts. See macrobench/intensity.py for the exact
+    // field lists; the effective values are written to the e2e stats.
+    float branch_intensity = 3;
+    float data_intensity = 4;
+
+    oneof scenario {
+        RlEnvParams rl_env = 10;
+        ContextMgmtParams context_mgmt = 11;
+        MultiAgentParams multi_agent = 12;
+        DevAgentParams dev_agent = 13;
+        OpsAgentParams ops_agent = 14;
+        DataAgentParams data_agent = 15;
+    }
+}
+
+// Sentinel-based correctness checks (on by default).
+message Invariants {
+    bool disabled = 1;
+    // Stop the run at the first failed check instead of recording it.
+    bool fail_fast = 2;
 }
 
 // Top-level macrobenchmark configuration
 message MacroBenchConfig {
     string run_id = 1;
     Backend backend = 2;
-    WorkflowType workflow = 3;
-    DatabaseSetup database_setup = 4;
-    SetupParams setup = 5;
-    StepParams step = 6;
-    // field 7 removed (was BackgroundParams background)
-    // field 8 removed (was autocommit; every statement now autocommits)
-
-    // Whether to measure storage (disk_size_before/after) around each timed operation.
-    bool measure_storage = 9;
+    DatabaseSetup database_setup = 3;
+    SchemaConfig schema = 4;
+    Workload workload = 5;
+    // Measure storage (disk_size_before/after) around each timed operation.
+    bool measure_storage = 6;
+    // Seed for every random choice in the run (0 = 42).
+    int32 seed = 7;
+    Invariants invariants = 8;
 }

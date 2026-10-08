@@ -41,10 +41,21 @@ Each statement the script issues through ``db.sql()`` is timed and recorded
 as its own row (READ/INSERT/UPDATE/DDL). Per ref, exec() also records a
 CONNECT row when it had to switch the connection, and one EXEC row with the
 script's total latency and the storage delta. Every statement autocommits.
+
+Conflicts
+---------
+``merge()`` and ``rebase()`` take ``on_conflict``: "ours" (default, keep the
+target branch's version), "theirs", or a callable ``resolve(db, conflicts)``
+that the backend calls on the half-merged working set with a Session and a
+list of ``{"table": name, "rows": [...]}`` entries (row dicts carry the
+backend's base/our/their columns). The callable resolves conflicts with SQL
+through ``db.sql()``; whatever it leaves unresolved is resolved as "ours".
+Schema conflicts cannot be resolved this way: the backend aborts the
+operation and the verb is recorded as FAILED with the reason.
 """
 
-import asyncio
 import inspect
+import contextlib
 import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -121,6 +132,19 @@ class Ref:
 
 
 RefLike = Union[str, Ref]
+
+# "ours" | "theirs" | resolve(db: Session, conflicts: list[dict]) -> dict | None
+ConflictPolicy = Union[str, Callable[[Any, list], Any]]
+CONFLICT_POLICIES = ("ours", "theirs")
+
+
+def check_conflict_policy(on_conflict: ConflictPolicy) -> ConflictPolicy:
+    if callable(on_conflict) or on_conflict in CONFLICT_POLICIES:
+        return on_conflict
+    raise ValueError(
+        f"on_conflict must be one of {CONFLICT_POLICIES} or a callable, "
+        f"got {on_conflict!r}"
+    )
 
 
 @dataclass
@@ -233,6 +257,26 @@ class _SessionBase:
 class Session(_SessionBase):
     """What a sync script sees as ``db``."""
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """Run the block inside BEGIN ... COMMIT; ROLLBACK if it raises.
+        The control statements are recorded untimed. Backends that reject
+        BEGIN (none of the current ones) fall back to autocommit."""
+        try:
+            self.sql("BEGIN", timed=False)
+        except Exception:
+            yield
+            return
+        try:
+            yield
+        except BaseException:
+            try:
+                self.sql("ROLLBACK", timed=False)
+            except Exception:
+                pass
+            raise
+        self.sql("COMMIT", timed=False)
+
     def sql(self, query: str, vars=None, timed: bool = None):
         """Run one statement on this session's connection and return its
         rows (None for statements without a result set). Records a row and
@@ -261,6 +305,24 @@ class Session(_SessionBase):
 
 class AsyncSession(_SessionBase):
     """What an async script sees as ``db``."""
+
+    @contextlib.asynccontextmanager
+    async def transaction(self):
+        """Async twin of :meth:`Session.transaction`."""
+        try:
+            await self.sql("BEGIN", timed=False)
+        except Exception:
+            yield
+            return
+        try:
+            yield
+        except BaseException:
+            try:
+                await self.sql("ROLLBACK", timed=False)
+            except Exception:
+                pass
+            raise
+        await self.sql("COMMIT", timed=False)
 
     async def sql(self, query: str, vars=None, timed: bool = None):
         if timed is not None:
@@ -387,11 +449,21 @@ class DBToolSuite(ABC):
         """Most recent ``limit`` commits reachable from ``ref``."""
         raise self._unsupported("log")
 
-    def _merge_impl(self, into: Ref, source: Ref, message: str) -> Any:
+    def _merge_impl(self, into: Ref, source: Ref, message: str,
+                    on_conflict: ConflictPolicy = "ours") -> Any:
+        """Merge ``source`` into ``into``; resolve conflicts per
+        ``on_conflict`` (see the module docstring)."""
         raise self._unsupported("merge")
 
-    def _rebase_impl(self, ref: Ref, onto: Ref) -> None:
+    def _rebase_impl(self, ref: Ref, onto: Ref,
+                     on_conflict: ConflictPolicy = "ours") -> Any:
         raise self._unsupported("rebase")
+
+    def _conflict_session(self, ref: Ref, label: str = "resolve") -> "Session":
+        """Session a conflict-resolution callable gets. Its statements are
+        recorded with the given label inside the verb's latency."""
+        return Session(self, self.conn, ref, [ref],
+                       self.result_collector.next_exec_id(), True, label, 0)
 
     def _revert_impl(self, ref: Ref, commit: str) -> None:
         raise self._unsupported("revert")
@@ -559,27 +631,34 @@ class DBToolSuite(ABC):
         )
 
     def merge(self, into: RefLike, source: RefLike, message: str = "", *,
-              timed: bool = True, storage: bool = None, label: str = "",
+              on_conflict: ConflictPolicy = "ours", timed: bool = True,
+              storage: bool = None, label: str = "",
               raise_on_error: bool = False) -> OpResult:
-        """Merge ``source`` into ``into`` (value is backend-specific)."""
+        """Merge ``source`` into ``into``. The value is a backend-specific
+        dict; Dolt reports ``fast_forward``, ``conflicts`` and
+        ``conflict_tables``. See the module docstring for ``on_conflict``."""
+        check_conflict_policy(on_conflict)
         dst, fd = self._resolve(into)
         src, fs = self._resolve(source)
         return self._run_verb(
-            "merge", lambda: self._merge_impl(dst, src, message), dst,
-            timed=timed, storage=storage, label=label,
+            "merge", lambda: self._merge_impl(dst, src, message, on_conflict),
+            dst, timed=timed, storage=storage, label=label,
             raise_on_error=raise_on_error, fallback=fd or fs,
         )
 
-    def rebase(self, ref: RefLike, onto: RefLike, *, timed: bool = True,
+    def rebase(self, ref: RefLike, onto: RefLike, *,
+               on_conflict: ConflictPolicy = "ours", timed: bool = True,
                storage: bool = None, label: str = "",
                raise_on_error: bool = False) -> OpResult:
-        """Replay ``ref``'s commits on top of ``onto``."""
+        """Replay ``ref``'s commits on top of ``onto``, resolving conflicts
+        per ``on_conflict`` (see the module docstring)."""
+        check_conflict_policy(on_conflict)
         r, fr = self._resolve(ref)
         o, fo = self._resolve(onto)
         return self._run_verb(
-            "rebase", lambda: self._rebase_impl(r, o), r, timed=timed,
-            storage=storage, label=label, raise_on_error=raise_on_error,
-            fallback=fr or fo,
+            "rebase", lambda: self._rebase_impl(r, o, on_conflict), r,
+            timed=timed, storage=storage, label=label,
+            raise_on_error=raise_on_error, fallback=fr or fo,
         )
 
     def revert(self, ref: RefLike, commit: str, *, timed: bool = True,

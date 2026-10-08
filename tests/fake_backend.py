@@ -26,6 +26,10 @@ class _Cursor:
         self._cur.close()
 
     def execute(self, q, vars=None):
+        # Scripts use DB-API "%s" placeholders (psycopg2/pymysql); sqlite
+        # wants "?".
+        if vars is not None and "%s" in q:
+            q = q.replace("%s", "?")
         self._cur.execute(q, vars if vars is not None else ())
 
     def fetchall(self):
@@ -74,6 +78,8 @@ class _AsyncCursor:
         self._cur.close()
 
     async def execute(self, q, vars=None):
+        if vars is not None and "%s" in q:
+            q = q.replace("%s", "?")
         self._cur.execute(q, vars if vars is not None else ())
         self.description = self._cur.description
 
@@ -179,8 +185,12 @@ class FakeSuite(DBToolSuite):
             self.conn = self.branches[ref.branch]
 
     def _delete_impl(self, ref: Ref) -> None:
+        if ref.branch == "main":
+            raise ValueError("cannot delete the default branch")
         if self._current_ref and self._current_ref.branch == ref.branch:
-            raise ValueError("cannot delete the connected branch")
+            # Like Dolt: move the connection off the branch first.
+            self._connect_impl(Ref("main"))
+            self._current_ref = Ref("main")
         del self.branches[ref.branch]
 
     def list_branches(self):

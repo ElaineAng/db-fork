@@ -119,8 +119,9 @@ def load_sql_dump(db_name: str, sql_path: str) -> None:
         conn.close()
 
 
-def setup_database(db_name: str, sql_path: str) -> None:
-    """(Re)create db_name, with no branches, and load sql_path into it."""
+def setup_database(db_name: str, sql_path: str = None) -> None:
+    """(Re)create db_name, with no branches, and load sql_path (if given)
+    into it."""
     drop_database(db_name)
     conn = connect()
     try:
@@ -129,7 +130,8 @@ def setup_database(db_name: str, sql_path: str) -> None:
         print("Database created successfully.")
     finally:
         conn.close()
-    load_sql_dump(db_name, sql_path)
+    if sql_path:
+        load_sql_dump(db_name, sql_path)
 
 
 def drop_database(db_name: str) -> None:
@@ -227,7 +229,8 @@ class SeekDBToolSuite(DBToolSuite):
             f"TO {_quote(branch_db_name(self.db_name, name))};"
         )
 
-    def _merge_impl(self, into: Ref, source: Ref, message: str) -> dict:
+    def _merge_impl(self, into: Ref, source: Ref, message: str,
+                    on_conflict="ours") -> dict:
         """Merge source into target one table at a time.
 
         DRAFT. SeekDB's merge differs from Dolt's, so results aren't directly
@@ -244,7 +247,8 @@ class SeekDBToolSuite(DBToolSuite):
         - Tables whose schemas differ (error 4029), that exist only on the
           source, or that have no primary key are skipped with a warning.
         - Not transactional: each MERGE TABLE takes effect at once.
-        - ``message`` is unused (no commits).
+        - ``message`` is unused (no commits); ``on_conflict`` is ignored
+          (STRATEGY OURS always).
 
         Returns {"fast_forward": False, "conflicts": None, "hash": "",
                  "merged_tables": [...], "skipped_tables": {table: reason}}.

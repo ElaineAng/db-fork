@@ -79,11 +79,12 @@ def test_branch_commit_log_diff_reset_delete(suite):
     # reset feat back to the init snapshot
     assert suite.reset("feat", log.value[1]["hash"]).ok
     assert suite.exec(["SELECT count(*) FROM t"], refs=["feat"])[0].rows == [(1,)]
-    # delete: fails while connected, ok after switching away
-    assert suite.delete("feat").failed
-    suite.exec([], refs=["main"])
+    # delete: the backend moves the connection off the branch first
+    assert suite.current_ref == Ref("feat")
     assert suite.delete("feat").ok
+    assert suite.current_ref == Ref("main")
     assert "feat" not in suite.list_branches()
+    assert suite.delete("main").failed
 
 
 def test_exec_rows_and_statement_breakdown(suite):

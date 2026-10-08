@@ -1,0 +1,10 @@
+# S3 Multi-agent collaboration: 128 agents merging into a shared plan.
+run_id: "macro_multi_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_multi_agent" cleanup: true generated {} }
+schema { base: NO_BASE }
+workload {
+  branch_ops { commit_interval: 1 }
+  data_ops { statements_per_step: 8 rows_per_write: 10 write_fraction: 0.6 worker_threads: 16 }
+  multi_agent { agents: 128 rounds: 4 key_overlap: 0.3 resolution_policy: FIXED_WORKFLOW spine_updates_per_round: 200 }
+}

@@ -1,0 +1,10 @@
+# S3 Multi-agent collaboration, smoke size.
+run_id: "macro_multi_agent_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_multi_agent_mini" cleanup: true generated {} }
+schema { base: NO_BASE }
+workload {
+  branch_ops { commit_interval: 1 }
+  data_ops { statements_per_step: 4 rows_per_write: 5 write_fraction: 0.6 worker_threads: 2 }
+  multi_agent { agents: 4 rounds: 2 key_overlap: 0.5 resolution_policy: FIXED_WORKFLOW spine_updates_per_round: 10 }
+}
