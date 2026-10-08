@@ -354,8 +354,9 @@ class ResultCollector:
             "op_status_counts": counts,
         }
 
-    def write_to_parquet(self, filename: str = None):
-        """Write all collected rows to a parquet file, appending if it exists."""
+    def write_to_parquet(self, filename: str = None, append: bool = True):
+        """Write all collected rows to a parquet file, appending if it
+        exists (``append=False`` replaces it: one file per run)."""
         if not self.results:
             print("No results to write.")
             return
@@ -398,7 +399,7 @@ class ResultCollector:
 
         new_table = pa.Table.from_pylist(rows)
 
-        if os.path.exists(filepath):
+        if append and os.path.exists(filepath):
             try:
                 existing_table = pq.read_table(filepath)
                 combined_table = pa.concat_tables(

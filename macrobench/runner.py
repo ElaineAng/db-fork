@@ -327,7 +327,7 @@ def main(argv=None):
         if ctx.metrics:
             print(f"Metrics: {json.dumps(ctx.metrics, default=str)}")
 
-        collector.write_to_parquet()
+        collector.write_to_parquet(append=False)
 
         for attempt in range(2):
             try:

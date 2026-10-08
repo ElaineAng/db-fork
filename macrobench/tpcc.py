@@ -36,11 +36,14 @@ def new_order(db, rng, scale: CHScale, w=None, d=None, c=None, n_items=None):
     d = d or rng.randint(1, DISTRICTS_PER_WAREHOUSE)
     c = c or rng.randint(1, scale.customers_per_district)
     n_items = n_items or rng.randint(5, 15)
-    rows = db.sql("SELECT d_next_o_id, d_tax FROM district WHERE d_w_id = %s AND d_id = %s",
-                  (w, d))
-    o_id = int(rows[0][0])
+    # Increment first: the row lock serialises concurrent new_orders on the
+    # district under read-committed backends, and the read then sees our
+    # own increment, so two clients never take the same order id.
     db.sql("UPDATE district SET d_next_o_id = d_next_o_id + 1 WHERE d_w_id = %s AND d_id = %s",
            (w, d))
+    rows = db.sql("SELECT d_next_o_id, d_tax FROM district WHERE d_w_id = %s AND d_id = %s",
+                  (w, d))
+    o_id = int(rows[0][0]) - 1
     entry = _now()
     db.sql("INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, "
            "o_ol_cnt, o_all_local) VALUES (%s, %s, %s, %s, %s, NULL, %s, 1)",

@@ -80,7 +80,7 @@ def fixed_policy(db, conflicts):
                        "WHERE task_id = %s",
                        (row.get("their_status"), row.get("their_assignee"),
                         row.get("their_version"), row.get("their_updated_step"), SENTINEL_TASK))
-        db.sql(f"DELETE FROM dolt_conflicts_{table}")
+        db.resolve(table)
         out[table] = len(cf["rows"])
     return out
 

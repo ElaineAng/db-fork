@@ -213,8 +213,14 @@ class DevAgentScenario(Scenario):
             w.commit(branch, f"dev {i} review end", label="dev_commit")
 
         # Invariant: feature data never leaks into production.
-        r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = %s",
+        # MySQL-protocol backends list every database's tables in
+        # information_schema, so count only the current one there.
+        r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables "
+                         "WHERE table_name = %s AND table_schema = DATABASE()",
                          ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
+        if not r.ok:
+            r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = %s",
+                             ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
         if r.ok and r.rows:
             tables = int(r.rows[0][0])
         else:

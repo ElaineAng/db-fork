@@ -233,6 +233,9 @@ class DoltMySQLToolSuite(DBToolSuite):
             self._execute("SET @@dolt_allow_commit_conflicts = 1;")
             self._conflicts_allowed = True
 
+    def _mark_resolved(self, session, table: str) -> None:
+        session.sql(f"DELETE FROM dolt_conflicts_{table}")
+
     def _conflict_tables(self) -> list:
         rows = self._execute('SELECT `table` FROM dolt_conflicts;')
         return [r[0] for r in rows or []]

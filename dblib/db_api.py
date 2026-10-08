@@ -49,7 +49,8 @@ target branch's version), "theirs", or a callable ``resolve(db, conflicts)``
 that the backend calls on the half-merged working set with a Session and a
 list of ``{"table": name, "rows": [...]}`` entries (row dicts carry the
 backend's base/our/their columns). The callable resolves conflicts with SQL
-through ``db.sql()``; whatever it leaves unresolved is resolved as "ours".
+through ``db.sql()`` and calls ``db.resolve(table)`` for each table it
+settled; whatever it leaves unresolved is resolved as "ours".
 Schema conflicts cannot be resolved this way: the backend aborts the
 operation and the verb is recorded as FAILED with the reason.
 """
@@ -256,6 +257,13 @@ class _SessionBase:
 
 class Session(_SessionBase):
     """What a sync script sees as ``db``."""
+
+    def resolve(self, table: str) -> None:
+        """Inside an ``on_conflict`` callable: mark ``table``'s conflicts
+        resolved as the working set now stands (Dolt clears its
+        dolt_conflicts_<table>; backends without a conflict table do
+        nothing)."""
+        self.suite._mark_resolved(self, table)
 
     @contextlib.contextmanager
     def transaction(self):
@@ -464,6 +472,10 @@ class DBToolSuite(ABC):
         recorded with the given label inside the verb's latency."""
         return Session(self, self.conn, ref, [ref],
                        self.result_collector.next_exec_id(), True, label, 0)
+
+    def _mark_resolved(self, session: "Session", table: str) -> None:
+        """Hook behind Session.resolve(); no-op unless the backend keeps a
+        per-table conflict list that must be cleared."""
 
     def _revert_impl(self, ref: Ref, commit: str) -> None:
         raise self._unsupported("revert")

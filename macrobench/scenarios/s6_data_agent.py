@@ -60,7 +60,7 @@ def additive_resolver(db, conflicts):
             vals.extend(row.get(f"our_{k}") for k in keys)
             db.sql(f"UPDATE {table} SET {', '.join(sets)} WHERE {where}", tuple(vals))
             n += 1
-        db.sql(f"DELETE FROM dolt_conflicts_{table}")
+        db.resolve(table)
         out[table] = n
     return out
 
