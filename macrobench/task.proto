@@ -6,11 +6,8 @@ package macrobench;
 enum Backend {
     NEON = 0;
     DOLT = 1;
-    KPG = 2;
     XATA = 3;
     FILE_COPY = 4;
-    TIGER = 5;
-    TXN = 6;
     DOLT_MYSQL = 7;
     SEEKDB = 8;
 }
@@ -75,7 +72,7 @@ message MacroBenchConfig {
     SetupParams setup = 5;
     StepParams step = 6;
     // field 7 removed (was BackgroundParams background)
-    bool autocommit = 8;
+    // field 8 removed (was autocommit; every statement now autocommits)
 
     // Whether to measure storage (disk_size_before/after) around each timed operation.
     bool measure_storage = 9;

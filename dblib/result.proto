@@ -2,7 +2,10 @@ syntax = "proto3";
 
 package dblib;
 
-// Result message for structured logging
+// One row per measured operation. Every git-like verb (branch, commit, ...)
+// produces one row. exec() produces a CONNECT row per branch switch, one row
+// per SQL statement the script ran (READ/INSERT/UPDATE/DDL), and one EXEC row
+// summarising the whole script run on that ref.
 message Result {
   // Unique identifier for the run
   string run_id = 1;
@@ -10,72 +13,102 @@ message Result {
   // Random seed used for the run
   int32 random_seed = 2;
 
-  // Incremental iteration number within the run
+  // Incremental row number within the run
   int32 iteration_number = 3;
-  
+
   // Type of database operation being benchmarked
   OpType op_type = 4;
-  
-  // Initial size of the database in bytes (or rows, depending on context)
-  int64 initial_db_size = 5;
-  
-  // Name of the table being operated on
-  string table_name = 6;
-  
-  // Schema of the table (DDL or schema description)
-  string table_schema = 7;
-  
+
+  // Whether the backend ran the operation, could not (UNSUPPORTED), or
+  // tried and errored (FAILED).
+  OpStatus status = 5;
+
+  // Branch (or "branch@commit") the operation targeted. For EXEC rows in
+  // multi-ref mode this is the primary ref; the others are in `refs`.
+  string ref = 6;
+  repeated string refs = 7;
+
+  // Free-form label passed by the driver (e.g. the workflow phase).
+  string label = 8;
+
+  // Groups the CONNECT, statement and EXEC rows of one exec() call.
+  int32 exec_id = 9;
+
+  // Name of the table being operated on (driver context)
+  string table_name = 10;
+
+  // Schema of the table (driver context)
+  string table_schema = 11;
+
+  // Initial size of the database in bytes (driver context)
+  int64 initial_db_size = 12;
+
   // Number of keys touched during the operation
-  int64 num_keys_touched = 8;
+  int64 num_keys_touched = 13;
 
-  // Latency for operations (in seconds)
-  double latency = 9;
+  // Latency in seconds. 0 for UNSUPPORTED rows.
+  double latency = 14;
 
-  // Disk size of the database before the operation (in bytes)
-  int64 disk_size_before = 10;
+  // Storage used before/after the operation (bytes), 0 when not measured
+  int64 disk_size_before = 15;
+  int64 disk_size_after = 16;
 
-  // Disk size of the database after the operation (in bytes)
-  int64 disk_size_after = 11;
+  // SQL statement (statement rows) or script text (EXEC rows)
+  string sql_query = 17;
 
-  // The SQL query that was executed
-  string sql_query = 12;
+  // Error message for FAILED rows, or the reason for UNSUPPORTED rows
+  string error_message = 18;
+
+  // True when a commit ref was requested on a backend without commits and
+  // the branch head was used instead.
+  bool commit_ref_fallback = 19;
 
   // Thread ID for multi-threaded benchmark runs
-  int32 thread_id = 13;
+  int32 thread_id = 20;
 
   // Number of active branches at the time of this operation
-  // (used by isolation overhead benchmark)
-  int32 branch_count = 14;
+  int32 branch_count = 21;
 
   // Step ID within the macrobenchmark workflow (-1 if not in a step)
-  int32 step_id = 15;
+  int32 step_id = 22;
 
-  // Timestamp when the operation started (Unix epoch in seconds)
-  double start_time = 16;
-
-  // Timestamp when the operation completed (Unix epoch in seconds)
-  double end_time = 17;
+  // Wall-clock start/end (Unix epoch seconds)
+  double start_time = 23;
+  double end_time = 24;
 
   // Async mode: time spent waiting for a free pool connection before the
-  // operation started (in seconds). Not included in latency. Should stay
-  // near 0 when the pool size matches concurrent_requests.
-  double pool_wait_time = 18;
+  // operation started (seconds). Not included in latency.
+  double pool_wait_time = 25;
 }
 
-// Enum for different types of database operations
 enum OpType {
   UNSPECIFIED = 0;
-  BRANCH_CREATE = 1;
-  BRANCH_CONNECT = 2;
-  READ = 3;
-  INSERT = 4;
-  UPDATE = 5;
-  COMMIT = 6;
-  DDL = 7;
-  BRANCH_DELETE = 8;
-  API_RETRY_WAIT = 9;
-  CONNECT_FIRST = 10;
-  CONNECT_MID = 11;
-  CONNECT_LAST = 12; 
-  MERGE = 13;
+
+  // Git-like verbs
+  BRANCH = 1;
+  COMMIT = 2;
+  DIFF = 3;
+  LOG = 4;
+  MERGE = 5;
+  REBASE = 6;
+  REVERT = 7;
+  RESET = 8;
+  DELETE = 9;
+
+  // exec(): connection switch, per-statement rows, and the summary row
+  CONNECT = 10;
+  READ = 11;
+  INSERT = 12;
+  UPDATE = 13;
+  DDL = 14;
+  EXEC = 15;
+
+  // Driver-side waits (e.g. backoff on API rate limits)
+  API_RETRY_WAIT = 16;
+}
+
+enum OpStatus {
+  OK = 0;
+  UNSUPPORTED = 1;
+  FAILED = 2;
 }

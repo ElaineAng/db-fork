@@ -29,4 +29,3 @@ step {
     prune_prob: 0.0     # gamma
 }
 
-autocommit: true

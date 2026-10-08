@@ -6,11 +6,8 @@ package microbench2;
 enum Backend {
   NEON = 0;
   DOLT = 1;
-  KPG = 2;
   XATA = 3;
   FILE_COPY = 4;
-  TIGER = 5;
-  TXN = 6;
   DOLT_MYSQL = 7;
   SEEKDB = 8;
 }
@@ -29,9 +26,6 @@ enum OperationType {
   BRANCH_CREATE = 10;
   BRANCH_CONNECT = 11;
   BRANCH_DELETE = 12;
-  CONNECT_FIRST = 13;
-  CONNECT_MID = 14;
-  CONNECT_LAST = 15;
 
   // DDL operations (extensible)
   DDL_ADD_INDEX = 20;
@@ -62,7 +56,6 @@ enum BranchShape {
 message ExistingDatabase {
   string branch_id = 1;
   string neon_project_id = 2;
-  string tiger_service_id = 3;
 }
 
 // SQL dump file for database initialization
@@ -136,7 +129,7 @@ message TaskConfig {
   // Scale factor (e.g., number of warehouses in TPCC schema)
   int32 scale_factor = 5;
 
-  bool autocommit = 6;
+  // field 6 removed (was autocommit; every statement now autocommits)
   int32 num_threads = 7;
   bool measure_storage = 8;
 
@@ -144,7 +137,6 @@ message TaskConfig {
   // Number of concurrent requests per thread (default 1 = synchronous)
   // When > 1, enables async mode with that many concurrent requests, each on
   // its own connection from a per-thread pool of the same size
-  // Requires autocommit = true when > 1
   int32 concurrent_requests = 10;
 
   // Run in async mode even with concurrent_requests = 1, so a sweep over

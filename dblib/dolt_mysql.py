@@ -1,12 +1,16 @@
+"""Dolt backend over the MySQL wire protocol (dolt sql-server).
+
+Same model as dblib/dolt.py with CALL syntax; multi-ref scripts address
+other branches as `<db>/<branch>`.<table>.
+"""
+
 import os
-import weakref
-from contextlib import asynccontextmanager
 
 import aiomysql
 import pymysql
 from pymysql.constants import CLIENT
 
-from dblib.db_api import DBToolSuite
+from dblib.db_api import DBToolSuite, Ref
 from dblib import mysql_common
 import dblib.result_collector as rc
 import dblib.util as dbutil
@@ -18,6 +22,7 @@ DOLT_MYSQL_PORT = int(os.environ.get("DOLT_MYSQL_PORT", "3306"))
 DOLT_MYSQL_DATA_DIR = os.path.expanduser(
     os.environ.get("DOLT_MYSQL_DATA_DIR", "~/dolt/databases")
 )
+
 
 def connect(db_name: str = None, autocommit: bool = True, **kwargs):
     """Open a PyMySQL connection to the Dolt sql-server."""
@@ -88,10 +93,9 @@ def drop_database(db_name: str) -> None:
 
 
 class DoltMySQLToolSuite(DBToolSuite):
-    """
-    A suite of tools for interacting with Dolt's MySQL-compatible sql-server
-    on a shared connection.
-    """
+    BACKEND_NAME = "dolt_mysql"
+    SUPPORTS_COMMIT_REFS = True
+    SUPPORTS_MULTI_REF_EXEC = True
 
     @classmethod
     def get_default_connection_uri(cls) -> str:
@@ -109,215 +113,217 @@ class DoltMySQLToolSuite(DBToolSuite):
         cls,
         collector: rc.ResultCollector,
         db_name: str,
-        autocommit: bool,
-        default_branch_name: str,
+        default_branch_name: str = "main",
+        measure_storage: bool = False,
     ):
-        conn = connect(db_name, autocommit=autocommit)
-        return cls(
-            connection=conn,
-            collector=collector,
-            autocommit=autocommit,
-            default_branch_name=default_branch_name,
-            db_name=db_name,
-        )
+        return cls(connect(db_name), collector, db_name, default_branch_name,
+                   measure_storage)
 
     def __init__(
         self,
         connection,
         collector: rc.ResultCollector,
-        autocommit: bool,
-        default_branch_name: str,
-        db_name: str = None,
+        db_name: str,
+        default_branch_name: str = "main",
+        measure_storage: bool = False,
     ):
-        super().__init__(connection, result_collector=collector)
-        # Branch checked out on the sync connection, tracked client-side so
-        # get_current_branch() needs no round trip (it runs before most ops).
-        # Only the sync checkout methods below change it.
-        self._current_branch = None
-        self._connect_branch_impl(default_branch_name)
-        self.autocommit = autocommit
+        super().__init__(connection, collector, measure_storage)
         self.db_name = db_name
-        # Set by open_async_pool().
-        self._async_branch = None
-        self._configured_conns = None
+        self.default_branch = default_branch_name
+        self._temp_branches: set = set()
+        self._connect_impl(Ref(default_branch_name))
+        self._current_ref = Ref(default_branch_name)
 
-    def _get_table_columns(self, table_name: str) -> list[tuple]:
-        rows = super().execute_sql(mysql_common.TABLE_COLUMNS_QUERY, (table_name,))
+    # ------------------------------------------------------------------
+
+    def _checkout(self, branch: str) -> None:
+        self._execute("CALL DOLT_CHECKOUT(%s);", (branch,))
+
+    def _temp_branch_name(self, commit: str) -> str:
+        return f"_at_{commit[:12]}_t{rc.get_current_thread_id()}"
+
+    def _on(self, ref: Ref) -> None:
+        if self._current_ref != Ref(ref.branch):
+            self._checkout(ref.branch)
+            self._current_ref = Ref(ref.branch)
+
+    @staticmethod
+    def _spec(ref: Ref) -> str:
+        return ref.commit or ref.branch
+
+    def _rows_as_dicts(self, query: str, vars=None) -> list:
+        with self.conn.cursor() as cur:
+            cur.execute(query, vars)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def _get_table_columns(self, table_name: str) -> list:
+        rows = self._execute(mysql_common.TABLE_COLUMNS_QUERY, (table_name,))
         return mysql_common.normalize_column_types(rows)
 
-    def list_branches(self) -> list[str]:
-        cmd = "SELECT name FROM dolt_branches;"
-        return [branch[0] for branch in super().execute_sql(cmd)]
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
 
-    def _prepare_commit(self, message: str = "") -> None:
-        try:
-            super().execute_sql("CALL DOLT_ADD('-A');")
-            super().execute_sql("CALL DOLT_COMMIT('-m', %s);", (message,))
-        except Exception as e:
-            # Ignore commit errors (e.g., no changes to commit).
-            print(f"Commit failed: {e}")
-
-    def _create_branch_impl(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """
-        Creates a new branch in the Dolt database.
-        """
-        # Only checkout to parent if specified, otherwise create from current branch
-        if parent_id:
-            self._connect_branch_impl(parent_id)
-        super().execute_sql("CALL DOLT_CHECKOUT('-b', %s);", (branch_name,))
-        # DOLT_CHECKOUT('-b') also switches the session to the new branch.
-        self._current_branch = branch_name
-
-    def _connect_branch_impl(self, branch_name: str) -> None:
-        """
-        Connects to an existing branch in the Dolt database to allow reads and
-        writes on that branch.
-        """
-        super().execute_sql("CALL DOLT_CHECKOUT(%s);", (branch_name,))
-        self._current_branch = branch_name
-
-    def _get_current_branch_impl(self) -> tuple[str, str]:
-        # Dolt's branch name is unique and can be used as an ID.
-        return (self._current_branch, self._current_branch)
-
-    def _merge_branch_impl(self, source_branch: str, message: str = "") -> dict:
-        """Merge source_branch into the currently checked-out branch.
-
-        Mirrors DoltToolSuite._merge_branch_impl. Returns
-        {"fast_forward": bool, "conflicts": int, "hash": str}.
-        """
-        # Ensure any pending changes are committed before merge.
-        try:
-            super().execute_sql("CALL DOLT_ADD('-A');")
-            super().execute_sql(
-                "CALL DOLT_COMMIT('-m', 'pre-merge commit', '--allow-empty');"
-            )
-        except Exception:
-            pass  # No pending changes is fine.
-
-        # With autocommit on, Dolt rolls back a merge that produces conflicts
-        # unless this is set, so we could never reach the resolution below.
-        super().execute_sql("SET @@dolt_allow_commit_conflicts = 1;")
-
-        if message:
-            result = super().execute_sql(
-                "CALL DOLT_MERGE(%s, '-m', %s);", (source_branch, message)
-            )
-        else:
-            result = super().execute_sql("CALL DOLT_MERGE(%s);", (source_branch,))
-
-        # DOLT_MERGE returns (hash, fast_forward, conflicts, message)
-        info = {}
-        if result and result[0]:
-            row = result[0]
-            info["hash"] = row[0] if len(row) > 0 else ""
-            info["fast_forward"] = bool(row[1]) if len(row) > 1 else False
-            info["conflicts"] = int(row[2]) if len(row) > 2 else 0
-
-        # Auto-resolve conflicts with --ours strategy if any.
-        if info.get("conflicts", 0) > 0:
-            try:
-                tables = super().execute_sql("SELECT `table` FROM dolt_conflicts;")
-                for (table_name,) in tables or []:
-                    super().execute_sql(
-                        "CALL DOLT_CONFLICTS_RESOLVE('--ours', %s);", (table_name,)
-                    )
-                super().execute_sql("CALL DOLT_ADD('-A');")
-                super().execute_sql(
-                    "CALL DOLT_COMMIT('-m', 'resolved merge conflicts');"
-                )
-            except Exception as e:
-                print(f"Warning: conflict resolution failed: {e}")
-
-        return info
-
-    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
-        """Delete a branch; must NOT be on the branch being deleted."""
-        super().execute_sql("CALL DOLT_BRANCH('-D', %s);", (branch_name,))
-
-    def get_total_storage_bytes(self) -> int:
-        """Get total storage by measuring the Dolt data directory on disk."""
+    def _storage_bytes(self) -> int:
         if not self.db_name:
             return 0
         return dbutil.get_directory_size_bytes(
             os.path.join(DOLT_MYSQL_DATA_DIR, self.db_name)
         )
 
-    # ========================================================================
-    # Async implementations
-    # ========================================================================
+    def _connect_impl(self, ref: Ref) -> None:
+        if not ref.commit:
+            self._checkout(ref.branch)
+            return
+        tmp = self._temp_branch_name(ref.commit)
+        if tmp in self._temp_branches:
+            self._checkout(tmp)
+            return
+        try:
+            self._execute("CALL DOLT_CHECKOUT(%s, '-b', %s);", (ref.commit, tmp))
+        except Exception:
+            self._checkout(tmp)
+        self._temp_branches.add(tmp)
 
-    async def open_async_pool(self, size: int, branch_name: str) -> None:
-        """Open an aiomysql pool of `size` connections on branch_name.
+    def _branch_impl(self, name: str, from_ref: Ref) -> None:
+        self._execute("CALL DOLT_BRANCH(%s, %s);", (name, self._spec(from_ref)))
 
-        A new session starts on the default branch, so each pool connection
-        checks out branch_name before its first use. Otherwise async ops
-        would run on main instead of the worker's branch.
-        """
-        self._async_branch = branch_name
-        self._configured_conns = weakref.WeakSet()
+    def _commit_impl(self, ref: Ref, message: str) -> str:
+        self._on(ref)
+        self._execute("CALL DOLT_ADD('-A');")
+        try:
+            rows = self._execute("CALL DOLT_COMMIT('-m', %s);", (message,))
+            return rows[0][0]
+        except Exception as e:
+            if "nothing to commit" not in str(e).lower():
+                raise
+            return self._execute("SELECT HASHOF('HEAD');")[0][0]
+
+    def _diff_impl(self, ref_a: Ref, ref_b: Ref) -> dict:
+        tables = self._rows_as_dicts(
+            "SELECT * FROM DOLT_DIFF_STAT(%s, %s);",
+            (self._spec(ref_a), self._spec(ref_b)),
+        )
+        return {
+            "tables": tables,
+            "rows_added": sum(t.get("rows_added") or 0 for t in tables),
+            "rows_deleted": sum(t.get("rows_deleted") or 0 for t in tables),
+            "rows_modified": sum(t.get("rows_modified") or 0 for t in tables),
+        }
+
+    def _log_impl(self, ref: Ref, limit: int) -> list:
+        return self._rows_as_dicts(
+            "SELECT commit_hash, committer, email, date, message "
+            "FROM DOLT_LOG(%s) LIMIT %s;",
+            (self._spec(ref), int(limit)),
+        )
+
+    def _merge_impl(self, into: Ref, source: Ref, message: str) -> dict:
+        self._on(into)
+        self._execute("CALL DOLT_ADD('-A');")
+        try:
+            self._execute("CALL DOLT_COMMIT('-m', 'pre-merge commit');")
+        except Exception as e:
+            if "nothing to commit" not in str(e).lower():
+                raise
+        # With autocommit on, Dolt rolls back a conflicting merge unless
+        # this is set, so the resolution below could never run.
+        self._execute("SET @@dolt_allow_commit_conflicts = 1;")
+        if message:
+            rows = self._execute(
+                "CALL DOLT_MERGE(%s, '-m', %s);", (self._spec(source), message)
+            )
+        else:
+            rows = self._execute("CALL DOLT_MERGE(%s);", (self._spec(source),))
+        row = rows[0] if rows else ()
+        info = {
+            "hash": row[0] if len(row) > 0 else "",
+            "fast_forward": bool(row[1]) if len(row) > 1 else False,
+            "conflicts": int(row[2]) if len(row) > 2 else 0,
+            "message": row[3] if len(row) > 3 else "",
+        }
+        if info["conflicts"] > 0:
+            tables = self._execute("SELECT `table` FROM dolt_conflicts;")
+            for (table_name,) in tables or []:
+                self._execute(
+                    "CALL DOLT_CONFLICTS_RESOLVE('--ours', %s);", (table_name,)
+                )
+            self._execute("CALL DOLT_ADD('-A');")
+            self._execute("CALL DOLT_COMMIT('-m', 'resolved merge conflicts');")
+            info["resolved"] = "ours"
+        return info
+
+    def _rebase_impl(self, ref: Ref, onto: Ref) -> None:
+        self._on(ref)
+        self._execute("CALL DOLT_REBASE('-i', %s);", (self._spec(onto),))
+        self._execute("CALL DOLT_REBASE('--continue');")
+
+    def _revert_impl(self, ref: Ref, commit: str) -> None:
+        self._on(ref)
+        self._execute("CALL DOLT_REVERT(%s);", (commit,))
+
+    def _reset_impl(self, ref: Ref, to: str) -> None:
+        self._on(ref)
+        self._execute("CALL DOLT_RESET('--hard', %s);", (to,))
+
+    def _delete_impl(self, ref: Ref) -> None:
+        if self._current_ref and self._current_ref.branch == ref.branch:
+            self._checkout(self.default_branch)
+            self._current_ref = Ref(self.default_branch)
+        self._execute("CALL DOLT_BRANCH('-D', %s);", (ref.branch,))
+
+    def _qualified_table(self, ref: Ref, table: str) -> str:
+        return f"`{self.db_name}/{self._spec(ref)}`.`{table}`"
+
+    def list_branches(self) -> list:
+        rows = self._execute("SELECT name FROM dolt_branches;")
+        return [r[0] for r in rows or []]
+
+    def close_connection(self) -> None:
+        if self.conn and self._temp_branches:
+            try:
+                self._checkout(self.default_branch)
+                for tmp in list(self._temp_branches):
+                    self._execute("CALL DOLT_BRANCH('-D', %s);", (tmp,))
+            except Exception as e:
+                print(f"Warning: could not drop temporary Dolt branches: {e}")
+            self._temp_branches.clear()
+        super().close_connection()
+
+    # ------------------------------------------------------------------
+    # Async
+    # ------------------------------------------------------------------
+
+    async def open_async_pool(self, size: int) -> None:
         self.async_pool = await create_pool_async(self.db_name, size)
 
-        # Check out the branch on every connection now, so the first timed
-        # requests don't pay for it.
-        conns = [await self.async_pool.acquire() for _ in range(size)]
-        try:
-            for conn in conns:
-                await self._configure_async_conn(conn)
-        finally:
-            for conn in conns:
-                self.async_pool.release(conn)
+    def _pool_connection(self):
+        return mysql_common.aiomysql_pool_connection(self.async_pool)
 
-    async def _configure_async_conn(self, conn) -> None:
-        async with conn.cursor() as cur:
-            await cur.execute("CALL DOLT_CHECKOUT(%s);", (self._async_branch,))
-        self._configured_conns.add(conn)
-
-    @asynccontextmanager
-    async def _pool_connection(self):
-        """Borrow a pool connection, checked out on the worker's branch.
-
-        aiomysql has no configure hook, so a connection the pool opened to
-        replace a dropped one is configured here on first use.
-        """
-        async with self.async_pool.acquire() as conn:
-            if conn not in self._configured_conns:
-                await self._configure_async_conn(conn)
-            yield conn
-
-    async def close_connection_async(self) -> None:
+    async def close_async_pool(self) -> None:
         if self.async_pool:
             self.async_pool.close()
             await self.async_pool.wait_closed()
             self.async_pool = None
 
-    # Branch hooks run on one pinned pool connection (see
-    # DBToolSuite._acquire_async_conn), so checking out the parent and
-    # creating the child happen in the same session.
-
-    async def _create_branch_impl_async(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """Async version of _create_branch_impl."""
-        # Only checkout to parent if specified, otherwise create from current branch
-        if parent_id:
-            await self.execute_sql_async("CALL DOLT_CHECKOUT(%s);", (parent_id,))
-        await self.execute_sql_async("CALL DOLT_CHECKOUT('-b', %s);", (branch_name,))
-
-    async def _connect_branch_impl_async(self, branch_name: str) -> None:
-        """Async version of _connect_branch_impl."""
-        await self.execute_sql_async("CALL DOLT_CHECKOUT(%s);", (branch_name,))
-
-    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
-        """Async version of _get_current_branch_impl."""
-        result = await self.execute_sql_async("SELECT active_branch();")
-        # Dolt's branch name is unique and can be used as an ID.
-        return (result[0][0], result[0][0])
-
-    async def _delete_branch_impl_async(
-        self, branch_name: str, branch_id: str
-    ) -> None:
-        """Async version of _delete_branch_impl."""
-        await self.execute_sql_async("CALL DOLT_BRANCH('-D', %s);", (branch_name,))
+    async def _connect_impl_async(self, conn, ref: Ref):
+        target = ref.branch
+        if ref.commit:
+            target = self._temp_branch_name(ref.commit)
+            if target not in self._temp_branches:
+                async with conn.cursor() as cur:
+                    try:
+                        await cur.execute(
+                            "CALL DOLT_CHECKOUT(%s, '-b', %s);", (ref.commit, target)
+                        )
+                    except Exception:
+                        await cur.execute("CALL DOLT_CHECKOUT(%s);", (target,))
+                self._temp_branches.add(target)
+                conn._dolt_branch = target
+                return conn
+        if getattr(conn, "_dolt_branch", None) != target:
+            async with conn.cursor() as cur:
+                await cur.execute("CALL DOLT_CHECKOUT(%s);", (target,))
+            conn._dolt_branch = target
+        return conn

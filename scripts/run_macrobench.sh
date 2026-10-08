@@ -9,7 +9,7 @@
 #   --outdir DIR        Directory for output parquet files (default: run_stats/)
 #   --max-runtime-sec N Cap total workflow runtime in seconds (0 = no limit)
 #   workflow     One of: software_dev, failure_repro, data_cleaning, mcts, simulation
-#   backend      One of: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn
+#   backend      One of: dolt, dolt_mysql, seekdb, neon, xata, file_copy
 #   db_scale     Integer scale factor (num warehouses)
 #   sql_path     Path to the schema SQL dump file
 #
@@ -45,7 +45,7 @@ if [[ $# -ne 4 ]]; then
     echo "  --outdir:            output directory for parquet files (default: run_stats/)"
     echo "  --max-runtime-sec:   cap total workflow runtime in seconds (0 = no limit)"
     echo "  workflow:    software_dev | failure_repro | data_cleaning | mcts | simulation"
-    echo "  backend:     dolt | dolt_mysql | seekdb | neon | kpg | xata | file_copy | txn"
+    echo "  backend:     dolt | dolt_mysql | seekdb | neon | xata | file_copy"
     echo "  db_scale:    integer scale factor (num warehouses)"
     echo "  sql_path:    path to schema SQL dump"
     exit 1
@@ -65,7 +65,7 @@ if ! echo "$VALID_WORKFLOWS" | grep -qw "$WORKFLOW"; then
 fi
 
 # Validate backend
-VALID_BACKENDS="dolt dolt_mysql seekdb neon kpg xata file_copy txn"
+VALID_BACKENDS="dolt dolt_mysql seekdb neon xata file_copy"
 if ! echo "$VALID_BACKENDS" | grep -qw "$BACKEND"; then
     echo "Error: invalid backend '$BACKEND'"
     echo "Must be one of: $VALID_BACKENDS"

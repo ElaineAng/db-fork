@@ -19,7 +19,7 @@ dependencies = [
     "psycopg[binary]>=3.0",  # For async database operations
     "psycopg-pool",  # Connection pool for async mode (one connection per concurrent request)
     "python-dotenv",
-    "requests",  # Neon, Xata and Tiger HTTP APIs
+    "requests",  # Neon and Xata HTTP APIs
     "scipy",
     "matplotlib",
     "pyarrow>=22,<23",  # Writes result parquet files
@@ -28,20 +28,8 @@ dependencies = [
     "pandas>=2.3,<3",  # pandas 3 has breaking API changes (plot scripts)
 ]
 
-[project.optional-dependencies]
-# LLM agent workloads under agent/. Install with `uv sync --extra agent`.
-# Capped below langchain 1.0 / langgraph 0.7: agent/ uses pre-1.0 APIs
-# (e.g. langchain.tools.StructuredTool), which 1.0 removed.
-agent = [
-    "coolname",
-    "datasets",
-    "langchain>=0.3,<0.4",
-    "langchain-core>=0.3,<0.4",
-    "langchain-anthropic<0.4",
-    "langchain-google-genai>=2,<3",
-    "langchain-openai>=0.3,<0.4",
-    "langgraph>=0.6,<0.7",
-]
+[dependency-groups]
+dev = ["pytest"]
 
 [tool.setuptools]
 packages = ["dblib", "microbench", "util"]

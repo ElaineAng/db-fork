@@ -25,6 +25,8 @@ from macrobench.branch_tree import BranchTree
 from macrobench.workflows import get_workflow_ops, WorkflowOps
 
 from dblib import result_collector as rc
+from dblib import result_pb2 as rslt
+from dblib.db_api import DBToolSuite, OpResult
 
 # Reuse infrastructure from microbench
 from microbench.runner2 import (
@@ -32,102 +34,21 @@ from microbench.runner2 import (
     BackendManager,
     BackendSetup,
     SharedProgress,
+    create_db_tools,
 )
 
-# Import backend tool suites for per-thread connections
-from dblib.dolt import DoltToolSuite
-from dblib.dolt_mysql import DoltMySQLToolSuite
-from dblib.seekdb import SeekDBToolSuite
 from dblib.neon import NeonToolSuite
-from dblib.kpg import KpgToolSuite
-from dblib.xata import XataToolSuite
-from dblib.file_copy import FileCopyToolSuite
-from dblib.transaction import TxnToolSuite
 
 
-def _create_db_tools(config, backend_info, result_collector):
-    """Create a per-thread database tool suite connection.
-
-    Mirrors the WorkerContext.__enter__ pattern from microbench/runner2.py
-    but returns just the db_tools object.
-
-    Args:
-        config: MacroBenchConfig protobuf.
-        backend_info: BackendInfo from BackendManager.setup().
-        result_collector: Shared ResultCollector instance.
-
-    Returns:
-        A DBToolSuite subclass instance connected to the database.
-    """
-    backend = config.backend
-    db_name = config.database_setup.db_name
-    autocommit = config.autocommit
-
-    if backend == tp.Backend.DOLT:
-        return DoltToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            autocommit,
-            backend_info.default_branch_name,
-        )
-    elif backend == tp.Backend.DOLT_MYSQL:
-        return DoltMySQLToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            autocommit,
-            backend_info.default_branch_name,
-        )
-    elif backend == tp.Backend.SEEKDB:
-        return SeekDBToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            autocommit,
-            backend_info.default_branch_name,
-        )
-    elif backend == tp.Backend.KPG:
-        return KpgToolSuite.init_for_bench(
-            result_collector, db_name, autocommit
-        )
-    elif backend == tp.Backend.NEON:
-        return NeonToolSuite.init_for_bench(
-            result_collector,
-            backend_info.neon_project_id,
-            backend_info.default_branch_id,
-            backend_info.default_branch_name,
-            db_name,
-            autocommit,
-        )
-    elif backend == tp.Backend.XATA:
-        return XataToolSuite.init_for_bench(
-            result_collector,
-            backend_info.xata_project_id,
-            backend_info.default_branch_id,
-            backend_info.default_branch_name,
-            db_name,
-            autocommit,
-        )
-    elif backend == tp.Backend.FILE_COPY:
-        return FileCopyToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            autocommit,
-            backend_info.default_branch_name,
-            backend_info.file_copy_info.branches,
-            backend_info.file_copy_info.branches_lock,
-            backend_info.file_copy_info.create_db_lock,
-        )
-    elif backend == tp.Backend.TXN:
-        # Each worker gets its own TxnToolSuite with its own root connection.
-        # init_for_bench creates the connection internally when conn=None.
-        return TxnToolSuite.init_for_bench(
-            result_collector,
-            db_name,
-            autocommit,
-            backend_info.default_branch_name,
-            backend_info.setup_branches if backend_info.setup_branches else [],
-        )
-    else:
-        raise ValueError(f"Unsupported backend: {backend}")
+def _create_db_tools(config, backend_info, result_collector) -> DBToolSuite:
+    """Open a per-thread database tool suite on the default branch."""
+    return create_db_tools(
+        config.backend,
+        backend_info,
+        config.database_setup.db_name,
+        result_collector,
+        measure_storage=False,
+    )
 
 
 def _flush_to_disk(db_tools):
@@ -137,35 +58,8 @@ def _flush_to_disk(db_tools):
     to flush OS page cache.  CHECKPOINT is silently skipped for backends
     that don't support it (e.g. Dolt).
     """
-    try:
-        db_tools.execute_sql("CHECKPOINT")
-    except Exception:
-        pass  # Dolt / non-PG backends
+    db_tools.exec(["CHECKPOINT"], timed=False)  # FAILED on Dolt, ignored
     os.sync()
-
-
-def _do_delete_branch(db_tools, branch_node, storage=False):
-    """Delete a branch via the DBToolSuite API.
-
-    Dispatches to the backend-specific implementation:
-      - Dolt:  dolt_branch('-D', name)
-      - Neon:  neon.branch_delete() SDK call
-      - Xata:  DELETE API call
-      - KPG:   no-op (base class default)
-
-    The caller must NOT be connected to the branch being deleted.
-
-    Args:
-        db_tools: The DBToolSuite instance.
-        branch_node: The BranchNode to delete.
-        storage: Whether to measure storage before/after.
-    """
-    db_tools.delete_branch(
-        branch_name=branch_node.name,
-        branch_id=branch_node.branch_id,
-        timed=True,
-        storage=storage,
-    )
 
 
 class CrossBranchSync:
@@ -232,46 +126,33 @@ def _run_cross_branch_queries(
     result_collector: rc.ResultCollector = None,
     measure_storage: bool = False,
 ):
-    """Execute cross-branch compare queries on pre-committed leaf branches."""
+    """Run the compare queries on every pre-committed leaf branch.
+
+    Each leaf gets its own exec(), so the CONNECT row carries the switch
+    cost and the EXEC row the query time on that branch.
+    """
     leaves = branch_tree.get_pre_committed_leaves()
     for node in leaves:
         if not node.alive:
             continue
-        # Get compare queries for this node's thread_id and step_id
         compare_queries = workflow_ops.compare(
             step_id=node.step_id, thread_id=node.thread_id
         )
         if not compare_queries:
             continue
-        try:
-            connect_fn = lambda: db_tools.connect_branch(
-                node.name,
-                timed=True,
-                storage=False,
-            )
-            if result_collector:
-                _retry_on_rate_limit(
-                    connect_fn,
-                    result_collector,
-                    progress=progress,
-                    thread_id=thread_id,
-                )
-            else:
-                connect_fn()
-            for query in compare_queries:
-                try:
-                    db_tools.execute_sql(
-                        query, timed=True, storage=measure_storage
-                    )
-                except Exception as e:
-                    progress.write(
-                        f"[T{thread_id}] Compare query failed on "
-                        f"{node.name}: {type(e).__name__}"
-                    )
-        except Exception as e:
+        res = _retry_on_rate_limit(
+            lambda: db_tools.exec(
+                compare_queries, refs=[node.name], storage=measure_storage,
+                label="compare",
+            )[0],
+            result_collector,
+            progress=progress,
+            thread_id=thread_id,
+        )
+        if not res.ok:
             progress.write(
-                f"[T{thread_id}] Connect failed for compare on "
-                f"{node.name}: {type(e).__name__}"
+                f"[T{thread_id}] Compare on {node.name}: {res.status_name} "
+                f"{res.error}"
             )
 
 
@@ -316,53 +197,39 @@ def _retry_on_rate_limit(
     progress=None,
     thread_id=None,
     stop_event: threading.Event = None,
-):
-    """Retry a callable with exponential backoff + jitter on rate-limit
-    and resource-limit errors.
+) -> OpResult:
+    """Call ``fn`` (which returns an OpResult) again with exponential
+    backoff and jitter while it comes back FAILED with a rate-limit or
+    resource-limit error (HTTP 429, Neon "too many running operations",
+    active branch/endpoint limits, ...).
 
-    Handles HTTP 429, Neon "too many running operations", active branch/
-    endpoint limits, and similar retryable responses.  Each retry wait is
-    recorded as an API_RETRY_WAIT timing entry so the overhead is visible
-    in results.
-
-    Only the first and last retry are logged (via *progress*) to avoid
-    flooding output.
+    Each wait is recorded as an API_RETRY_WAIT row so the overhead is
+    visible in results. Only the first retry is logged.
     """
-    from dblib import result_pb2 as rslt
-
     tag = f"[T{thread_id}] " if thread_id is not None else ""
 
     for attempt in range(max_retries):
-        try:
-            return fn()
-        except Exception as e:
-            if _is_retryable_error(e) and attempt < max_retries - 1:
-                delay = base_delay * (2**attempt)
-                # Add jitter (0.5x–1.5x) to avoid thundering herd.
-                delay *= 0.5 + random.random()
-                # Log first retry only; avoids flooding output.
-                if attempt == 0 and progress:
-                    progress.write(
-                        f"{tag}Rate limited, retrying "
-                        f"(up to {max_retries}x, {delay:.1f}s backoff)..."
-                    )
-                # Record the retry wait (including sleep) as a timed event.
-                # stop_event.wait(delay) sleeps up to `delay` seconds but
-                # returns True immediately if the event fires mid-sleep.
-                stopped = False
-                with result_collector.maybe_measure_ops(
-                    op_type=rslt.OpType.API_RETRY_WAIT, timed=True
-                ):
-                    if stop_event:
-                        stopped = stop_event.wait(delay)
-                    else:
-                        time.sleep(delay)
-                result_collector.record_num_keys_touched(0)
-                result_collector.flush_record()
-                if stopped:
-                    raise _WorkerStopped()
+        result = fn()
+        if not result.failed or attempt == max_retries - 1:
+            return result
+        if not _is_retryable_error(RuntimeError(result.error)):
+            return result
+        delay = base_delay * (2**attempt)
+        delay *= 0.5 + random.random()  # jitter against thundering herds
+        if attempt == 0 and progress:
+            progress.write(
+                f"{tag}Rate limited, retrying "
+                f"(up to {max_retries}x, {delay:.1f}s backoff)..."
+            )
+        stopped = False
+        with result_collector.timed(rslt.OpType.API_RETRY_WAIT, label="retry"):
+            if stop_event:
+                stopped = stop_event.wait(delay)
             else:
-                raise
+                time.sleep(delay)
+        if stopped:
+            raise _WorkerStopped()
+    return result
 
 
 class _WorkerStopped(Exception):
@@ -408,25 +275,17 @@ def worker_fn(
     rc.set_current_thread_id(thread_id)
     rng = random.Random(42 + thread_id)
     # Per-op storage is too expensive for Neon (pg_database_size on every
-    # branch for every operation).  TXN also excluded since SAVEPOINTs share
-    # the same database, so storage would be identical across all branches.
-    # Keep the before/after in main() only.
-    measure_storage = config.measure_storage and config.backend not in (
-        tp.Backend.NEON,
-        tp.Backend.TXN,
-    )
+    # branch for every operation); keep the before/after in main() only.
+    measure_storage = config.measure_storage and config.backend != tp.Backend.NEON
     verbose = thread_id == 0  # only log from thread 0 to reduce noise
 
     # Create per-thread DB connection
     db_tools = _create_db_tools(config, backend_info, result_collector)
+    db_tools.measure_storage = measure_storage
 
     # Register connection so main thread can cancel in-flight queries
     if worker_conns is not None:
         worker_conns[thread_id] = db_tools.conn
-
-    # Set up storage measurement if enabled
-    if measure_storage:
-        result_collector.set_storage_fn(db_tools.get_total_storage_bytes)
 
     # Set result context
     result_collector.set_context(
@@ -477,32 +336,19 @@ def worker_fn(
             branch_name = f"macro_t{thread_id}_s{step_id}"
             try:
                 # Create child branch (retry on rate-limit)
-                _retry_on_rate_limit(
-                    lambda: db_tools.create_branch(
-                        branch_name,
-                        parent_node.branch_id,
-                        timed=True,
-                        storage=measure_storage,
+                res = _retry_on_rate_limit(
+                    lambda: db_tools.branch(
+                        branch_name, from_ref=parent_node.name, label="branch",
                     ),
                     result_collector,
                     progress=progress if verbose else None,
                     thread_id=thread_id,
                     stop_event=stop_event,
                 )
+                res.raise_for_status()
                 ops_finished += 1
-                # Connect to the new branch
-                _retry_on_rate_limit(
-                    lambda: db_tools.connect_branch(
-                        branch_name,
-                        timed=True,
-                        storage=False,
-                    ),
-                    result_collector,
-                    progress=progress if verbose else None,
-                    thread_id=thread_id,
-                    stop_event=stop_event,
-                )
-                ops_finished += 1
+            except _WorkerStopped:
+                raise
             except Exception as e:
                 if stop_event and stop_event.is_set():
                     raise _WorkerStopped()
@@ -516,83 +362,52 @@ def worker_fn(
                 step_id += 1
                 continue
 
-            # Get the branch ID from the backend
-            try:
-                _, new_branch_id = db_tools.get_current_branch()
-            except Exception:
-                new_branch_id = branch_name
-
             child_node = branch_tree.add_child(
                 parent_node,
                 branch_name,
-                new_branch_id,
+                branch_name,
                 thread_id=thread_id,
                 step_id=step_id,
             )
 
-            # --- Mutate (DDL: M_s schema changes) ---
-            ddl_stmts = workflow_ops.mutate_ddl(step_id, thread_id=thread_id)
-            for i, stmt in enumerate(ddl_stmts):
-                if i >= config.step.schema_changes:
-                    break
-                try:
-                    db_tools.execute_sql(
-                        stmt, timed=True, storage=measure_storage
-                    )
-                    ops_finished += 1
-                    if not config.autocommit:
-                        db_tools.commit_changes(timed=False, message="ddl")
-                except Exception as e:
+            # --- Mutate (DDL: M_s schema changes), then (DML: M_d data
+            # mutations), then Evaluate (Q_v queries). Each phase is one
+            # exec() on the child branch; the first one also records the
+            # CONNECT row for switching to it. ---
+            phases = [
+                ("ddl", workflow_ops.mutate_ddl(step_id, thread_id=thread_id)[
+                    : config.step.schema_changes]),
+                ("dml", workflow_ops.mutate_dml(step_id, rng, thread_id=thread_id)[
+                    : config.step.data_mutations]),
+                ("eval", workflow_ops.evaluate(step_id=step_id, thread_id=thread_id)[
+                    : config.step.eval_queries]),
+            ]
+            for phase, stmts in phases:
+                if not stmts:
+                    continue
+                # Statements run one at a time so a failing statement does
+                # not skip the rest of the phase.
+                for stmt in stmts:
                     if stop_event and stop_event.is_set():
                         raise _WorkerStopped()
-                    if verbose:
+                    res = db_tools.exec(
+                        [stmt], refs=[branch_name], label=phase,
+                    )[0]
+                    if res.ok:
+                        ops_finished += 1
+                    elif verbose:
                         progress.write(
-                            f"[T{thread_id}] DDL failed at step "
-                            f"{step_id}: {type(e).__name__}"
+                            f"[T{thread_id}] {phase.upper()} {res.status_name} at "
+                            f"step {step_id}: {res.error}"
                         )
-
-            # --- Mutate (DML: M_d data mutations) ---
-            dml_stmts = workflow_ops.mutate_dml(
-                step_id, rng, thread_id=thread_id
-            )
-            for i, stmt in enumerate(dml_stmts):
-                if i >= config.step.data_mutations:
-                    break
-                try:
-                    db_tools.execute_sql(
-                        stmt, timed=True, storage=measure_storage
+                if phase == "dml":
+                    # Snapshot the mutated state (UNSUPPORTED on backends
+                    # without commits; recorded as such).
+                    res = db_tools.commit(
+                        branch_name, message=f"step {step_id}", label="commit",
                     )
-                    ops_finished += 1
-                    if not config.autocommit:
-                        db_tools.commit_changes(timed=False, message="dml")
-                except Exception as e:
-                    if stop_event and stop_event.is_set():
-                        raise _WorkerStopped()
-                    if verbose:
-                        progress.write(
-                            f"[T{thread_id}] DML failed at step "
-                            f"{step_id}: {type(e).__name__}: {e}"
-                        )
-
-            # --- Evaluate (Q_v queries) ---
-            eval_queries = workflow_ops.evaluate(
-                step_id=step_id, thread_id=thread_id
-            )
-            for i, query in enumerate(eval_queries):
-                if i >= config.step.eval_queries:
-                    break
-                try:
-                    db_tools.execute_sql(
-                        query, timed=True, storage=measure_storage
-                    )
-                    ops_finished += 1
-                except Exception as e:
-                    if stop_event and stop_event.is_set():
-                        raise _WorkerStopped()
-                    if verbose:
-                        progress.write(
-                            f"[T{thread_id}] Eval failed at step {step_id}: {e}"
-                        )
+                    if res.ok:
+                        ops_finished += 1
 
             # --- Mark pre-committed (eligible for cross-branch reads) ---
             branch_tree.mark_pre_committed(child_node)
@@ -622,41 +437,22 @@ def worker_fn(
             if should_prune:
                 # Wait until no cross-branch queries are running.
                 branch_tree.wait_prune_safe()
-                try:
-                    _retry_on_rate_limit(
-                        lambda: db_tools.connect_branch(
-                            branch_tree.root.name,
-                            timed=True,
-                            storage=False,
-                        ),
-                        result_collector,
-                        progress=progress if verbose else None,
-                        thread_id=thread_id,
-                        stop_event=stop_event,
-                    )
+                # Delete the branch (the backend moves this connection off
+                # it first if needed); retry on rate-limit.
+                res = _retry_on_rate_limit(
+                    lambda: db_tools.delete(child_node.name, label="prune"),
+                    result_collector,
+                    progress=progress if verbose else None,
+                    thread_id=thread_id,
+                    stop_event=stop_event,
+                )
+                if res.ok:
                     ops_finished += 1
-                    # Delete branch (retry on rate-limit)
-                    _retry_on_rate_limit(
-                        lambda: _do_delete_branch(
-                            db_tools,
-                            child_node,
-                            storage=measure_storage,
-                        ),
-                        result_collector,
-                        progress=progress if verbose else None,
-                        thread_id=thread_id,
-                        stop_event=stop_event,
+                elif verbose:
+                    progress.write(
+                        f"[T{thread_id}] Prune {res.status_name} at step "
+                        f"{step_id}: {res.error}"
                     )
-                    ops_finished += 1
-                except Exception as e:
-                    branch_tree.mark_dead(child_node)
-                    if stop_event and stop_event.is_set():
-                        raise _WorkerStopped()
-                    if verbose:
-                        progress.write(
-                            f"[T{thread_id}] Prune failed at step "
-                            f"{step_id}: {type(e).__name__}"
-                        )
                 branch_tree.mark_dead(child_node)
             else:
                 # Survived pruning — promote to committed (parent-eligible)
@@ -732,6 +528,26 @@ def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
         flush=True,
     )
     return None
+
+
+def _capabilities_for(backend) -> dict:
+    from microbench.runner2 import create_db_tools  # noqa: F401 (same table)
+    from dblib.dolt import DoltToolSuite
+    from dblib.dolt_mysql import DoltMySQLToolSuite
+    from dblib.seekdb import SeekDBToolSuite
+    from dblib.xata import XataToolSuite
+    from dblib.file_copy import FileCopyToolSuite
+
+    table = {
+        tp.Backend.DOLT: DoltToolSuite,
+        tp.Backend.DOLT_MYSQL: DoltMySQLToolSuite,
+        tp.Backend.SEEKDB: SeekDBToolSuite,
+        tp.Backend.NEON: NeonToolSuite,
+        tp.Backend.XATA: XataToolSuite,
+        tp.Backend.FILE_COPY: FileCopyToolSuite,
+    }
+    cls = table.get(backend)
+    return cls.capabilities() if cls else {}
 
 
 def main():
@@ -868,7 +684,7 @@ def main():
                 config, backend_info, result_collector
             )
             _flush_to_disk(storage_db_tools)
-            storage_before = storage_db_tools.get_total_storage_bytes()
+            storage_before = storage_db_tools._storage_bytes()
             print(f"Storage before workflow: {storage_before} bytes")
         except Exception as e:
             print(f"Warning: could not measure storage before workflow: {e}")
@@ -956,7 +772,7 @@ def main():
             try:
                 if storage_db_tools:
                     _flush_to_disk(storage_db_tools)
-                    storage_after = storage_db_tools.get_total_storage_bytes()
+                    storage_after = storage_db_tools._storage_bytes()
                     print(f"Storage after workflow: {storage_after} bytes")
                     print(
                         f"Storage delta: {storage_after - storage_before} bytes"
@@ -999,7 +815,9 @@ def main():
             },
             "estimated_bytes_per_step": bytes_per_step,
             "total_estimated_bytes_written": total_estimated_bytes,
+            "capabilities": _capabilities_for(config.backend),
         }
+        e2e_stats.update(result_collector.support_summary())
         if config.measure_storage:
             e2e_stats["storage_before_bytes"] = storage_before
             e2e_stats["storage_after_bytes"] = storage_after

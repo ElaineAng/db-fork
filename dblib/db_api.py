@@ -1,225 +1,921 @@
-import contextvars
-import functools
+"""Git-like API over branchable databases.
+
+A backend subclasses DBToolSuite and implements the protected ``_*_impl``
+hooks it supports. The public verbs (branch, commit, diff, log, merge,
+rebase, revert, reset, delete) wrap those hooks with timing, storage
+measurement and result recording, and ``exec()`` runs a workload script on
+one or more branches.
+
+Status handling
+---------------
+Every verb returns an OpResult instead of raising. A hook the backend did
+not override raises UnsupportedOperation, which the verb turns into an
+UNSUPPORTED row (zero latency, no storage delta) so the workload keeps
+running. A hook that raised anything else produces a FAILED row carrying
+the error. Pass ``raise_on_error=True`` to get the exception instead.
+
+Refs
+----
+Operations name their target with a Ref: a branch name, or ``branch@commit``
+on backends with commits (SUPPORTS_COMMIT_REFS). On other backends a commit
+ref falls back to the branch head with a warning, and the row is flagged
+with ``commit_ref_fallback``. The suite keeps no notion of a "current
+branch" beyond knowing which ref its connection is on, so that exec() can
+skip a redundant switch.
+
+exec()
+------
+``exec(script, refs, mode)`` runs ``script`` on each ref in turn
+(``mode="per_ref"``), or once with every ref addressable from one session
+(``mode="multi"``, only on backends with multi-branch query semantics). A
+script is one of:
+
+* a list of SQL statements, each a string or ``(sql, params)``;
+* Python source. It runs with ``db`` (the Session), ``params`` and ``suite``
+  in scope. If it defines ``run(db)`` that function is called with the
+  session (``async def run(db)`` in exec_async) and its return value becomes
+  the EXEC row's value;
+* a callable taking the session.
+
+Each statement the script issues through ``db.sql()`` is timed and recorded
+as its own row (READ/INSERT/UPDATE/DDL). Per ref, exec() also records a
+CONNECT row when it had to switch the connection, and one EXEC row with the
+script's total latency and the storage delta. Every statement autocommits.
+"""
+
+import asyncio
+import inspect
 import time
-from psycopg2.extensions import connection as _pgconn
 from abc import ABC, abstractmethod
-from typing import Tuple, Optional, Union
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Union
 
 import dblib.result_collector as rc
 from dblib import result_pb2 as rslt
 
-# Type hint for async connection (optional import)
-try:
-    from psycopg import AsyncConnection
-    _AsyncConnection = AsyncConnection
-except ImportError:
-    _AsyncConnection = None
+OpStatus = rslt.OpStatus
+OpType = rslt.OpType
 
-# Pool connection held by the current asyncio task, if any. Multi-statement
-# operations (e.g. checkout parent, then create child) pin one connection so
-# every statement runs in the same session. Each task has its own context, so
-# concurrent tasks never see each other's pinned connection.
-_pinned_async_conn = contextvars.ContextVar("_pinned_async_conn", default=None)
+VERBS = (
+    "branch",
+    "commit",
+    "diff",
+    "log",
+    "merge",
+    "rebase",
+    "revert",
+    "reset",
+    "delete",
+)
+
+_VERB_OP_TYPES = {
+    "branch": OpType.BRANCH,
+    "commit": OpType.COMMIT,
+    "diff": OpType.DIFF,
+    "log": OpType.LOG,
+    "merge": OpType.MERGE,
+    "rebase": OpType.REBASE,
+    "revert": OpType.REVERT,
+    "reset": OpType.RESET,
+    "delete": OpType.DELETE,
+}
 
 
-def _require_connection(func):
-    """Decorator that checks if database connection is established before calling the method."""
+class UnsupportedOperation(Exception):
+    """The backend cannot perform this operation at all."""
 
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if not self.conn:
-            raise ValueError("Database connection is not established.")
-        return func(self, *args, **kwargs)
+    def __init__(self, op: str, backend: str = "", reason: str = ""):
+        self.op = op
+        self.backend = backend
+        self.reason = reason
+        msg = f"{backend or 'backend'} does not support {op}"
+        if reason:
+            msg += f": {reason}"
+        super().__init__(msg)
 
-    return wrapper
+
+@dataclass(frozen=True)
+class Ref:
+    """A branch, optionally pinned to a commit ("branch@commit")."""
+
+    branch: str
+    commit: Optional[str] = None
+
+    @classmethod
+    def parse(cls, value: Union[str, "Ref"]) -> "Ref":
+        if isinstance(value, Ref):
+            return value
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"Invalid ref: {value!r}")
+        if "@" in value:
+            branch, commit = value.split("@", 1)
+            return cls(branch, commit or None)
+        return cls(value)
+
+    def head(self) -> "Ref":
+        return Ref(self.branch)
+
+    def __str__(self) -> str:
+        return f"{self.branch}@{self.commit}" if self.commit else self.branch
+
+
+RefLike = Union[str, Ref]
+
+
+@dataclass
+class OpResult:
+    """Outcome of one verb, one statement, or one exec() on one ref."""
+
+    op: str
+    status: int = OpStatus.OK
+    ref: str = ""
+    latency: float = 0.0
+    storage_before: int = 0
+    storage_after: int = 0
+    value: Any = None
+    error: str = ""
+    note: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == OpStatus.OK
+
+    @property
+    def unsupported(self) -> bool:
+        return self.status == OpStatus.UNSUPPORTED
+
+    @property
+    def failed(self) -> bool:
+        return self.status == OpStatus.FAILED
+
+    @property
+    def status_name(self) -> str:
+        return OpStatus.Name(self.status)
+
+    @property
+    def storage_delta(self) -> int:
+        return self.storage_after - self.storage_before
+
+    def raise_for_status(self) -> "OpResult":
+        if self.unsupported:
+            raise UnsupportedOperation(self.op, reason=self.error)
+        if self.failed:
+            raise RuntimeError(f"{self.op} on {self.ref or '?'} failed: {self.error}")
+        return self
+
+
+@dataclass
+class ExecResult(OpResult):
+    """Outcome of exec() on one ref (or one multi-ref session)."""
+
+    refs: list = field(default_factory=list)
+    connect: Optional[OpResult] = None
+    statements: list = field(default_factory=list)
+
+    @property
+    def rows(self):
+        """Rows returned by the last statement, if any."""
+        for s in reversed(self.statements):
+            if s.ok:
+                return s.value
+        return None
+
+
+# ----------------------------------------------------------------------------
+# Sessions handed to scripts
+# ----------------------------------------------------------------------------
+
+
+class _SessionBase:
+    def __init__(self, suite, conn, ref: Ref, refs: list, exec_id: int,
+                 timed: bool, label: str, keys_touched: int):
+        self.suite = suite
+        self.conn = conn
+        self.ref = ref
+        self.refs = refs
+        self.exec_id = exec_id
+        self.timed = timed
+        self.label = label
+        self.statements: list = []
+        self._keys_touched = keys_touched
+
+    def table(self, ref: RefLike, table: str) -> str:
+        """Backend-qualified name of ``table`` on ``ref`` for a multi-ref
+        script (e.g. "db/branch".public.t on Dolt)."""
+        return self.suite._qualified_table(Ref.parse(ref), table)
+
+    def record_keys_touched(self, n: int) -> None:
+        """Keys the next statement touches."""
+        self._keys_touched = n
+
+    def _take_keys(self) -> int:
+        n, self._keys_touched = self._keys_touched, 0
+        return n
+
+    def _record(self, query, vars, status, latency, start, end, value, error):
+        result = OpResult(
+            op="sql", status=status, ref=str(self.ref), latency=latency,
+            value=value, error=error,
+        )
+        self.statements.append(result)
+        if self.timed:
+            text = f"{query} -- args: {vars}" if vars else query
+            self.suite.result_collector.emit(
+                rc.GetOpTypeFromSQL(query), status=status, latency=latency,
+                start_time=start, end_time=end, ref=str(self.ref),
+                exec_id=self.exec_id, label=self.label, sql_query=text,
+                error_message=error, num_keys_touched=self._take_keys(),
+            )
+        return result
+
+
+class Session(_SessionBase):
+    """What a sync script sees as ``db``."""
+
+    def sql(self, query: str, vars=None, timed: bool = None):
+        """Run one statement on this session's connection and return its
+        rows (None for statements without a result set). Records a row and
+        re-raises on error."""
+        if timed is not None:
+            saved, self.timed = self.timed, timed
+        rows, error, status = None, "", OpStatus.OK
+        start_wall = time.time()
+        start = time.perf_counter()
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(query, vars)
+                if cur.description is not None:
+                    rows = cur.fetchall()
+        except Exception as e:
+            status, error = OpStatus.FAILED, f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            latency = time.perf_counter() - start
+            self._record(query, vars, status, latency, start_wall, time.time(),
+                         rows, error)
+            if timed is not None:
+                self.timed = saved
+        return rows
+
+
+class AsyncSession(_SessionBase):
+    """What an async script sees as ``db``."""
+
+    async def sql(self, query: str, vars=None, timed: bool = None):
+        if timed is not None:
+            saved, self.timed = self.timed, timed
+        rows, error, status = None, "", OpStatus.OK
+        start_wall = time.time()
+        start = time.perf_counter()
+        try:
+            async with self.conn.cursor() as cur:
+                await cur.execute(query, vars)
+                if cur.description is not None:
+                    rows = await cur.fetchall()
+        except Exception as e:
+            status, error = OpStatus.FAILED, f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            latency = time.perf_counter() - start
+            self._record(query, vars, status, latency, start_wall, time.time(),
+                         rows, error)
+            if timed is not None:
+                self.timed = saved
+        return rows
+
+
+def _script_text(script) -> str:
+    if isinstance(script, str):
+        return script
+    if isinstance(script, (list, tuple)):
+        parts = []
+        for item in script:
+            if isinstance(item, (list, tuple)):
+                parts.append(f"{item[0]} -- args: {item[1]}")
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    return getattr(script, "__name__", repr(script))
+
+
+# ----------------------------------------------------------------------------
+# The suite
+# ----------------------------------------------------------------------------
 
 
 class DBToolSuite(ABC):
-    """
-    An API for interacting with Postgres via a shared connection. The connection
-    is always for a specific database, and, in some cases, a specific branch.
+    """Git-like interface to one branchable database.
 
-    Supports both synchronous (psycopg2) and asynchronous (psycopg3) connections.
+    One instance per worker thread. ``self.conn`` is the DB-API connection
+    the sync verbs and exec() use; ``_connect_impl`` points it at a ref.
     """
+
+    BACKEND_NAME = "base"
+    # Can a ref name a commit ("branch@hash")?
+    SUPPORTS_COMMIT_REFS = False
+    # Can one SQL statement address several branches (exec mode="multi")?
+    SUPPORTS_MULTI_REF_EXEC = False
 
     def __init__(
         self,
-        connection: _pgconn = None,
+        connection=None,
         result_collector: Optional[rc.ResultCollector] = None,
-        async_connection = None,  # Optional async connection
+        measure_storage: bool = False,
     ):
-        self.conn = connection  # Sync connection (psycopg2)
-        self.async_conn = async_connection  # Async connection (psycopg3)
-        # Async connection pool, one connection per concurrent request.
-        # Opened by open_async_pool().
+        self.conn = connection
+        self.result_collector = result_collector or rc.ResultCollector()
+        # Default for the ``storage`` argument of every verb and exec().
+        self.measure_storage = measure_storage
         self.async_pool = None
-        self.result_collector = result_collector
-        if not self.result_collector:
-            print("Result collector is not provided.")
+        # Ref the sync connection is on, or None if unknown.
+        self._current_ref: Optional[Ref] = None
+        self._fallback_warned: set = set()
 
-    def close_connection(self) -> None:
-        """
-        Closes the current database connection.
-        """
-        if self.conn:
-            self.conn.close()
-            self.conn = None
+    # ------------------------------------------------------------------
+    # Capabilities
+    # ------------------------------------------------------------------
 
-    def get_current_connection(self) -> _pgconn:
+    @classmethod
+    def supports(cls, verb: str) -> bool:
+        """Whether this backend overrides the hook for ``verb``."""
+        if verb == "commit_refs":
+            return cls.SUPPORTS_COMMIT_REFS
+        if verb == "multi_ref_exec":
+            return cls.SUPPORTS_MULTI_REF_EXEC
+        if verb == "exec_async":
+            return cls.open_async_pool is not DBToolSuite.open_async_pool
+        hook = f"_{verb}_impl"
+        return getattr(cls, hook, None) is not getattr(DBToolSuite, hook, None)
+
+    @classmethod
+    def capabilities(cls) -> dict:
+        caps = {verb: cls.supports(verb) for verb in VERBS}
+        caps["commit_refs"] = cls.SUPPORTS_COMMIT_REFS
+        caps["multi_ref_exec"] = cls.SUPPORTS_MULTI_REF_EXEC
+        caps["exec_async"] = cls.supports("exec_async")
+        return caps
+
+    def _unsupported(self, op: str, reason: str = "") -> UnsupportedOperation:
+        return UnsupportedOperation(op, self.BACKEND_NAME, reason)
+
+    # ------------------------------------------------------------------
+    # Protected hooks: backends override the ones they support.
+    # None of them should time themselves; the public wrappers do that.
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _storage_bytes(self) -> int:
+        """Storage used by the database (all branches), in bytes."""
+
+    @abstractmethod
+    def _connect_impl(self, ref: Ref) -> None:
+        """Point ``self.conn`` at ``ref`` (reconnect, checkout, USE, ...)."""
+
+    def _branch_impl(self, name: str, from_ref: Ref) -> None:
+        raise self._unsupported("branch")
+
+    def _commit_impl(self, ref: Ref, message: str) -> str:
+        """Snapshot ``ref``'s working state; return the commit id."""
+        raise self._unsupported("commit")
+
+    def _diff_impl(self, ref_a: Ref, ref_b: Ref) -> Any:
+        """Summary of the differences between two refs (backend-specific)."""
+        raise self._unsupported("diff")
+
+    def _log_impl(self, ref: Ref, limit: int) -> list:
+        """Most recent ``limit`` commits reachable from ``ref``."""
+        raise self._unsupported("log")
+
+    def _merge_impl(self, into: Ref, source: Ref, message: str) -> Any:
+        raise self._unsupported("merge")
+
+    def _rebase_impl(self, ref: Ref, onto: Ref) -> None:
+        raise self._unsupported("rebase")
+
+    def _revert_impl(self, ref: Ref, commit: str) -> None:
+        raise self._unsupported("revert")
+
+    def _reset_impl(self, ref: Ref, to: str) -> None:
+        raise self._unsupported("reset")
+
+    def _delete_impl(self, ref: Ref) -> None:
+        raise self._unsupported("delete")
+
+    def _qualified_table(self, ref: Ref, table: str) -> str:
+        raise self._unsupported("multi_ref_exec")
+
+    def list_branches(self) -> list:
+        raise self._unsupported("list_branches")
+
+    # Async hooks (exec_async only). A backend that supports exec_async
+    # overrides open_async_pool and _connect_impl_async.
+
+    async def open_async_pool(self, size: int) -> None:
+        raise self._unsupported("exec_async")
+
+    def _pool_connection(self):
+        """Async context manager yielding a pool connection."""
+        return self.async_pool.connection()
+
+    async def _connect_impl_async(self, conn, ref: Ref):
+        """Return a connection on ``ref``: either ``conn`` after switching
+        it, or a new connection (released by _release_async_conn)."""
+        raise self._unsupported("exec_async")
+
+    async def _release_async_conn(self, conn, pooled) -> None:
+        if conn is not pooled:
+            await conn.close()
+
+    async def close_async_pool(self) -> None:
+        if self.async_pool:
+            await self.async_pool.close()
+            self.async_pool = None
+
+    # ------------------------------------------------------------------
+    # Helpers for backends
+    # ------------------------------------------------------------------
+
+    def _execute(self, query: str, vars=None):
+        """Run a statement on ``self.conn`` without recording it."""
+        with self.conn.cursor() as cur:
+            cur.execute(query, vars)
+            if cur.description is not None:
+                return cur.fetchall()
+            return None
+
+    def _safe_storage(self) -> int:
+        try:
+            return int(self._storage_bytes() or 0)
+        except Exception as e:
+            print(f"Warning: storage measurement failed: {e}")
+            return 0
+
+    def _resolve(self, ref: Optional[RefLike]) -> tuple:
+        """(Ref, commit_ref_fallback). A commit ref on a backend without
+        commits becomes the branch head, with a warning."""
+        if ref is None:
+            if self._current_ref is None:
+                raise ValueError("No ref given and no current ref")
+            return self._current_ref, False
+        r = Ref.parse(ref)
+        if r.commit and not self.SUPPORTS_COMMIT_REFS:
+            if str(r) not in self._fallback_warned:
+                self._fallback_warned.add(str(r))
+                print(
+                    f"WARNING: {self.BACKEND_NAME} has no commits; "
+                    f"using head of '{r.branch}' for ref '{r}'"
+                )
+            return r.head(), True
+        return r, False
+
+    # ------------------------------------------------------------------
+    # Public verbs
+    # ------------------------------------------------------------------
+
+    @property
+    def current_ref(self) -> Optional[Ref]:
+        """Ref the sync connection is on."""
+        return self._current_ref
+
+    def _run_verb(self, verb: str, fn: Callable, ref: Optional[Ref], *,
+                  timed: bool, storage: Optional[bool], label: str,
+                  raise_on_error: bool, fallback: bool = False) -> OpResult:
+        op_type = _VERB_OP_TYPES[verb]
+        storage = self.measure_storage if storage is None else storage
+        before = self._safe_storage() if storage else 0
+        status, value, error, exc = OpStatus.OK, None, "", None
+        start_wall = time.time()
+        start = time.perf_counter()
+        try:
+            value = fn()
+        except UnsupportedOperation as e:
+            status, error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+        except Exception as e:
+            status, error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+        latency = time.perf_counter() - start if status != OpStatus.UNSUPPORTED else 0.0
+        end_wall = time.time()
+        after = self._safe_storage() if storage and status != OpStatus.UNSUPPORTED else 0
+        if timed:
+            self.result_collector.emit(
+                op_type, status=status, latency=latency, start_time=start_wall,
+                end_time=end_wall, ref=str(ref) if ref else "", label=label,
+                error_message=error, disk_size_before=before,
+                disk_size_after=after, commit_ref_fallback=fallback,
+                num_keys_touched=0,
+            )
+        result = OpResult(
+            op=verb, status=status, ref=str(ref) if ref else "",
+            latency=latency, storage_before=before, storage_after=after,
+            value=value, error=error,
+        )
+        if raise_on_error and exc is not None:
+            raise exc
+        return result
+
+    def branch(self, name: str, from_ref: RefLike = None, *, timed: bool = True,
+               storage: bool = None, label: str = "",
+               raise_on_error: bool = False) -> OpResult:
+        """Create branch ``name`` from ``from_ref`` (default: current ref)."""
+        src, fallback = self._resolve(from_ref)
+        return self._run_verb(
+            "branch", lambda: self._branch_impl(name, src), src, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    def commit(self, ref: RefLike = None, message: str = "", *, timed: bool = True,
+               storage: bool = None, label: str = "",
+               raise_on_error: bool = False) -> OpResult:
+        """Snapshot ``ref``. The result's value is the commit id."""
+        r, fallback = self._resolve(ref)
+        return self._run_verb(
+            "commit", lambda: self._commit_impl(r, message), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    def diff(self, ref_a: RefLike, ref_b: RefLike, *, timed: bool = True,
+             storage: bool = None, label: str = "",
+             raise_on_error: bool = False) -> OpResult:
+        """Differences from ``ref_a`` to ``ref_b`` (value is backend-specific)."""
+        a, fa = self._resolve(ref_a)
+        b, fb = self._resolve(ref_b)
+        return self._run_verb(
+            "diff", lambda: self._diff_impl(a, b), b, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fa or fb,
+        )
+
+    def log(self, ref: RefLike = None, limit: int = 10, *, timed: bool = True,
+            storage: bool = None, label: str = "",
+            raise_on_error: bool = False) -> OpResult:
+        """Recent commits on ``ref`` (value is a list of dicts)."""
+        r, fallback = self._resolve(ref)
+        return self._run_verb(
+            "log", lambda: self._log_impl(r, limit), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    def merge(self, into: RefLike, source: RefLike, message: str = "", *,
+              timed: bool = True, storage: bool = None, label: str = "",
+              raise_on_error: bool = False) -> OpResult:
+        """Merge ``source`` into ``into`` (value is backend-specific)."""
+        dst, fd = self._resolve(into)
+        src, fs = self._resolve(source)
+        return self._run_verb(
+            "merge", lambda: self._merge_impl(dst, src, message), dst,
+            timed=timed, storage=storage, label=label,
+            raise_on_error=raise_on_error, fallback=fd or fs,
+        )
+
+    def rebase(self, ref: RefLike, onto: RefLike, *, timed: bool = True,
+               storage: bool = None, label: str = "",
+               raise_on_error: bool = False) -> OpResult:
+        """Replay ``ref``'s commits on top of ``onto``."""
+        r, fr = self._resolve(ref)
+        o, fo = self._resolve(onto)
+        return self._run_verb(
+            "rebase", lambda: self._rebase_impl(r, o), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fr or fo,
+        )
+
+    def revert(self, ref: RefLike, commit: str, *, timed: bool = True,
+               storage: bool = None, label: str = "",
+               raise_on_error: bool = False) -> OpResult:
+        """Add a commit to ``ref`` that undoes ``commit``."""
+        r, fallback = self._resolve(ref)
+        return self._run_verb(
+            "revert", lambda: self._revert_impl(r, commit), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    def reset(self, ref: RefLike, to: str, *, timed: bool = True,
+              storage: bool = None, label: str = "",
+              raise_on_error: bool = False) -> OpResult:
+        """Move ``ref`` to ``to`` (a commit id, or whatever the backend
+        accepts as a point to restore), discarding later changes."""
+        r, fallback = self._resolve(ref)
+        return self._run_verb(
+            "reset", lambda: self._reset_impl(r, to), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    def delete(self, ref: RefLike, *, timed: bool = True, storage: bool = None,
+               label: str = "", raise_on_error: bool = False) -> OpResult:
+        """Delete branch ``ref``."""
+        r, fallback = self._resolve(ref)
+        return self._run_verb(
+            "delete", lambda: self._delete_impl(r.head()), r, timed=timed,
+            storage=storage, label=label, raise_on_error=raise_on_error,
+            fallback=fallback,
+        )
+
+    # ------------------------------------------------------------------
+    # exec
+    # ------------------------------------------------------------------
+
+    def _prepare_exec(self, refs, mode, storage):
+        if mode not in ("per_ref", "multi"):
+            raise ValueError(f"exec mode must be 'per_ref' or 'multi', got {mode!r}")
+        if refs is None:
+            refs = [None]
+        elif isinstance(refs, (str, Ref)):
+            refs = [refs]
+        if not refs:
+            raise ValueError("exec needs at least one ref")
+        resolved = [self._resolve(r) for r in refs]
+        storage = self.measure_storage if storage is None else storage
+        exec_id = self.result_collector.next_exec_id()
+        state = self.result_collector._get_thread_state()
+        keys, state.num_keys_touched = state.num_keys_touched, 0
+        return resolved, storage, exec_id, keys
+
+    def _connect(self, ref: Ref, exec_id: int, timed: bool, label: str,
+                 fallback: bool) -> Optional[OpResult]:
+        """Switch the sync connection to ``ref`` if it is not on it already.
+        Returns the CONNECT result, or None when no switch was needed."""
+        if self._current_ref == ref:
+            return None
+        status, error, exc = OpStatus.OK, "", None
+        start_wall = time.time()
+        start = time.perf_counter()
+        try:
+            self._connect_impl(ref)
+            self._current_ref = ref
+        except UnsupportedOperation as e:
+            status, error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+            self._current_ref = None
+        except Exception as e:
+            status, error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+            self._current_ref = None
+        latency = time.perf_counter() - start if status != OpStatus.UNSUPPORTED else 0.0
+        if timed:
+            self.result_collector.emit(
+                OpType.CONNECT, status=status, latency=latency,
+                start_time=start_wall, end_time=time.time(), ref=str(ref),
+                exec_id=exec_id, label=label, error_message=error,
+                commit_ref_fallback=fallback, num_keys_touched=0,
+            )
+        result = OpResult(op="connect", status=status, ref=str(ref),
+                          latency=latency, error=error)
+        result._exc = exc
+        return result
+
+    @staticmethod
+    def _run_script(script, session: Session, params, suite):
+        if callable(script):
+            return script(session)
+        if isinstance(script, (list, tuple)):
+            for item in script:
+                if isinstance(item, (list, tuple)):
+                    session.sql(item[0], item[1] if len(item) > 1 else None)
+                else:
+                    session.sql(item)
+            return None
+        if isinstance(script, str):
+            code = compile(script, "<exec-script>", "exec")
+            scope = {"db": session, "params": params or {}, "suite": suite,
+                     "__name__": "__dbscript__"}
+            exec(code, scope)
+            run = scope.get("run")
+            if callable(run):
+                return run(session)
+            return None
+        raise TypeError(f"Unsupported script type: {type(script).__name__}")
+
+    def exec(self, script, refs=None, *, mode: str = "per_ref", params=None,
+             timed: bool = True, storage: bool = None, label: str = "",
+             raise_on_error: bool = False) -> list:
+        """Run ``script`` on ``refs``; see the module docstring.
+
+        Returns one ExecResult per ref in per_ref mode, or a single-element
+        list in multi mode.
+        """
+        resolved, storage, exec_id, keys = self._prepare_exec(refs, mode, storage)
+        text = _script_text(script)
+        if mode == "multi":
+            all_refs = [r for r, _ in resolved]
+            fallback = any(f for _, f in resolved)
+            if not self.SUPPORTS_MULTI_REF_EXEC:
+                return [self._exec_unsupported(all_refs, exec_id, timed, label,
+                                               text, raise_on_error)]
+            return [self._exec_one(script, text, resolved[0][0], all_refs,
+                                   fallback, exec_id, timed, storage, label,
+                                   params, keys, raise_on_error)]
+        return [
+            self._exec_one(script, text, r, [r], f, exec_id, timed, storage,
+                           label, params, keys, raise_on_error)
+            for r, f in resolved
+        ]
+
+    def _exec_unsupported(self, refs, exec_id, timed, label, text,
+                          raise_on_error) -> ExecResult:
+        reason = "multi-branch query semantics"
+        if timed:
+            self.result_collector.emit(
+                OpType.EXEC, status=OpStatus.UNSUPPORTED, ref=str(refs[0]),
+                refs=refs, exec_id=exec_id, label=label, sql_query=text,
+                error_message=reason, num_keys_touched=0,
+            )
+        result = ExecResult(op="exec", status=OpStatus.UNSUPPORTED,
+                            ref=str(refs[0]), refs=[str(r) for r in refs],
+                            error=reason)
+        if raise_on_error:
+            raise self._unsupported("multi_ref_exec", reason)
+        return result
+
+    def _exec_one(self, script, text, ref, all_refs, fallback, exec_id, timed,
+                  storage, label, params, keys, raise_on_error) -> ExecResult:
+        before = self._safe_storage() if storage else 0
+        connect = self._connect(ref, exec_id, timed, label, fallback)
+        result = ExecResult(op="exec", ref=str(ref),
+                            refs=[str(r) for r in all_refs], connect=connect,
+                            storage_before=before)
+        if connect is not None and not connect.ok:
+            result.status, result.error = connect.status, connect.error
+            self._emit_exec(result, timed, exec_id, label, text, fallback, 0, 0)
+            if raise_on_error:
+                raise connect._exc
+            return result
+
+        session = Session(self, self.conn, ref, all_refs, exec_id, timed,
+                          label, keys)
+        exc = None
+        start_wall = time.time()
+        start = time.perf_counter()
+        try:
+            result.value = self._run_script(script, session, params, self)
+        except UnsupportedOperation as e:
+            result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+        except Exception as e:
+            result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+        result.latency = time.perf_counter() - start
+        result.statements = session.statements
+        result.storage_after = self._safe_storage() if storage else 0
+        self._emit_exec(result, timed, exec_id, label, text, fallback,
+                        start_wall, time.time())
+        if raise_on_error and exc is not None:
+            raise exc
+        return result
+
+    def _emit_exec(self, result: ExecResult, timed, exec_id, label, text,
+                   fallback, start_wall, end_wall, pool_wait: float = 0.0):
+        if not timed:
+            return
+        self.result_collector.emit(
+            OpType.EXEC, status=result.status, latency=result.latency,
+            start_time=start_wall, end_time=end_wall, ref=result.ref,
+            refs=result.refs, exec_id=exec_id, label=label, sql_query=text,
+            error_message=result.error, disk_size_before=result.storage_before,
+            disk_size_after=result.storage_after, commit_ref_fallback=fallback,
+            num_keys_touched=0, pool_wait_time=pool_wait,
+        )
+
+    # ------------------------------------------------------------------
+    # exec_async
+    # ------------------------------------------------------------------
+
+    @asynccontextmanager
+    async def _acquire_async_conn(self):
+        """Borrow a pool connection; yields (conn, seconds waited)."""
+        if not self.async_pool:
+            raise ValueError("Async pool not open; call open_async_pool() first")
+        start = time.perf_counter()
+        async with self._pool_connection() as conn:
+            yield conn, time.perf_counter() - start
+
+    @staticmethod
+    async def _run_script_async(script, session: AsyncSession, params, suite):
+        if isinstance(script, (list, tuple)):
+            for item in script:
+                if isinstance(item, (list, tuple)):
+                    await session.sql(item[0], item[1] if len(item) > 1 else None)
+                else:
+                    await session.sql(item)
+            return None
+        if isinstance(script, str):
+            code = compile(script, "<exec-script>", "exec")
+            scope = {"db": session, "params": params or {}, "suite": suite,
+                     "__name__": "__dbscript__"}
+            exec(code, scope)
+            script = scope.get("run")
+            if script is None:
+                raise TypeError("exec_async needs the script to define "
+                                "'async def run(db)'")
+        if callable(script):
+            value = script(session)
+            if inspect.isawaitable(value):
+                value = await value
+            return value
+        raise TypeError(f"Unsupported script type: {type(script).__name__}")
+
+    async def exec_async(self, script, refs=None, *, mode: str = "per_ref",
+                         params=None, timed: bool = True, storage: bool = None,
+                         label: str = "", raise_on_error: bool = False) -> list:
+        """Async exec() on a pool connection; the script must be a list of
+        SQL, a coroutine function, or Python source defining
+        ``async def run(db)``. Pool wait is recorded on the EXEC row, not
+        in its latency."""
+        resolved, storage, exec_id, keys = self._prepare_exec(refs, mode, storage)
+        text = _script_text(script)
+        if mode == "multi":
+            all_refs = [r for r, _ in resolved]
+            fallback = any(f for _, f in resolved)
+            if not self.SUPPORTS_MULTI_REF_EXEC:
+                return [self._exec_unsupported(all_refs, exec_id, timed, label,
+                                               text, raise_on_error)]
+            return [await self._exec_one_async(
+                script, text, resolved[0][0], all_refs, fallback, exec_id,
+                timed, storage, label, params, keys, raise_on_error)]
+        results = []
+        for r, f in resolved:
+            results.append(await self._exec_one_async(
+                script, text, r, [r], f, exec_id, timed, storage, label,
+                params, keys, raise_on_error))
+        return results
+
+    async def _exec_one_async(self, script, text, ref, all_refs, fallback,
+                              exec_id, timed, storage, label, params, keys,
+                              raise_on_error) -> ExecResult:
+        before = self._safe_storage() if storage else 0
+        result = ExecResult(op="exec", ref=str(ref),
+                            refs=[str(r) for r in all_refs],
+                            storage_before=before)
+        async with self._acquire_async_conn() as (pooled, waited):
+            # Connect (switch the pooled connection, or open one for ref)
+            status, error, exc, conn = OpStatus.OK, "", None, None
+            start_wall = time.time()
+            start = time.perf_counter()
+            try:
+                conn = await self._connect_impl_async(pooled, ref)
+            except UnsupportedOperation as e:
+                status, error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+            except Exception as e:
+                status, error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+            latency = time.perf_counter() - start if status != OpStatus.UNSUPPORTED else 0.0
+            if timed:
+                self.result_collector.emit(
+                    OpType.CONNECT, status=status, latency=latency,
+                    start_time=start_wall, end_time=time.time(), ref=str(ref),
+                    exec_id=exec_id, label=label, error_message=error,
+                    commit_ref_fallback=fallback, num_keys_touched=0,
+                )
+            result.connect = OpResult(op="connect", status=status, ref=str(ref),
+                                      latency=latency, error=error)
+            if exc is not None:
+                result.status, result.error = status, error
+                self._emit_exec(result, timed, exec_id, label, text, fallback,
+                                0, 0, waited)
+                if raise_on_error:
+                    raise exc
+                return result
+
+            session = AsyncSession(self, conn, ref, all_refs, exec_id, timed,
+                                   label, keys)
+            start_wall = time.time()
+            start = time.perf_counter()
+            try:
+                result.value = await self._run_script_async(script, session,
+                                                            params, self)
+            except UnsupportedOperation as e:
+                result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+            except Exception as e:
+                result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+            finally:
+                result.latency = time.perf_counter() - start
+                await self._release_async_conn(conn, pooled)
+        result.statements = session.statements
+        result.storage_after = self._safe_storage() if storage else 0
+        self._emit_exec(result, timed, exec_id, label, text, fallback,
+                        start_wall, time.time(), waited)
+        if raise_on_error and exc is not None:
+            raise exc
+        return result
+
+    # ------------------------------------------------------------------
+    # Connection utilities
+    # ------------------------------------------------------------------
+
+    def get_current_connection(self):
         return self.conn
 
-    @abstractmethod
-    def get_total_storage_bytes(self) -> int:
-        """Get the total storage used by the current database/branch.
+    def close_connection(self) -> None:
+        if self.conn:
+            try:
+                self.conn.close()
+            finally:
+                self.conn = None
+                self._current_ref = None
 
-        Each subclass must implement its own storage measurement strategy:
-        - Directory-based (Dolt, KPG): use ``dbutil.get_directory_size_bytes()``
-        - SQL-based (Neon): ``pg_database_size()`` per branch
-        - Metrics API (Xata): branch-level ``disk`` metric via REST API
-
-        Returns:
-            Total storage in bytes, or 0 if unavailable.
-        """
-        pass
-
-    ######################################################################
-    # Protected methods
-    ######################################################################
-
-    @abstractmethod
-    def _connect_branch_impl(self, branch_name: str) -> None:
-        """
-        Connects to an existing branch to allow reading and writing data to that
-        branch. Might raise an exception if connection fails.
-        This method is timed by its caller. Don't implement additional timing.
-        """
-        pass
-
-    @abstractmethod
-    def _create_branch_impl(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """
-        Creates a new branch. Might raise an exception if creation fails.
-        This method is timed by its caller. Don't implement additional timing.
-        """
-        pass
-
-    @abstractmethod
-    def _get_current_branch_impl(self) -> Tuple[str, str]:
-        """
-        Returns a tuple of the current (branch_name, branch_id).
-        branch_name isn't always unique and should be used for debugging/logging
-        purposes only, while branch_id is needed to uniquely identify the
-        current branch.
-        This is used for debugging/logging so timing shouldn't matter.
-        """
-        pass
-
-    def _prepare_commit(self, message: str = "") -> None:
-        """
-        Does any necessary preparation before committing the current list of
-        changes to the database.
-        This method is timed by its caller. Don't implement additional timing.
-        """
-        pass
-
-    def _merge_branch_impl(
-        self, source_branch: str, message: str = ""
-    ) -> dict:
-        """
-        Merges the source branch into the current branch.
-        Must already be connected to the target (destination) branch.
-        This method is timed by its caller. Don't implement additional timing.
-
-        Args:
-            source_branch: Name of the branch to merge from.
-            message: Optional merge commit message.
-
-        Returns:
-            A dict with backend-specific merge result info, e.g.
-            {"fast_forward": bool, "conflicts": int}.
-            Backends that don't support merge return an empty dict.
-        """
-        return {}
-
-    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
-        """
-        Deletes a branch. Must NOT be connected to the branch being deleted.
-        This method is timed by its caller. Don't implement additional timing.
-
-        Args:
-            branch_name: Name of the branch to delete.
-            branch_id: Backend-specific ID of the branch to delete.
-        """
-        pass
-
-    ######################################################################
-    # Protected async methods (async variants of above)
-    ######################################################################
-
-    async def _connect_branch_impl_async(self, branch_name: str) -> None:
-        """
-        Async version of _connect_branch_impl.
-        Default implementation: call sync version in thread pool.
-        Backends should override for true async support.
-        """
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._connect_branch_impl, branch_name)
-
-    async def _create_branch_impl_async(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """
-        Async version of _create_branch_impl.
-        Default implementation: call sync version in thread pool.
-        Backends should override for true async support.
-        """
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._create_branch_impl, branch_name, parent_id)
-
-    async def _get_current_branch_impl_async(self) -> Tuple[str, str]:
-        """
-        Async version of _get_current_branch_impl.
-        Default implementation: call sync version in thread pool.
-        Backends should override for true async support.
-        """
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._get_current_branch_impl)
-
-    async def _delete_branch_impl_async(self, branch_name: str, branch_id: str) -> None:
-        """
-        Async version of _delete_branch_impl.
-        Default implementation: call sync version in thread pool.
-        Backends should override for true async support.
-        """
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._delete_branch_impl, branch_name, branch_id)
-
-    #########################################################################
-    # Public methods
-    #########################################################################
-
-    def delete_db(self, db_name: str) -> None:
-        """
-        Deletes a database from the underlying Postgres server. This is used
-        when we want to delete the db after a microbenchmark run.
-        """
-        query = f"DROP DATABASE IF EXISTS {db_name};"
-        self.execute_sql(query)
-
-    def _get_table_columns(self, table_name: str) -> list[tuple]:
-        """
-        Returns one (column_name, type_name, is_nullable, char_max_length,
-        numeric_precision, numeric_scale) row per column, in column order.
-        Backends whose information_schema differs from Postgres override this.
-        """
-        # Query for column details, including length and precision/scale
+    def _get_table_columns(self, table_name: str) -> list:
+        """(column_name, type_name, is_nullable, char_max_length,
+        numeric_precision, numeric_scale) per column, in column order.
+        Backends whose information_schema differs from Postgres override."""
         query = """
         SELECT
             column_name,
@@ -235,401 +931,25 @@ class DBToolSuite(ABC):
         ORDER BY
             ordinal_position;
         """
-        return self.execute_sql(query, (table_name,))
+        return self._execute(query, (table_name,))
 
     def get_table_schema(self, table_name: str) -> str:
-        """
-        Returns the schema of a specific table in a CREATE TABLE format.
-        """
+        """Schema of ``table_name`` in a CREATE TABLE format."""
         columns = self._get_table_columns(table_name)
-
-        if not columns or len(columns) == 0:
+        if not columns:
             raise Exception(f"Error: Table '{table_name}' not found.")
-
         column_definitions = []
-        for (
-            col_name,
-            udt_name,
-            is_nullable,
-            char_len,
-            num_prec,
-            num_scale,
-        ) in columns:
+        for (col_name, udt_name, is_nullable, char_len, num_prec,
+             num_scale) in columns:
             data_type = udt_name
-
-            # Append length for character types
             if char_len is not None:
                 data_type += f"({char_len})"
-            # Append precision and scale for numeric types
             elif udt_name in ("numeric", "decimal") and num_prec is not None:
                 data_type += f"({num_prec}, {num_scale})"
-
-            # Construct the column definition line
             definition = f"  {col_name} {data_type}"
             if is_nullable == "NO":
                 definition += " NOT NULL"
             column_definitions.append(definition)
-
-        # Assemble the final CREATE TABLE string
         return "CREATE TABLE {} (\n{}\n);".format(
             table_name, ",\n".join(column_definitions)
         )
-
-    #########################################################################
-    # API exposed to interact with a branchable database
-    #########################################################################
-
-    @_require_connection
-    def create_branch(
-        self, branch_name: str, parent_id: str = None, timed: bool = True, storage: bool = False
-    ) -> None:
-        """
-        Creates a new branch.
-
-        Args:
-            branch_name: Name of the new branch.
-            parent_id: ID of the parent branch to branch from.
-            timed: Whether to time and record this operation (default True).
-            storage: Whether to measure storage before/after this operation.
-        """
-        try:
-            with self.result_collector.maybe_measure_ops(
-                op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
-            ):
-                self._create_branch_impl(branch_name, parent_id)
-        except Exception as e:
-            raise Exception(f"Error creating branch: {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    @_require_connection
-    def connect_branch(self, branch_name: str, timed: bool = False, storage: bool = False) -> None:
-        """
-        Connects to an existing branch to allow reading and writing data to that
-        branch. Return a bool indicating whether the operation was successful.
-        """
-        try:
-            with self.result_collector.maybe_measure_ops(
-                op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
-            ):
-                self._connect_branch_impl(branch_name)
-        except Exception as e:
-            raise Exception(f"Error connecting to branch: {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    @_require_connection
-    def get_current_branch(self) -> Tuple[str, str]:
-        """
-        Returns a tuple of the current (branch_name, branch_id).
-        branch_name isn't always unique and should be used for debugging/logging
-        purposes only, while branch_id is needed to uniquely identify the
-        current branch.
-        """
-        return self._get_current_branch_impl()
-
-    @_require_connection
-    def commit_changes(self, timed: bool = False, storage: bool = False, message: str = "") -> None:
-        """
-        Commits any pending changes to the database with an optional message.
-        """
-        with self.result_collector.maybe_measure_ops(timed, rslt.OpType.COMMIT, storage=storage):
-            self._prepare_commit(message)
-            self.conn.commit()
-        if timed:
-            self.result_collector.flush_record()
-
-    @_require_connection
-    def merge_branch(
-        self,
-        source_branch: str,
-        timed: bool = True,
-        storage: bool = False,
-        message: str = "",
-    ) -> dict:
-        """
-        Merges the source branch into the currently connected branch.
-
-        The caller must already be connected to the target branch before
-        calling this method.
-
-        Args:
-            source_branch: Name of the branch to merge from.
-            timed: Whether to time and record this operation.
-            storage: Whether to measure storage before/after this operation.
-            message: Optional merge commit message.
-
-        Returns:
-            Backend-specific merge result dict.
-        """
-        result = {}
-        try:
-            with self.result_collector.maybe_measure_ops(
-                op_type=rslt.OpType.MERGE, timed=timed, storage=storage
-            ):
-                result = self._merge_branch_impl(source_branch, message)
-        except Exception as e:
-            raise Exception(f"Error merging branch '{source_branch}': {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-        return result
-
-    @_require_connection
-    def delete_branch(
-        self,
-        branch_name: str,
-        branch_id: str = "",
-        timed: bool = True,
-        storage: bool = False,
-    ) -> None:
-        """
-        Deletes a branch. The caller must NOT be connected to the branch
-        being deleted.
-
-        Args:
-            branch_name: Name of the branch to delete.
-            branch_id: Backend-specific branch ID (needed for API-based backends).
-            timed: Whether to time and record this operation.
-            storage: Whether to measure storage before/after this operation.
-        """
-        try:
-            with self.result_collector.maybe_measure_ops(
-                op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
-            ):
-                self._delete_branch_impl(branch_name, branch_id)
-        except Exception as e:
-            raise Exception(f"Error deleting branch '{branch_name}': {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    @_require_connection
-    def execute_sql(
-        self,
-        query: str,
-        vars=None,
-        timed: bool = False,
-        storage: bool = False,
-    ) -> list[tuple]:
-        """
-        Runs an SQL query in the postgres database on the current branch. The
-        query could be anything supported by the underlying database. This is
-        intentionally separated from commit_changes to allow for more
-        fine-grained timing and multiple queries to be executed in a single
-        transaction.
-        """
-        res = None
-        try:
-            with self.conn.cursor() as cur:
-                # Timing both the execute and fetchall together
-                op_type = rc.GetOpTypeFromSQL(query)
-                with self.result_collector.maybe_measure_ops(timed, op_type, storage=storage):
-                    cur.execute(query, vars)
-                    # cur.description is None for INSERT/UPDATE (no results to fetch)
-                    if cur.description is not None:
-                        res = cur.fetchall()
-                # print(f"Executed query: {query} with vars: {vars}")
-        except Exception as e:
-            raise Exception(f"Error executing sql query: {query}; {vars}; {e}")
-        if timed:
-            # Record query with args for debugging/analysis
-            query_with_args = f"{query} -- args: {vars}" if vars else query
-            self.result_collector.record_sql_query(query_with_args)
-            self.result_collector.flush_record()
-        return res
-
-    #########################################################################
-    # Async public methods
-    #########################################################################
-
-    async def open_async_pool(self, conninfo: str, size: int, configure=None) -> None:
-        """Open a psycopg async pool of `size` autocommit connections.
-
-        With one connection per concurrent request, requests run in parallel
-        on the server instead of queueing on a single connection.
-
-        Args:
-            conninfo: Connection URI.
-            size: Number of connections (fixed; min_size == max_size).
-            configure: Optional async callback run on each new connection,
-                e.g. to check out the worker's branch.
-        """
-        from psycopg_pool import AsyncConnectionPool
-
-        self.async_pool = AsyncConnectionPool(
-            conninfo,
-            min_size=size,
-            max_size=size,
-            kwargs={"autocommit": True},
-            configure=configure,
-            open=False,
-        )
-        await self.async_pool.open(wait=True)
-
-    def _pool_connection(self):
-        """Return an async context manager that borrows a pool connection."""
-        return self.async_pool.connection()
-
-    @asynccontextmanager
-    async def _acquire_async_conn(self, record_wait: bool = False):
-        """Borrow a pool connection and pin it for the current task.
-
-        Reuses the task's pinned connection if there is one, so nested calls
-        stay in the same session. When record_wait is set, the time spent
-        waiting for a free connection is recorded as pool_wait_time. It is
-        kept out of the op latency, which only covers the server round trip.
-        """
-        conn = _pinned_async_conn.get()
-        if conn is not None:
-            yield conn
-            return
-        if not self.async_pool:
-            raise ValueError("Async pool not open. Cannot execute async SQL.")
-
-        start = time.perf_counter()
-        async with self._pool_connection() as conn:
-            if record_wait:
-                self.result_collector.record_pool_wait(time.perf_counter() - start)
-            token = _pinned_async_conn.set(conn)
-            try:
-                yield conn
-            finally:
-                _pinned_async_conn.reset(token)
-
-    async def close_connection_async(self) -> None:
-        """Closes the async connection pool."""
-        if self.async_pool:
-            await self.async_pool.close()
-            self.async_pool = None
-
-    async def create_branch_async(
-        self, branch_name: str, parent_id: str = None, timed: bool = True, storage: bool = False
-    ) -> None:
-        """Async version of create_branch."""
-        try:
-            async with self._acquire_async_conn(record_wait=timed):
-                async with self._async_measure_ops(
-                    op_type=rslt.OpType.BRANCH_CREATE, timed=timed, storage=storage
-                ):
-                    await self._create_branch_impl_async(branch_name, parent_id)
-        except Exception as e:
-            raise Exception(f"Error creating branch: {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    async def connect_branch_async(self, branch_name: str, timed: bool = False, storage: bool = False) -> None:
-        """Async version of connect_branch."""
-        try:
-            async with self._acquire_async_conn(record_wait=timed):
-                async with self._async_measure_ops(
-                    op_type=rslt.OpType.BRANCH_CONNECT, timed=timed, storage=storage
-                ):
-                    await self._connect_branch_impl_async(branch_name)
-        except Exception as e:
-            raise Exception(f"Error connecting to branch: {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    async def get_current_branch_async(self) -> Tuple[str, str]:
-        """Async version of get_current_branch."""
-        return await self._get_current_branch_impl_async()
-
-    async def delete_branch_async(
-        self,
-        branch_name: str,
-        branch_id: str = "",
-        timed: bool = True,
-        storage: bool = False,
-    ) -> None:
-        """Async version of delete_branch."""
-        try:
-            async with self._acquire_async_conn(record_wait=timed):
-                async with self._async_measure_ops(
-                    op_type=rslt.OpType.BRANCH_DELETE, timed=timed, storage=storage
-                ):
-                    await self._delete_branch_impl_async(branch_name, branch_id)
-        except Exception as e:
-            raise Exception(f"Error deleting branch '{branch_name}': {e}")
-        if timed:
-            self.result_collector.record_num_keys_touched(0)
-            self.result_collector.flush_record()
-
-    async def execute_sql_async(
-        self,
-        query: str,
-        vars=None,
-        timed: bool = False,
-        storage: bool = False,
-    ) -> list[tuple]:
-        """
-        Async version of execute_sql. Runs an SQL query on a pool connection.
-
-        The connection is acquired before the timer starts, so latency covers
-        only execute + fetch. Pool wait is recorded separately.
-        """
-        res = None
-        try:
-            async with self._acquire_async_conn(record_wait=timed) as conn:
-                async with conn.cursor() as cur:
-                    # Timing both the execute and fetchall together
-                    op_type = rc.GetOpTypeFromSQL(query)
-                    async with self._async_measure_ops(timed, op_type, storage=storage):
-                        await cur.execute(query, vars)
-                        # cur.description is None for INSERT/UPDATE (no results to fetch)
-                        if cur.description is not None:
-                            res = await cur.fetchall()
-        except Exception as e:
-            raise Exception(f"Error executing async sql query: {query}; {vars}; {e}")
-        if timed:
-            # Record query with args for debugging/analysis
-            query_with_args = f"{query} -- args: {vars}" if vars else query
-            self.result_collector.record_sql_query(query_with_args)
-            self.result_collector.flush_record()
-        return res
-
-    @asynccontextmanager
-    async def _async_measure_ops(self, timed: bool, op_type: rslt.OpType, storage: bool = False):
-        """
-        Async context manager for measuring operation timing.
-        """
-        state = self.result_collector._get_thread_state()
-
-        # Measure storage before if requested
-        if storage and state.storage_fn:
-            state.disk_size_before = state.storage_fn() if callable(state.storage_fn) else 0
-
-        if not timed and not storage:
-            yield
-            return
-
-        # Capture start time
-        start_perf = time.perf_counter() if timed else None
-        start_wall = time.time() if timed else None
-
-        try:
-            yield
-        except Exception as e:
-            raise e
-        else:
-            if timed:
-                # Capture end time immediately after operation
-                end_perf = time.perf_counter()
-                end_wall = time.time()
-                latency = end_perf - start_perf
-
-                # Validate and set operation type
-                self.result_collector._validate_and_set_op_type(op_type)
-
-                # Record timing
-                state.current_latency = latency
-                state.start_time = start_wall
-                state.end_time = end_wall
-
-            # Measure storage after if requested
-            if storage and state.storage_fn:
-                state.disk_size_after = state.storage_fn() if callable(state.storage_fn) else 0

@@ -16,7 +16,6 @@ database_setup {
 }
 
 # Benchmark settings
-autocommit: true
 num_threads: 1
 measure_storage: false
 

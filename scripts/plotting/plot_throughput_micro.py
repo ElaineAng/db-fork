@@ -38,8 +38,6 @@ def parse_summary_filename(filename):
         backend = 'DOLT'
     elif filename.startswith('neon_'):
         backend = 'NEON'
-    elif filename.startswith('kpg_'):
-        backend = 'KPG'
 
     # Extract operation (READ, RANGE_READ, UPDATE, RANGE_UPDATE, etc.)
     op_match = re.search(r'_(READ|RANGE_READ|UPDATE|RANGE_UPDATE|CONNECT|BRANCH)_threads', filename)
@@ -152,7 +150,6 @@ def plot_throughput_comparison(data, operation, mode='threads', output_dir=None)
     backend_styles = {
         'DOLT': {'color': '#2E86AB', 'marker': 'o', 'label': 'Dolt'},
         'NEON': {'color': '#A23B72', 'marker': 's', 'label': 'Neon'},
-        'KPG': {'color': '#F18F01', 'marker': '^', 'label': 'KPG'},
     }
 
     for backend, x_data in sorted(data[operation].items()):
@@ -234,7 +231,6 @@ def plot_all_operations(data, mode='threads', output_dir=None):
     backend_styles = {
         'DOLT': {'color': '#2E86AB', 'marker': 'o', 'label': 'Dolt'},
         'NEON': {'color': '#A23B72', 'marker': 's', 'label': 'Neon'},
-        'KPG': {'color': '#F18F01', 'marker': '^', 'label': 'KPG'},
     }
 
     x_label = 'Number of Threads' if mode == 'threads' else 'Number of Branches'
@@ -317,8 +313,6 @@ def plot_read_operations_combined(data, mode='threads', output_dir=None, range_s
         ('DOLT', 'RANGE_READ'): {'color': DOLT_COLOR, 'marker': 's', 'linestyle': '--', 'label': f'Dolt - Range Read (row count = {range_size})'},
         ('NEON', 'READ'): {'color': NEON_COLOR, 'marker': '^', 'linestyle': '-', 'label': 'Neon - Read'},
         ('NEON', 'RANGE_READ'): {'color': NEON_COLOR, 'marker': 'v', 'linestyle': '--', 'label': f'Neon - Range Read (row count = {range_size})'},
-        ('KPG', 'READ'): {'color': '#F18F01', 'marker': 'D', 'linestyle': '-', 'label': 'KPG - Read'},
-        ('KPG', 'RANGE_READ'): {'color': '#C77100', 'marker': 'p', 'linestyle': '--', 'label': f'KPG - Range Read (row count = {range_size})'},
     }
 
     # Plot each backend+operation combination
@@ -429,8 +423,6 @@ def plot_update_operations_combined(data, mode='threads', output_dir=None, range
         ('DOLT', 'RANGE_UPDATE'): {'color': DOLT_COLOR, 'marker': 's', 'linestyle': '--', 'label': f'Dolt - Range Update (row count = {range_size})'},
         ('NEON', 'UPDATE'): {'color': NEON_COLOR, 'marker': '^', 'linestyle': '-', 'label': 'Neon - Update'},
         ('NEON', 'RANGE_UPDATE'): {'color': NEON_COLOR, 'marker': 'v', 'linestyle': '--', 'label': f'Neon - Range Update (row count = {range_size})'},
-        ('KPG', 'UPDATE'): {'color': '#F18F01', 'marker': 'D', 'linestyle': '-', 'label': 'KPG - Update'},
-        ('KPG', 'RANGE_UPDATE'): {'color': '#C77100', 'marker': 'p', 'linestyle': '--', 'label': f'KPG - Range Update (row count = {range_size})'},
     }
 
     # Plot each backend+operation combination
@@ -540,8 +532,6 @@ def plot_proportional_all_operations(data, output_dir=None, range_size=100, max_
         ('DOLT', 'RANGE_READ'): {'color': DOLT_COLOR, 'marker': 's', 'linestyle': '--', 'label': f'Dolt - Range Read (row count = {range_size})'},
         ('NEON', 'READ'): {'color': NEON_COLOR, 'marker': '^', 'linestyle': '-', 'label': 'Neon - Read'},
         ('NEON', 'RANGE_READ'): {'color': NEON_COLOR, 'marker': 'v', 'linestyle': '--', 'label': f'Neon - Range Read (row count = {range_size})'},
-        ('KPG', 'READ'): {'color': '#F18F01', 'marker': 'D', 'linestyle': '-', 'label': 'KPG - Read'},
-        ('KPG', 'RANGE_READ'): {'color': '#C77100', 'marker': 'p', 'linestyle': '--', 'label': f'KPG - Range Read (row count = {range_size})'},
     }
 
     # Plot each backend+operation combination

@@ -1,6 +1,13 @@
 # Database Benchmarking Framework
 
-A parametrized and extensible benchmarking framework for testing PostgreSQL-compatible branchable database backends (Dolt, Neon, etc.) with support for branching, schema, and data related operations. Includes both macrobenchmark and microbenchmark workloads.
+A parametrized and extensible benchmarking framework for branchable database
+backends (Dolt, Neon, Xata, SeekDB, plain Postgres copies, ...). Every backend
+is driven through one git-like API (`dblib/db_api.py`): `branch`, `commit`,
+`diff`, `log`, `merge`, `rebase`, `revert`, `reset`, `delete`, plus `exec()`
+to run a workload script on one or more branches. Each operation is timed and
+storage-measured, and an operation a backend cannot perform is recorded as
+unsupported instead of stopping the workload. Includes both macrobenchmark and
+microbenchmark workloads.
 
 ## Quick Start
 
@@ -31,26 +38,106 @@ All commands are run from the repository root.
 ### Repository Layout
 
 ```
-dblib/              # Backend tool suites (Dolt, Neon, Xata, ...) and result collection
-microbench/         # Microbenchmark runners and operations
+dblib/              # The git-like DB API, backend implementations, result collection
+microbench/         # Microbenchmark runner and operations
 macrobench/         # Macrobenchmark workflows and runner
 util/               # Shared helpers (SQL loading, DB utilities)
-agent/              # LLM agent workloads (install with `uv sync --extra agent`)
 db_setup/           # SQL dumps/schemas and database setup scripts
 scripts/            # Benchmark entry points (run_*.sh)
 scripts/plotting/   # Plotting and analysis scripts
+tests/              # API tests against an in-memory fake backend
 ```
 
 ---
 
 ## Table of Contents
 
+- [Database API](#database-api)
 - [Macrobenchmarks](#macrobenchmarks)
 - [Microbenchmarks](#microbenchmarks)
   - [Latency Benchmarks](#latency-benchmarks)
   - [Throughput Benchmarks](#throughput-benchmarks)
 - [Plotting Results](#plotting-results)
 - [Output Files](#output-files)
+
+---
+
+## Database API
+
+`dblib/db_api.py` defines `DBToolSuite`, the interface every backend
+implements. A backend overrides the protected hooks it supports
+(`_branch_impl`, `_commit_impl`, ..., `_storage_bytes`, `_connect_impl`); the
+public verbs wrap them with timing, storage measurement and result recording.
+
+### Verbs
+
+| Verb | Meaning | Returns |
+|------|---------|---------|
+| `branch(name, from_ref)` | create a branch | |
+| `commit(ref, message)` | snapshot the branch's working state | commit id |
+| `diff(ref_a, ref_b)` | differences between two refs | backend-specific summary |
+| `log(ref, limit)` | recent commits | list of dicts |
+| `merge(into, source, message)` | merge `source` into `into` | backend-specific info |
+| `rebase(ref, onto)` | replay `ref`'s commits on `onto` | |
+| `revert(ref, commit)` | add a commit undoing `commit` | |
+| `reset(ref, to)` | move `ref` to a commit (or restore point) | |
+| `delete(ref)` | delete a branch | |
+
+A ref is a branch name or `branch@commit` on backends with commits. On a
+backend without commits, a commit ref falls back to the branch head with a
+warning and the row is flagged `commit_ref_fallback`.
+
+Every verb returns an `OpResult` with `status` OK, UNSUPPORTED (the backend
+has no such operation: zero latency, workload continues) or FAILED (the
+backend tried and errored). Nothing raises unless `raise_on_error=True`;
+`result.raise_for_status()` raises on demand. `DBToolSuite.capabilities()`
+reports which verbs a backend supports.
+
+| Backend | branch | commit/diff/log | merge | rebase/revert | reset | delete | commit refs | multi-branch exec | exec_async |
+|---------|--------|-----------------|-------|---------------|-------|--------|-------------|-------------------|------------|
+| `dolt`, `dolt_mysql` | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| `neon` | yes | | | | restore (LSN/timestamp) | yes | | | yes |
+| `xata` | yes | | | | | yes | | | yes |
+| `seekdb` | yes | | per-table draft | | | yes | | yes | yes |
+| `file_copy` | yes | | | | | yes | | | yes |
+
+### exec()
+
+```python
+results = db.exec(script, refs=["feature"], mode="per_ref", label="eval")
+```
+
+runs `script` on each ref in turn (`mode="per_ref"`), or once with every ref
+addressable from one session (`mode="multi"`, Dolt and SeekDB only; other
+backends record it as UNSUPPORTED). A script is a list of SQL statements
+(strings or `(sql, params)`), Python source, or a callable. Python source
+runs with `db` (the session), `params` and `suite` in scope and may define
+`run(db)`, whose return value becomes the result's `value`:
+
+```python
+script = """
+def run(db):
+    db.sql("UPDATE stock SET s_quantity = s_quantity - %s WHERE s_i_id = %s", (params["qty"], params["item"]))
+    return db.sql("SELECT count(*) FROM stock WHERE s_quantity = 0")[0][0]
+"""
+```
+
+Every statement issued through `db.sql()` autocommits and is recorded as its
+own row (READ/INSERT/UPDATE/DDL). Per ref, `exec()` also records a CONNECT
+row when it had to switch the connection to that branch, and one EXEC row
+with the script's total latency and storage delta. `exec_async()` runs the
+same thing on a connection pool (`open_async_pool(size)`) for throughput
+measurement; its scripts must be a SQL list, a coroutine function, or source
+defining `async def run(db)`.
+
+### Result rows
+
+Each parquet row carries `op_name`, `status`, `ref`, `label`, `exec_id`
+(grouping the rows of one `exec()`), `latency`, `disk_size_before/after`,
+`sql_query` (the statement, or the script text on EXEC rows),
+`error_message`, `commit_ref_fallback` and the driver context (table, step,
+thread). Run summaries include `workflow_supported`, the list of
+`unsupported_ops`, per-op status counts and the backend's capabilities.
 
 ---
 
@@ -71,7 +158,7 @@ Use the `scripts/run_macrobench.sh` script (run it from the repository root):
 | Argument | Description | Options |
 |----------|-------------|---------|
 | `workflow` | Workflow type | `software_dev`, `failure_repro`, `data_cleaning`, `mcts`, `simulation` |
-| `backend` | Database backend | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `file_copy`, `txn` |
+| `backend` | Database backend | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
 | `db_scale` | Database scale (number of warehouses) | Integer (e.g., `1`, `5`, `10`) |
 | `sql_path` | Path to SQL schema dump | e.g., `db_setup/ch-w1.sql`, `db_setup/ch-w5.sql` |
 
@@ -136,7 +223,7 @@ Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation la
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `file_copy`, `txn`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
 | `sql_dump_path` | Path to SQL dump file (e.g., `db_setup/tpcc_schema.sql`) |
 | `num_branches` | Number of branches to create for testing |
 
@@ -214,7 +301,7 @@ than branches, threads share branches.
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `kpg`, `xata`, `txn`, `file_copy`, `tiger` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
 | `sql_dump_path` | Path to SQL dump file |
 | `--sweep-concurrency` | Fix threads and branches, vary concurrent requests (requires `--threads` and `--branches`; async only) |
 | `--sweep-branches` | Fix threads, vary branches (requires `--threads`) |
@@ -399,7 +486,10 @@ run_stats_final/micro/
 └── tp_proportional/    # Throughput: proportional threads and branches
 ```
 
-### Parquet Schema (TODO)
+### Parquet Schema
+
+See [Result rows](#result-rows); the authoritative definition is
+`dblib/result.proto`.
 
 ---
 
@@ -414,8 +504,8 @@ run_stats_final/micro/
    - **Neon**: Configure via Neon console
 4. **psql** client for database setup
 
-Install with `uv sync`, or `uv sync --extra agent` to also get the LLM agent
-dependencies used by `agent/`. The project is installed in editable mode, and
+Install with `uv sync` (add `--group dev` for pytest, then run
+`uv run pytest tests/`). The project is installed in editable mode, and
 `uv sync` / `uv run` recompile the protos whenever a `.proto` file changes.
 Run Python through `uv run` (e.g. `uv run python scripts/...`), or activate
 the environment with `source .venv/bin/activate`. The `scripts/run_*.sh` scripts
@@ -437,7 +527,8 @@ converts them to MySQL, so no separate MySQL schema is needed.
 
 Supports single-threaded, multi-threaded, and async (`concurrent_requests > 1`)
 microbenchmark runs via `runner2.py`. In async mode each thread opens a pool
-of `concurrent_requests` connections, all checked out on the thread's branch.
+of `concurrent_requests` connections; `exec_async()` checks out the target
+branch on a pooled connection the first time it is used there.
 
 ## SeekDB backend — `seekdb`
 
@@ -454,9 +545,10 @@ SeekDB has no per-database directory. It uses the same `pg_dump` loader as
 `dolt_mysql`.
 
 SeekDB branches by forking whole databases, so each branch is its own
-database: `main` is `<db_name>`, and branch `X` is `<db_name>__X`. Creating a
-branch runs `FORK DATABASE`, connecting runs `USE`, and deleting runs
-`DROP DATABASE` (forked databases can take several seconds to drop).
+database: `main` is `<db_name>`, and branch `X` is `<db_name>__X`. `branch()`
+runs `FORK DATABASE`, connecting runs `USE`, and `delete()` runs
+`DROP DATABASE` (forked databases can take several seconds to drop). A
+multi-branch script addresses another branch as `` `<db>__<branch>`.`<table>` ``.
 
 Merging is a draft. It runs `MERGE TABLE ... STRATEGY OURS` per table, with no
 common ancestor:

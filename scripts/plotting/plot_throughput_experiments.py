@@ -82,8 +82,6 @@ def parse_summary_filename(filename):
         backend = 'DOLT'
     elif filename.startswith('neon_'):
         backend = 'NEON'
-    elif filename.startswith('kpg_'):
-        backend = 'KPG'
     elif filename.startswith('xata_'):
         backend = 'XATA'
 

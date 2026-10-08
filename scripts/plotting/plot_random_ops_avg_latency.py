@@ -16,12 +16,22 @@ from scipy import stats
 # OpType enum mapping from result.proto
 OP_TYPE_NAMES = {
     0: "UNSPECIFIED",
-    1: "BRANCH_CREATE",
-    2: "BRANCH_CONNECT",
-    3: "READ",
-    4: "INSERT",
-    5: "UPDATE",
-    6: "COMMIT",
+    1: "BRANCH",
+    2: "COMMIT",
+    3: "DIFF",
+    4: "LOG",
+    5: "MERGE",
+    6: "REBASE",
+    7: "REVERT",
+    8: "RESET",
+    9: "DELETE",
+    10: "CONNECT",
+    11: "READ",
+    12: "INSERT",
+    13: "UPDATE",
+    14: "DDL",
+    15: "EXEC",
+    16: "API_RETRY_WAIT",
 }
 
 

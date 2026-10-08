@@ -1,3 +1,11 @@
+"""Collects one Result row per measured operation and writes them to parquet.
+
+Rows are produced by DBToolSuite (see dblib/db_api.py) through emit(). The
+collector also keeps per-thread (or per-asyncio-task) driver context such as
+the table under test, the current macrobench step and the number of keys the
+next operation touches, which is copied into every row.
+"""
+
 import os
 import uuid
 import time
@@ -5,7 +13,6 @@ import threading
 import asyncio
 import weakref
 from contextlib import contextmanager
-from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dblib import result_pb2 as rslt
@@ -15,93 +22,74 @@ from util.sql_parse import get_sql_operation_keyword
 # Thread-local storage for thread_id
 _thread_local = threading.local()
 
+# Verbs whose rows count as "operations" for throughput (as opposed to the
+# per-statement rows inside an exec, which are a breakdown of one EXEC row).
+VERB_OP_TYPES = frozenset(
+    {
+        rslt.OpType.BRANCH,
+        rslt.OpType.COMMIT,
+        rslt.OpType.DIFF,
+        rslt.OpType.LOG,
+        rslt.OpType.MERGE,
+        rslt.OpType.REBASE,
+        rslt.OpType.REVERT,
+        rslt.OpType.RESET,
+        rslt.OpType.DELETE,
+        rslt.OpType.EXEC,
+    }
+)
+
+# Per-statement rows emitted from inside an exec() script.
+STATEMENT_OP_TYPES = frozenset(
+    {rslt.OpType.READ, rslt.OpType.INSERT, rslt.OpType.UPDATE, rslt.OpType.DDL}
+)
+
 
 class _OperationState:
-    """State for a single operation (used in both thread-local and task-local storage)."""
+    """Driver context for the current thread or asyncio task."""
+
     def __init__(self):
-        self.initialized = True
         self.current_table_name = ""
         self.current_table_schema = ""
         self.initial_db_size = 0
         self.seed = 0
-        self.current_op_type = rslt.OpType.UNSPECIFIED
-        self.current_latency = 0.0
         self.num_keys_touched = 0
-        self.sql_query = ""
-        self.disk_size_before = 0
-        self.disk_size_after = 0
         self.branch_count = 0
         self.step_id = -1
-        self.storage_fn = None
-        self.start_time = 0.0
-        self.end_time = 0.0
         self.pool_wait_time = 0.0
 
 
 def set_current_thread_id(thread_id: int) -> None:
-    """Set the thread ID for the current thread.
-
-    This should be called once at the start of each worker thread.
-    """
+    """Set the thread ID for the current thread (once per worker thread)."""
     _thread_local.thread_id = thread_id
 
 
 def get_current_thread_id() -> int:
-    """Get the thread ID for the current thread.
-
-    Returns 0 if not set (main thread default).
-    """
+    """Thread ID for the current thread, 0 if not set."""
     return getattr(_thread_local, "thread_id", 0)
 
 
 def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
-    """
-    Determine the operation type from a SQL statement.
-
-    Handles edge cases like:
-    - CTEs (WITH clauses)
-    - Subqueries in FROM, WHERE, SELECT clauses
-    - SQL comments (-- and /* */)
-    - Multiple statements (uses first statement)
-
-    Args:
-        sql: SQL statement to analyze
-
-    Returns:
-        OpType enum corresponding to the main operation
-    """
-    # Get the primary operation keyword
+    """Operation type of a SQL statement (first statement, CTEs unwrapped)."""
     keyword = get_sql_operation_keyword(sql)
-
     if not keyword:
         return rslt.OpType.UNSPECIFIED
-
-    # Map keywords to OpType
     keyword_map = {
         "SELECT": rslt.OpType.READ,
         "INSERT": rslt.OpType.INSERT,
         "UPDATE": rslt.OpType.UPDATE,
-        "DELETE": rslt.OpType.UPDATE,  # DELETE is a write operation like UPDATE
-        "WITH": rslt.OpType.READ,  # If we still have WITH, it's likely a CTE query (read)
+        "DELETE": rslt.OpType.UPDATE,  # DELETE is a write like UPDATE
+        "WITH": rslt.OpType.READ,
         "CREATE": rslt.OpType.DDL,
         "ALTER": rslt.OpType.DDL,
         "DROP": rslt.OpType.DDL,
+        "VACUUM": rslt.OpType.DDL,
     }
-
     return keyword_map.get(keyword, rslt.OpType.UNSPECIFIED)
 
 
 def str_to_op_type(op_str: str) -> rslt.OpType:
-    """
-    Convert a string-based operation type to OpType enum.
-
-    Args:
-        op_str: String representation of the operation type.
-                Must match enum name exactly (case-insensitive).
-
-    Returns:
-        Corresponding OpType enum value, or OpType.UNSPECIFIED if unknown.
-    """
+    """OpType for its enum name (case-insensitive), UNSPECIFIED if unknown."""
     try:
         return rslt.OpType[op_str.upper().strip()]
     except KeyError:
@@ -117,75 +105,57 @@ class ResultCollector:
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
 
-        # Lock for thread-safe result collection
         self._lock = threading.Lock()
 
-        # Thread-local storage for per-thread context and metrics
+        # Per-thread driver context
         self._thread_local = threading.local()
 
-        # Task-local storage for async operations (task -> state), shared by
-        # every worker thread's event loop. Weakly keyed, so a task's entry is
-        # dropped once the task is gone; nothing ever clears the whole map
-        # while other threads' tasks are still in flight.
-        # Protected by _lock for thread-safety
+        # Per-asyncio-task driver context, shared by every worker thread's
+        # event loop. Weakly keyed so a task's entry is dropped with the task.
         self._task_local = weakref.WeakKeyDictionary()
 
-        # Shared results list (protected by lock)
+        # Shared results (protected by _lock)
         self.results = []
         self.iteration_counter = 0
+        self._next_exec_id = 1
 
-        # Track failed operations
-        self.failed_operations = []  # List of failure details
+        # Driver-level failures (an operation raised in the runner)
+        self.failed_operations = []
 
-        # Create output directory if it doesn't exist
+        # Verbs some backend reported as unsupported during this run, as
+        # "OPTYPE" or "OPTYPE:reason". Any entry marks the workflow as not
+        # fully supported on this backend.
+        self.unsupported_ops: set[str] = set()
+
         os.makedirs(output_dir, exist_ok=True)
 
-    def _get_thread_state(self):
-        """Get or initialize state for the current thread or async task.
+    # ------------------------------------------------------------------
+    # Driver context
+    # ------------------------------------------------------------------
 
-        For async operations, uses task-local storage (one state per concurrent task).
-        For sync operations, uses thread-local storage (one state per thread).
-        """
-        # Check if we're in an async context
+    def _get_thread_state(self) -> _OperationState:
+        """Context for the current asyncio task if there is one, else for
+        the current thread."""
         try:
             task = asyncio.current_task()
             if task is not None:
-                # Async mode: use task-local storage
                 with self._lock:
                     state = self._task_local.get(task)
                     if state is None:
                         state = self._task_local[task] = _OperationState()
                     return state
         except RuntimeError:
-            # Not in async context, fall through to thread-local
             pass
-
-        # Sync mode: use thread-local storage
         if not hasattr(self._thread_local, "state"):
             self._thread_local.state = _OperationState()
         return self._thread_local.state
 
-    def _reset_metrics(self):
-        """Reset all metric fields for a new record (thread-local)."""
-        state = self._get_thread_state()
-        state.current_op_type = rslt.OpType.UNSPECIFIED
-        state.current_latency = 0.0
-        state.num_keys_touched = 0
-        state.sql_query = ""
-        state.disk_size_before = 0
-        state.disk_size_after = 0
-        state.branch_count = 0
-        state.start_time = 0.0
-        state.end_time = 0.0
-        state.pool_wait_time = 0.0
-
     def set_recording(self, enabled: bool) -> None:
         """Turn recording on or off for the calling thread only.
 
-        While off, flush_record() and record_failure() drop their data. Used
-        for warm-up ops: each worker discards only its own warm-up results,
-        without touching what other threads have already recorded. Async
-        tasks run on their worker's thread, so this covers them too.
+        While off, emit() and record_failure() drop their data. Used for
+        warm-up ops. Async tasks run on their worker's thread, so this
+        covers them too.
         """
         self._thread_local.recording_disabled = not enabled
 
@@ -193,11 +163,12 @@ class ResultCollector:
         return not getattr(self._thread_local, "recording_disabled", False)
 
     def reset(self):
-        """Reset all collected timing data and proto messages (shared state only)."""
+        """Drop all collected rows (shared state only)."""
         with self._lock:
             self.results = []
             self.iteration_counter = 0
             self.failed_operations = []
+            self.unsupported_ops = set()
 
     def set_context(
         self,
@@ -206,174 +177,185 @@ class ResultCollector:
         initial_db_size: int,
         seed: int,
     ):
-        """Set context information for the next operation to be timed (thread-local)."""
+        """Driver context copied into every row emitted by this thread."""
         state = self._get_thread_state()
         state.current_table_name = table_name
         state.current_table_schema = table_schema
         state.initial_db_size = initial_db_size
         state.seed = seed
 
-    def _validate_and_set_op_type(self, op_type: rslt.OpType):
-        state = self._get_thread_state()
-        if (
-            state.current_op_type != rslt.OpType.UNSPECIFIED
-            and state.current_op_type != op_type
-        ):
-            raise ValueError(
-                f"Operation type changed mid-operation: was {state.current_op_type}, now {op_type}"
-            )
-        state.current_op_type = op_type
-
-    def set_storage_fn(self, fn):
-        """Set the storage measurement function for the current thread."""
-        state = self._get_thread_state()
-        state.storage_fn = fn
-
-    @contextmanager
-    def maybe_measure_ops(self, timed: bool, op_type: rslt.OpType, storage: bool = False):
-        state = self._get_thread_state()
-        if storage and state.storage_fn:
-            state.disk_size_before = state.storage_fn()
-        if not timed and not storage:
-            yield
-            return
-        start_perf = time.perf_counter() if timed else None
-        start_wall = time.time() if timed else None
-        try:
-            yield
-        except Exception as e:
-            raise e
-        else:
-            if timed:
-                end_perf = time.perf_counter()
-                end_wall = time.time()
-                self._validate_and_set_op_type(op_type)
-                state.current_latency = end_perf - start_perf
-                state.start_time = start_wall
-                state.end_time = end_wall
-            if storage and state.storage_fn:
-                state.disk_size_after = state.storage_fn()
-
     def record_num_keys_touched(self, num_keys: int) -> None:
-        state = self._get_thread_state()
-        state.num_keys_touched = num_keys
+        """Keys the next emitted row touches (consumed by that row)."""
+        self._get_thread_state().num_keys_touched = num_keys
 
     def record_pool_wait(self, seconds: float) -> None:
-        state = self._get_thread_state()
-        state.pool_wait_time += seconds
-
-    def record_disk_size_before(self, size: int) -> None:
-        state = self._get_thread_state()
-        state.disk_size_before = size
-
-    def record_disk_size_after(self, size: int) -> None:
-        state = self._get_thread_state()
-        state.disk_size_after = size
+        """Pool wait attributed to the next emitted row (consumed by it)."""
+        self._get_thread_state().pool_wait_time += seconds
 
     def record_branch_count(self, branch_count: int) -> None:
-        state = self._get_thread_state()
-        state.branch_count = branch_count
+        self._get_thread_state().branch_count = branch_count
 
     def record_step_id(self, step_id: int) -> None:
+        self._get_thread_state().step_id = step_id
+
+    def next_exec_id(self) -> int:
+        with self._lock:
+            exec_id = self._next_exec_id
+            self._next_exec_id += 1
+            return exec_id
+
+    # ------------------------------------------------------------------
+    # Rows
+    # ------------------------------------------------------------------
+
+    def emit(
+        self,
+        op_type: rslt.OpType,
+        status: rslt.OpStatus = rslt.OpStatus.OK,
+        latency: float = 0.0,
+        start_time: float = 0.0,
+        end_time: float = 0.0,
+        ref: str = "",
+        refs=None,
+        label: str = "",
+        exec_id: int = 0,
+        sql_query: str = "",
+        error_message: str = "",
+        disk_size_before: int = 0,
+        disk_size_after: int = 0,
+        commit_ref_fallback: bool = False,
+        num_keys_touched: int = None,
+        pool_wait_time: float = None,
+    ) -> None:
+        """Append one Result row, filled from the arguments plus the calling
+        thread's driver context. Consumes the pending num_keys_touched and
+        pool_wait_time of that context."""
+        if status == rslt.OpStatus.UNSUPPORTED:
+            name = rslt.OpType.Name(op_type)
+            with self._lock:
+                self.unsupported_ops.add(
+                    f"{name}:{error_message}" if error_message else name
+                )
+
         state = self._get_thread_state()
-        state.step_id = step_id
+        if not self._recording_enabled():
+            state.num_keys_touched = 0
+            state.pool_wait_time = 0.0
+            return
 
-    def record_sql_query(self, sql_query: str) -> None:
-        state = self._get_thread_state()
-        state.sql_query = sql_query
-
-    def flush_record(self):
-        """
-        Create a Result proto with all current context and metrics, save it, and reset.
-
-        Uses the thread-local thread_id set via set_current_thread_id().
-        For async operations, the task-local state is dropped with its task.
-        """
         try:
-            if not self._recording_enabled():
-                self._reset_metrics()
-                return
-
-            state = self._get_thread_state()
-
-            # Create and fill the Result proto
             result = rslt.Result()
             result.run_id = self.run_id
-            # Note: iteration_number will be set inside the lock to avoid race conditions
             result.table_name = state.current_table_name
             result.table_schema = state.current_table_schema
             result.initial_db_size = state.initial_db_size
             result.random_seed = state.seed
-
-            # Fill in collected metrics
-            result.op_type = state.current_op_type
-            result.num_keys_touched = state.num_keys_touched
-            result.latency = state.current_latency
-            result.sql_query = state.sql_query
-            result.thread_id = get_current_thread_id()
-            result.disk_size_before = state.disk_size_before
-            result.disk_size_after = state.disk_size_after
             result.branch_count = state.branch_count
             result.step_id = state.step_id
-            result.start_time = state.start_time
-            result.end_time = state.end_time
-            result.pool_wait_time = state.pool_wait_time
+            result.thread_id = get_current_thread_id()
 
-            # Append to results (thread-safe)
-            # Set iteration_number inside lock to avoid race condition
+            result.op_type = op_type
+            result.status = status
+            result.latency = latency
+            result.start_time = start_time
+            result.end_time = end_time
+            result.ref = ref or ""
+            if refs:
+                result.refs.extend(str(r) for r in refs)
+            result.label = label or ""
+            result.exec_id = exec_id
+            result.sql_query = sql_query or ""
+            result.error_message = error_message or ""
+            result.disk_size_before = disk_size_before
+            result.disk_size_after = disk_size_after
+            result.commit_ref_fallback = commit_ref_fallback
+            result.num_keys_touched = (
+                state.num_keys_touched
+                if num_keys_touched is None
+                else num_keys_touched
+            )
+            result.pool_wait_time = (
+                state.pool_wait_time if pool_wait_time is None else pool_wait_time
+            )
+
             with self._lock:
                 result.iteration_number = self.iteration_counter
                 self.results.append(result)
                 self.iteration_counter += 1
-
-            # Reset metrics for next operation
-            # For async mode: task-local state persists (will be GC'd when task ends)
-            # For sync mode: thread-local state persists (reused across operations)
-            self._reset_metrics()
-
         except Exception as e:
-            # Log but don't crash if flush_record fails
             import sys
-            print(f"ERROR in flush_record: {type(e).__name__}: {e}", file=sys.stderr)
             import traceback
+
+            print(f"ERROR in emit: {type(e).__name__}: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+        finally:
+            state.num_keys_touched = 0
+            state.pool_wait_time = 0.0
+
+    @contextmanager
+    def timed(self, op_type: rslt.OpType, **fields):
+        """Time a block of driver code and emit one row for it, e.g. the
+        back-off wait before retrying a rate-limited API call."""
+        start_perf = time.perf_counter()
+        start_wall = time.time()
+        try:
+            yield
+        finally:
+            end_perf = time.perf_counter()
+            self.emit(
+                op_type,
+                latency=end_perf - start_perf,
+                start_time=start_wall,
+                end_time=time.time(),
+                **fields,
+            )
 
     def record_failure(self, error: Exception, operation_number: int = None) -> None:
-        """
-        Record a failed operation with context details.
-
-        Args:
-            error: The exception that caused the failure
-            operation_number: Optional operation number (e.g., 5 out of 1000)
-        """
+        """Record a failure raised by the driver (not a FAILED row)."""
         if not self._recording_enabled():
             return
-
-        state = self._get_thread_state()
-
         failure_info = {
             "thread_id": get_current_thread_id(),
-            "op_type": rslt.OpType.Name(state.current_op_type) if state.current_op_type else "UNSPECIFIED",
-            "sql_query": state.sql_query if state.sql_query else None,
             "error_type": type(error).__name__,
             "error_message": str(error),
             "operation_number": operation_number,
             "timestamp": time.time(),
         }
-
-        # Append to failed operations (thread-safe)
         with self._lock:
             self.failed_operations.append(failure_info)
 
-        # Reset metric fields for next record
-        self._reset_metrics()
+    # ------------------------------------------------------------------
+    # Summaries
+    # ------------------------------------------------------------------
+
+    @property
+    def workflow_supported(self) -> bool:
+        """False once any operation of this run was UNSUPPORTED."""
+        return not self.unsupported_ops
+
+    def support_summary(self) -> dict:
+        """Support information for the run's summary JSON."""
+        with self._lock:
+            rows = list(self.results)
+            unsupported = sorted(self.unsupported_ops)
+        counts = {}
+        for r in rows:
+            name = rslt.OpType.Name(r.op_type)
+            c = counts.setdefault(name, {"ok": 0, "unsupported": 0, "failed": 0})
+            if r.status == rslt.OpStatus.OK:
+                c["ok"] += 1
+            elif r.status == rslt.OpStatus.UNSUPPORTED:
+                c["unsupported"] += 1
+            else:
+                c["failed"] += 1
+        return {
+            "workflow_supported": not unsupported,
+            "unsupported_ops": unsupported,
+            "op_status_counts": counts,
+        }
 
     def write_to_parquet(self, filename: str = None):
-        """Write all collected benchmark results to a parquet file.
-
-        If the file already exists, appends to it instead of overwriting.
-        """
-
+        """Write all collected rows to a parquet file, appending if it exists."""
         if not self.results:
             print("No results to write.")
             return
@@ -381,40 +363,44 @@ class ResultCollector:
         filename = filename or f"{self.run_id}.parquet"
         filepath = os.path.join(self.output_dir, filename)
 
-        # Convert proto messages to dictionary rows
         rows = []
         for result in self.results:
-            row = {
-                "run_id": result.run_id,
-                "thread_id": result.thread_id,
-                "random_seed": result.random_seed,
-                "iteration_number": result.iteration_number,
-                "op_type": result.op_type,  # Convert enum value to name
-                "initial_db_size": result.initial_db_size,
-                "table_name": result.table_name,
-                "table_schema": result.table_schema,
-                "num_keys_touched": result.num_keys_touched,
-                "latency": result.latency,
-                "disk_size_before": result.disk_size_before,
-                "disk_size_after": result.disk_size_after,
-                "sql_query": result.sql_query,
-                "branch_count": result.branch_count,
-                "step_id": result.step_id,
-                "start_time": result.start_time,
-                "end_time": result.end_time,
-                "pool_wait_time": result.pool_wait_time,
-            }
-            rows.append(row)
+            rows.append(
+                {
+                    "run_id": result.run_id,
+                    "thread_id": result.thread_id,
+                    "random_seed": result.random_seed,
+                    "iteration_number": result.iteration_number,
+                    "op_type": result.op_type,
+                    "op_name": rslt.OpType.Name(result.op_type),
+                    "status": rslt.OpStatus.Name(result.status),
+                    "ref": result.ref,
+                    "refs": list(result.refs),
+                    "label": result.label,
+                    "exec_id": result.exec_id,
+                    "initial_db_size": result.initial_db_size,
+                    "table_name": result.table_name,
+                    "table_schema": result.table_schema,
+                    "num_keys_touched": result.num_keys_touched,
+                    "latency": result.latency,
+                    "disk_size_before": result.disk_size_before,
+                    "disk_size_after": result.disk_size_after,
+                    "sql_query": result.sql_query,
+                    "error_message": result.error_message,
+                    "commit_ref_fallback": result.commit_ref_fallback,
+                    "branch_count": result.branch_count,
+                    "step_id": result.step_id,
+                    "start_time": result.start_time,
+                    "end_time": result.end_time,
+                    "pool_wait_time": result.pool_wait_time,
+                }
+            )
 
-        # Create PyArrow table from new results
         new_table = pa.Table.from_pylist(rows)
 
-        # If file exists, read existing data and concatenate
         if os.path.exists(filepath):
             try:
                 existing_table = pq.read_table(filepath)
-                # Fill columns missing from older files (e.g. pool_wait_time)
-                # with nulls instead of failing and overwriting the file.
                 combined_table = pa.concat_tables(
                     [existing_table, new_table], promote_options="default"
                 )

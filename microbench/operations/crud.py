@@ -50,7 +50,7 @@ class ReadOperation(Operation):
         select_sql, key_to_read = self._prepare_read(context)
 
         # Execute the timed read
-        result = context.db_tools.execute_sql(select_sql, key_to_read, timed=True)
+        result = context.run_sql(select_sql, key_to_read)
         if not result:
             raise ValueError("Read operation returned no results")
 
@@ -59,7 +59,7 @@ class ReadOperation(Operation):
         select_sql, key_to_read = self._prepare_read(context)
 
         # Execute the timed read asynchronously
-        result = await context.db_tools.execute_sql_async(select_sql, key_to_read, timed=True)
+        result = await context.run_sql_async(select_sql, key_to_read)
         if not result:
             raise ValueError("Read operation returned no results")
 
@@ -110,13 +110,10 @@ class InsertOperation(Operation):
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             try:
-                context.db_tools.execute_sql(insert_sql, row_data, timed=True)
+                context.run_sql(insert_sql, row_data)
                 context.track_modified_key(pk_tuple)
                 inserted = True
 
-                # Commit if not in autocommit mode
-                if not context.db_tools.autocommit:
-                    context.db_tools.commit_changes(timed=True, message="insert")
                 break
             except Exception as e:
                 if attempt == 4:  # Last attempt
@@ -137,14 +134,10 @@ class InsertOperation(Operation):
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             try:
-                await context.db_tools.execute_sql_async(insert_sql, row_data, timed=True)
+                await context.run_sql_async(insert_sql, row_data)
                 context.track_modified_key(pk_tuple)
                 inserted = True
 
-                # Commit if not in autocommit mode (should not happen in async mode)
-                if not context.db_tools.autocommit:
-                    # Note: In async mode, autocommit is required
-                    pass
                 break
             except Exception as e:
                 if attempt == 4:  # Last attempt
@@ -216,11 +209,8 @@ class UpdateOperation(Operation):
         update_sql, row_data, key_to_update = self._prepare_update(context)
 
         # Execute the timed update
-        context.db_tools.execute_sql(update_sql, row_data, timed=True)
+        context.run_sql(update_sql, row_data)
 
-        # Commit if not in autocommit mode
-        if not context.db_tools.autocommit:
-            context.db_tools.commit_changes(timed=False, message="update")
 
         # Track the modified key
         context.track_modified_key(key_to_update)
@@ -230,12 +220,8 @@ class UpdateOperation(Operation):
         update_sql, row_data, key_to_update = self._prepare_update(context)
 
         # Execute the timed update asynchronously
-        await context.db_tools.execute_sql_async(update_sql, row_data, timed=True)
+        await context.run_sql_async(update_sql, row_data)
 
-        # Commit if not in autocommit mode (should not happen in async mode)
-        if not context.db_tools.autocommit:
-            # Note: In async mode, autocommit is required
-            pass
 
         # Track the modified key
         context.track_modified_key(key_to_update)
@@ -282,11 +268,8 @@ class DeleteOperation(Operation):
         delete_sql, key_to_delete = self._prepare_delete(context)
 
         # Execute the timed delete
-        context.db_tools.execute_sql(delete_sql, key_to_delete, timed=True)
+        context.run_sql(delete_sql, key_to_delete)
 
-        # Commit if not in autocommit mode
-        if not context.db_tools.autocommit:
-            context.db_tools.commit_changes(timed=False, message="delete")
 
         # Remove from modified keys tracking
         context.untrack_modified_key(key_to_delete)
@@ -296,12 +279,8 @@ class DeleteOperation(Operation):
         delete_sql, key_to_delete = self._prepare_delete(context)
 
         # Execute the timed delete asynchronously
-        await context.db_tools.execute_sql_async(delete_sql, key_to_delete, timed=True)
+        await context.run_sql_async(delete_sql, key_to_delete)
 
-        # Commit if not in autocommit mode (should not happen in async mode)
-        if not context.db_tools.autocommit:
-            # Note: In async mode, autocommit is required
-            pass
 
         # Remove from modified keys tracking
         context.untrack_modified_key(key_to_delete)
@@ -348,13 +327,13 @@ class RangeReadOperation(Operation):
         """Execute a timed range read operation."""
         select_sql, params, num_keys = self._prepare_range_read(context)
         # Execute the timed range read
-        context.db_tools.execute_sql(select_sql, params, timed=True)
+        context.run_sql(select_sql, params)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         """Async version using shared preparation logic."""
         select_sql, params, num_keys = self._prepare_range_read(context)
         # Execute the timed range read asynchronously
-        await context.db_tools.execute_sql_async(select_sql, params, timed=True)
+        await context.run_sql_async(select_sql, params)
 
     def requires_setup_data(self) -> bool:
         return True  # Needs existing rows to read from
@@ -414,11 +393,8 @@ class RangeUpdateOperation(Operation):
         update_sql, row_data, keys_in_range, num_keys = self._prepare_range_update(context)
 
         # Execute the timed range update
-        context.db_tools.execute_sql(update_sql, row_data, timed=True)
+        context.run_sql(update_sql, row_data)
 
-        # Commit if not in autocommit mode
-        if not context.db_tools.autocommit:
-            context.db_tools.commit_changes(timed=False, message="range update")
 
         # Track all keys in the range as modified
         for key in keys_in_range:
@@ -429,12 +405,8 @@ class RangeUpdateOperation(Operation):
         update_sql, row_data, keys_in_range, num_keys = self._prepare_range_update(context)
 
         # Execute the timed range update asynchronously
-        await context.db_tools.execute_sql_async(update_sql, row_data, timed=True)
+        await context.run_sql_async(update_sql, row_data)
 
-        # Commit if not in autocommit mode (should not happen in async mode)
-        if not context.db_tools.autocommit:
-            # Note: In async mode, autocommit is required
-            pass
 
         # Track all keys in the range as modified
         for key in keys_in_range:

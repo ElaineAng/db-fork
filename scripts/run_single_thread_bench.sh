@@ -4,7 +4,7 @@
 # Usage: ./scripts/run_single_thread_bench.sh <backend> <sql_dump_path> <branch_counts> [OPTIONS]
 #
 # Required Arguments:
-#   backend:        dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn, tiger
+#   backend:        dolt, dolt_mysql, seekdb, neon, xata, file_copy
 #   sql_dump_path:  Path to SQL dump file (e.g., schemas/tpcc_mini.sql)
 #   branch_counts:  Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)
 #
@@ -100,7 +100,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$NUM_BRANCHES" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> <branch_counts> [options]"
     echo ""
     echo "Required:"
-    echo "  backend: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, postgres transactions (txn), tiger"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, xata, file_copy"
     echo "  sql_dump_path: Path to SQL dump file (e.g., db_setup/tpcc_schema.sql)"
     echo "  branch_counts: Comma-separated list of branch counts (e.g., 8,16,32) or single value (e.g., 16)"
     echo ""
@@ -126,8 +126,8 @@ fi
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|KPG|XATA|FILE_COPY|TXN|TIGER)$ ]]; then
-    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn, tiger"
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|XATA|FILE_COPY)$ ]]; then
+    echo "Error: Invalid backend '$BACKEND'. Must be one of: dolt, dolt_mysql, seekdb, neon, xata, file_copy"
     exit 1
 fi
 
@@ -135,11 +135,6 @@ fi
 SHAPE_UPPER=$(echo "$SHAPE" | tr '[:lower:]' '[:upper:]')
 if [[ ! "$SHAPE_UPPER" =~ ^(SPINE|BUSHY|FAN_OUT)$ ]]; then
     echo "Error: Invalid shape '$SHAPE'. Must be one of: spine, bushy, fan_out"
-    exit 1
-fi
-
-if [[ "$BACKEND_UPPER" == "TXN" && "$SHAPE_UPPER" != "SPINE" ]]; then
-    echo "Error: PostgreSQL Save Point only works with spine shape"
     exit 1
 fi
 
@@ -156,9 +151,6 @@ fi
 
 # Default operations (using runner2 operation names)
 OPERATIONS=(BRANCH_CREATE READ BRANCH_CONNECT INSERT UPDATE RANGE_READ RANGE_UPDATE)
-if [[ "$BACKEND_UPPER" == "TXN" ]]; then
-    OPERATIONS=(BRANCH_CREATE READ INSERT UPDATE RANGE_READ RANGE_UPDATE CONNECT_FIRST CONNECT_MID CONNECT_LAST)
-fi
 
 # Override OPERATIONS if --operations was provided
 if [ -n "$OPS_STRING" ]; then
@@ -191,7 +183,7 @@ SQL_PREFIX=${SQL_BASENAME:0:4}
 get_num_ops() {
     local op=$1
     case $op in
-        BRANCH_CREATE|BRANCH_DELETE|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
+        BRANCH_CREATE|BRANCH_DELETE)
             echo 1
             ;;
         RANGE_UPDATE)
@@ -267,7 +259,6 @@ database_setup {
   }
 }
 
-autocommit: true
 num_threads: 1
 measure_storage: ${MEASURE_STORAGE}
 

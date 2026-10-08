@@ -9,28 +9,28 @@ branches is therefore its own database:
 
 The mapping is derived from the names alone, so every worker (each with its own
 connection) resolves the same branch to the same database with no shared state.
-A branch's ID is its database name.
 
-    create_branch    FORK DATABASE <parent db> TO <branch db>, then USE it
-    connect_branch   USE <branch db>
-    merge_branch     MERGE TABLE <src db>.t INTO <current db>.t STRATEGY OURS,
-                     for each table
-    delete_branch    DROP DATABASE <branch db>
+    branch     FORK DATABASE <parent db> TO <branch db>
+    connect    USE <branch db>
+    merge      MERGE TABLE <src db>.t INTO <target db>.t STRATEGY OURS, per table
+    delete     DROP DATABASE <branch db>
+
+SeekDB has no commits (commit/diff/log/rebase/revert/reset are unsupported).
+Because every branch is a database on the same server, a multi-ref script can
+address another branch as `<db>__<branch>`.`<table>`.
 
 Merging is per table and, unlike Dolt's, in effect insert-only (the source's
 updates and deletes aren't merged). Tables whose schemas differ between the
-branches, or that have no primary key, are skipped. See
-SeekDBToolSuite._merge_branch_impl.
+branches, or that have no primary key, are skipped. See _merge_impl.
 """
 
 import os
-from contextlib import asynccontextmanager
 
 import aiomysql
 import pymysql
 from pymysql.constants import CLIENT
 
-from dblib.db_api import DBToolSuite
+from dblib.db_api import DBToolSuite, Ref
 from dblib import mysql_common
 import dblib.result_collector as rc
 import dblib.util as dbutil
@@ -103,7 +103,7 @@ def branch_db_name(db_name: str, branch_name: str) -> str:
     return name
 
 
-def _branch_databases(cur, db_name: str) -> list[str]:
+def _branch_databases(cur, db_name: str) -> list:
     """Names of all branch databases forked from db_name (not db_name itself)."""
     prefix = db_name + _BRANCH_SEP
     cur.execute("SHOW DATABASES;")
@@ -129,7 +129,6 @@ def setup_database(db_name: str, sql_path: str) -> None:
         print("Database created successfully.")
     finally:
         conn.close()
-
     load_sql_dump(db_name, sql_path)
 
 
@@ -147,10 +146,9 @@ def drop_database(db_name: str) -> None:
 
 
 class SeekDBToolSuite(DBToolSuite):
-    """
-    A suite of tools for interacting with SeekDB on a shared connection, where
-    each branch is a forked database (see the module docstring).
-    """
+    BACKEND_NAME = "seekdb"
+    SUPPORTS_COMMIT_REFS = False
+    SUPPORTS_MULTI_REF_EXEC = True
 
     @classmethod
     def get_default_connection_uri(cls) -> str:
@@ -158,144 +156,103 @@ class SeekDBToolSuite(DBToolSuite):
 
     @classmethod
     def get_initial_connection_uri(cls, db_name: str) -> str:
-        return (
-            f"mysql://{SEEKDB_USER}:{SEEKDB_PASSWORD}"
-            f"@{SEEKDB_HOST}:{SEEKDB_PORT}/{db_name}"
-        )
+        return f"mysql://{SEEKDB_USER}:{SEEKDB_PASSWORD}@{SEEKDB_HOST}:{SEEKDB_PORT}/{db_name}"
 
     @classmethod
     def init_for_bench(
         cls,
         collector: rc.ResultCollector,
         db_name: str,
-        autocommit: bool,
-        default_branch_name: str,
+        default_branch_name: str = MAIN_BRANCH,
+        measure_storage: bool = False,
     ):
-        conn = connect(db_name, autocommit=autocommit)
-        return cls(
-            connection=conn,
-            collector=collector,
-            autocommit=autocommit,
-            default_branch_name=default_branch_name,
-            db_name=db_name,
-        )
+        return cls(connect(db_name), collector, db_name, default_branch_name,
+                   measure_storage)
 
     def __init__(
         self,
         connection,
         collector: rc.ResultCollector,
-        autocommit: bool,
-        default_branch_name: str,
         db_name: str,
+        default_branch_name: str = MAIN_BRANCH,
+        measure_storage: bool = False,
     ):
-        super().__init__(connection, result_collector=collector)
+        super().__init__(connection, collector, measure_storage)
         # Root database; every branch database name is derived from it.
         self.db_name = db_name
-        self.autocommit = autocommit
-        # Branch and database the connection is on, tracked client-side so
-        # get_current_branch() needs no round trip (it runs before most ops).
-        self._current_branch = None
+        self.default_branch = default_branch_name
         self._current_db = None
         # (table, reason) pairs already warned about, so a table skipped on
         # every merge is reported once.
         self._merge_skip_warned = set()
-        self._connect_branch_impl(default_branch_name)
+        self._connect_impl(Ref(default_branch_name))
+        self._current_ref = Ref(default_branch_name)
 
     # ------------------------------------------------------------------
     # Branch name <-> database name
     # ------------------------------------------------------------------
 
     def _db_for(self, branch: str) -> str:
-        """Database for a branch name or branch ID (a database name)."""
-        if branch == self.db_name or branch.startswith(self.db_name + _BRANCH_SEP):
-            return branch
         return branch_db_name(self.db_name, branch)
 
-    def _branch_for(self, db: str) -> str:
-        """Branch name held in database db."""
-        if db == self.db_name:
-            return MAIN_BRANCH
-        return db[len(self.db_name + _BRANCH_SEP):]
-
     def _use(self, db: str) -> None:
-        super().execute_sql(f"USE {_quote(db)};")
+        self._execute(f"USE {_quote(db)};")
         self._current_db = db
-        self._current_branch = self._branch_for(db)
 
-    # ------------------------------------------------------------------
-    # DBToolSuite hooks
-    # ------------------------------------------------------------------
-
-    def _get_table_columns(self, table_name: str) -> list[tuple]:
-        rows = super().execute_sql(mysql_common.TABLE_COLUMNS_QUERY, (table_name,))
+    def _get_table_columns(self, table_name: str) -> list:
+        rows = self._execute(mysql_common.TABLE_COLUMNS_QUERY, (table_name,))
         return mysql_common.normalize_column_types(rows)
 
-    def list_branches(self) -> list[str]:
+    def list_branches(self) -> list:
         with self.conn.cursor() as cur:
             branch_dbs = _branch_databases(cur, self.db_name)
-        return [MAIN_BRANCH] + [self._branch_for(db) for db in branch_dbs]
+        prefix = self.db_name + _BRANCH_SEP
+        return [MAIN_BRANCH] + [db[len(prefix):] for db in branch_dbs]
 
-    def _create_branch_impl(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """Fork the parent's database (the current one if parent_id is not
-        given) and switch to the fork, like Dolt's checkout -b."""
-        source_db = self._db_for(parent_id) if parent_id else self._current_db
-        new_db = branch_db_name(self.db_name, branch_name)
-        super().execute_sql(
-            f"FORK DATABASE {_quote(source_db)} TO {_quote(new_db)};"
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+
+    def _storage_bytes(self) -> int:
+        """Size of the server's data directory. SeekDB keeps all databases
+        in one store, so this covers the whole server."""
+        return dbutil.get_directory_size_bytes(SEEKDB_DATA_DIR)
+
+    def _connect_impl(self, ref: Ref) -> None:
+        self._use(self._db_for(ref.branch))
+
+    def _branch_impl(self, name: str, from_ref: Ref) -> None:
+        self._execute(
+            f"FORK DATABASE {_quote(self._db_for(from_ref.branch))} "
+            f"TO {_quote(branch_db_name(self.db_name, name))};"
         )
-        self._use(new_db)
 
-    def _connect_branch_impl(self, branch_name: str) -> None:
-        self._use(self._db_for(branch_name))
-
-    def _get_current_branch_impl(self) -> tuple[str, str]:
-        # The database name is unique, so it serves as the branch ID.
-        return (self._current_branch, self._current_db)
-
-    def _merge_branch_impl(self, source_branch: str, message: str = "") -> dict:
-        """Merge source_branch into the current branch, one table at a time.
+    def _merge_impl(self, into: Ref, source: Ref, message: str) -> dict:
+        """Merge source into target one table at a time.
 
         DRAFT. SeekDB's merge differs from Dolt's, so results aren't directly
         comparable:
 
         - Per table: SeekDB has no database-level merge, so each table is
           merged with its own MERGE TABLE statement, in name order. The merge
-          as a whole isn't atomic. If a later table fails, earlier tables
-          stay merged.
+          as a whole isn't atomic.
         - Insert only, in effect: MERGE TABLE compares the two tables
-          directly, with no common ancestor, so it can't tell which side
-          changed a row. Every row that differs is a conflict, and STRATEGY
-          OURS keeps the current branch's version (like dolt_mysql's --ours
-          resolution). The result is that only rows whose primary key is
-          missing from the target are added: updates made on the source are
-          dropped even when the target never touched the row, and rows
-          deleted on the source stay. (STRATEGY THEIRS would apply the
-          source's updates but also undo the target's own changes.)
-        - SeekDB doesn't report how many conflicts it resolved, so
-          "conflicts" is None.
-        - Tables whose schemas differ are skipped: MERGE TABLE refuses
-          (error 4029) when the two tables' columns or primary key differ,
-          and tables that exist only on the source aren't created on the
-          target. Such tables are skipped with a warning.
-        - Needs a primary key: tables without one (e.g. CH's history) are
-          skipped with a warning.
-        - Not transactional: each MERGE TABLE takes effect at once, even
-          with autocommit off; a later rollback doesn't undo it.
-        - SeekDB has no commits, so message is unused and "hash" is "".
-
-        The timed MERGE op also includes the two information_schema queries
-        that list each side's tables.
+          directly, with no common ancestor, so every differing row is a
+          conflict and STRATEGY OURS keeps the target's version. Only rows
+          whose primary key is missing from the target are added.
+        - SeekDB doesn't report how many conflicts it resolved.
+        - Tables whose schemas differ (error 4029), that exist only on the
+          source, or that have no primary key are skipped with a warning.
+        - Not transactional: each MERGE TABLE takes effect at once.
+        - ``message`` is unused (no commits).
 
         Returns {"fast_forward": False, "conflicts": None, "hash": "",
-                 "merged_tables": [table, ...],
-                 "skipped_tables": {table: reason}}.
+                 "merged_tables": [...], "skipped_tables": {table: reason}}.
         """
-        source_db = self._db_for(source_branch)
-        target_db = self._current_db
+        source_db = self._db_for(source.branch)
+        target_db = self._db_for(into.branch)
         if source_db == target_db:
-            raise ValueError(f"Cannot merge branch '{source_branch}' into itself")
+            raise ValueError(f"Cannot merge branch '{source.branch}' into itself")
 
         source_tables = self._tables_with_pk_flag(source_db)
         target_tables = self._tables_with_pk_flag(target_db)
@@ -325,13 +282,8 @@ class SeekDBToolSuite(DBToolSuite):
         }
 
     def _merge_table(self, source_db: str, target_db: str, table: str) -> bool:
-        """MERGE TABLE source_db.table INTO target_db.table, keeping the
-        target's rows on conflict. Returns False if SeekDB refuses because
-        the two tables' schemas differ.
-
-        Runs on the cursor directly, rather than through execute_sql, which
-        re-raises every error as a plain Exception and loses the error code.
-        """
+        """MERGE TABLE source_db.table INTO target_db.table keeping the
+        target's rows on conflict. False if the schemas differ."""
         sql = (
             f"MERGE TABLE {_quote(source_db)}.{_quote(table)} "
             f"INTO {_quote(target_db)}.{_quote(table)} STRATEGY OURS;"
@@ -345,9 +297,8 @@ class SeekDBToolSuite(DBToolSuite):
             raise
         return True
 
-    def _tables_with_pk_flag(self, db: str) -> dict[str, bool]:
-        """Map each base table in db to whether it has a primary key."""
-        rows = super().execute_sql(
+    def _tables_with_pk_flag(self, db: str) -> dict:
+        rows = self._execute(
             """
             SELECT t.table_name, c.constraint_name IS NOT NULL
             FROM information_schema.tables t
@@ -362,88 +313,38 @@ class SeekDBToolSuite(DBToolSuite):
         )
         return {table: bool(has_pk) for table, has_pk in rows or []}
 
-    def _delete_branch_impl(self, branch_name: str, branch_id: str) -> None:
-        """Drop the branch's database; must NOT be on the branch being deleted.
-
-        Like Dolt, main can be deleted too: forks don't depend on the database
-        they were forked from, and drop_database() still finds them by name.
-        """
-        db = self._db_for(branch_id or branch_name)
+    def _delete_impl(self, ref: Ref) -> None:
+        """Drop the branch's database. Forks don't depend on the database
+        they were forked from, so even main can be dropped."""
+        db = self._db_for(ref.branch)
         if db == self._current_db:
-            raise ValueError(f"Cannot delete the current branch '{branch_name}'")
-        super().execute_sql(f"DROP DATABASE {_quote(db)};")
+            self._use(self._db_for(self.default_branch))
+            self._current_ref = Ref(self.default_branch)
+        self._execute(f"DROP DATABASE {_quote(db)};")
 
-    def get_total_storage_bytes(self) -> int:
-        """Get total storage by measuring the SeekDB server's data directory.
+    def _qualified_table(self, ref: Ref, table: str) -> str:
+        return f"{_quote(self._db_for(ref.branch))}.{_quote(table)}"
 
-        SeekDB keeps all databases in one store, with no per-database
-        directory, so this covers the whole server.
-        """
-        return dbutil.get_directory_size_bytes(SEEKDB_DATA_DIR)
+    # ------------------------------------------------------------------
+    # Async: an aiomysql pool; each pool connection remembers its database.
+    # ------------------------------------------------------------------
 
-    # ========================================================================
-    # Async implementations
-    # ========================================================================
+    async def open_async_pool(self, size: int) -> None:
+        self.async_pool = await create_pool_async(self.db_name, size)
 
-    async def open_async_pool(self, size: int, branch_name: str) -> None:
-        """Open an aiomysql pool of `size` connections on branch_name.
+    def _pool_connection(self):
+        return mysql_common.aiomysql_pool_connection(self.async_pool)
 
-        Each pool connection is opened on the branch's database, so unlike
-        dolt_mysql no per-connection checkout is needed: a connection the
-        pool opens to replace a dropped one starts on the same branch.
-        """
-        self.async_pool = await create_pool_async(self._db_for(branch_name), size)
-
-    @asynccontextmanager
-    async def _pool_connection(self):
-        """Borrow a pool connection (aiomysql's API differs from psycopg's)."""
-        async with self.async_pool.acquire() as conn:
-            yield conn
-
-    async def close_connection_async(self) -> None:
+    async def close_async_pool(self) -> None:
         if self.async_pool:
             self.async_pool.close()
             await self.async_pool.wait_closed()
             self.async_pool = None
 
-    # Branch hooks run on one pinned pool connection (see
-    # DBToolSuite._acquire_async_conn), so forking and switching to the fork
-    # happen in the same session. They leave the sync connection's
-    # _current_branch/_current_db alone, like dolt_mysql's.
-
-    async def _current_db_async(self) -> str:
-        """Database the pinned pool connection is on."""
-        result = await self.execute_sql_async("SELECT DATABASE();")
-        return result[0][0]
-
-    async def _create_branch_impl_async(
-        self, branch_name: str, parent_id: str = None
-    ) -> None:
-        """Async version of _create_branch_impl."""
-        source_db = (
-            self._db_for(parent_id) if parent_id else await self._current_db_async()
-        )
-        new_db = branch_db_name(self.db_name, branch_name)
-        await self.execute_sql_async(
-            f"FORK DATABASE {_quote(source_db)} TO {_quote(new_db)};"
-        )
-        await self.execute_sql_async(f"USE {_quote(new_db)};")
-
-    async def _connect_branch_impl_async(self, branch_name: str) -> None:
-        """Async version of _connect_branch_impl."""
-        await self.execute_sql_async(f"USE {_quote(self._db_for(branch_name))};")
-
-    async def _get_current_branch_impl_async(self) -> tuple[str, str]:
-        """Async version of _get_current_branch_impl."""
-        db = await self._current_db_async()
-        return (self._branch_for(db), db)
-
-    async def _delete_branch_impl_async(
-        self, branch_name: str, branch_id: str
-    ) -> None:
-        """Async version of _delete_branch_impl; must NOT be on the branch
-        being deleted (checked on the pinned pool connection)."""
-        db = self._db_for(branch_id or branch_name)
-        if db == await self._current_db_async():
-            raise ValueError(f"Cannot delete the current branch '{branch_name}'")
-        await self.execute_sql_async(f"DROP DATABASE {_quote(db)};")
+    async def _connect_impl_async(self, conn, ref: Ref):
+        db = self._db_for(ref.branch)
+        if getattr(conn, "_seekdb_db", None) != db:
+            async with conn.cursor() as cur:
+                await cur.execute(f"USE {_quote(db)};")
+            conn._seekdb_db = db
+        return conn

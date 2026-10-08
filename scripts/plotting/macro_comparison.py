@@ -37,15 +37,22 @@ from matplotlib.patches import Patch
 
 OP_NAMES = {
     0: "UNSPECIFIED",
-    1: "BRANCH_CREATE",
-    2: "BRANCH_CONNECT",
-    3: "READ",
-    4: "INSERT",
-    5: "UPDATE",
-    6: "COMMIT",
-    7: "DDL",
-    8: "BRANCH_DELETE",
-    9: "API_RETRY_WAIT",
+    1: "BRANCH",
+    2: "COMMIT",
+    3: "DIFF",
+    4: "LOG",
+    5: "MERGE",
+    6: "REBASE",
+    7: "REVERT",
+    8: "RESET",
+    9: "DELETE",
+    10: "CONNECT",
+    11: "READ",
+    12: "INSERT",
+    13: "UPDATE",
+    14: "DDL",
+    15: "EXEC",
+    16: "API_RETRY_WAIT",
 }
 
 OP_SHORT = {
@@ -76,9 +83,12 @@ WORKFLOW_ORDER = [
     "simulation",
 ]
 
-BRANCH_OPS = {1, 2, 8}
-DATA_OPS = {3, 4, 5, 7}
-OVERHEAD_OPS = {9}
+# Git-like verbs plus the CONNECT row exec() records on a branch switch.
+BRANCH_OPS = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+# Per-statement rows inside an exec(). EXEC (15) summarises them and is
+# excluded so statements are not counted twice.
+DATA_OPS = {11, 12, 13, 14}
+OVERHEAD_OPS = {16}
 
 BACKEND_COLORS = {
     "Dolt": "#2176AE",
@@ -503,7 +513,7 @@ def plot_heatmap_comparison(dolt_wfs, neon_wfs, outdir):
         return
 
     # Canonical display order: branch ops first, then data ops
-    # Same as box plots: BRANCH_CREATE, BRANCH_CONNECT, BRANCH_DELETE, then data ops
+    # Same as box plots: branch verbs, CONNECT, then data ops
     OP_ORDER = [1, 2, 8, 3, 4, 5, 7, 6]
 
     all_ops_set = set()

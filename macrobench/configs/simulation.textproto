@@ -30,4 +30,3 @@ step {
     prune_prob: 1.0     # gamma (discard all after eval)
 }
 
-autocommit: true

@@ -6,10 +6,9 @@
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-branches --threads <N> [options]
 #   ./scripts/run_throughput_bench.sh <backend> <sql_dump_path> --sweep-proportional [options]
 #
-# Runs in async mode by default (dolt, dolt_mysql, seekdb, neon): each thread keeps
-# --concurrent-requests ops in flight, one pooled connection each. Use
-# --mode sync for the other backends; sync mode runs one op at a time per
-# thread.
+# Runs in async mode by default: each thread keeps --concurrent-requests ops
+# in flight through exec_async(), one pooled connection each. Use --mode sync
+# to run one op at a time per thread through exec().
 #
 # Examples:
 #   # Fix threads at 8 and branches at 1, vary concurrency: 1,2,4,8,16,32
@@ -140,15 +139,14 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "Usage: $0 <backend> <sql_dump_path> {--sweep-concurrency | --sweep-branches | --sweep-proportional} [options]"
     echo ""
     echo "Required arguments:"
-    echo "  backend: dolt, dolt_mysql, seekdb, neon, kpg, xata, txn (postgres transactions), file_copy, tiger"
+    echo "  backend: dolt, dolt_mysql, seekdb, neon, xata, file_copy"
     echo "  sql_dump_path: Path to SQL dump file"
     echo "  --sweep-concurrency: Fix threads/branches, vary concurrent requests (requires --threads and --branches; async only)"
     echo "  --sweep-branches: Fix threads, vary branches (requires --threads)"
     echo "  --sweep-proportional: Vary both threads and branches proportionally"
     echo ""
     echo "Options:"
-    echo "  --mode <async|sync>: Runner to use (default: async). Async supports dolt, dolt_mysql, seekdb and neon;"
-    echo "                       use sync for the other backends. Sync runs one op at a time per thread."
+    echo "  --mode <async|sync>: Runner to use (default: async). Sync runs one op at a time per thread."
     echo "  --threads <N>: Fixed thread count (for --sweep-concurrency and --sweep-branches modes)"
     echo "  --branches <N>: Fixed branch count (for --sweep-concurrency mode)"
     echo "  --threads-per-branch <N>: Threads per branch ratio for --sweep-proportional (default: 4)"
@@ -173,7 +171,7 @@ if [ -z "$BACKEND" ] || [ -z "$SQL_DUMP_PATH" ] || [ -z "$SWEEP_MODE" ]; then
     echo "  # One thread per branch, 4 requests in flight each, 1-128 branches"
     echo "  $0 neon db.sql --sweep-proportional --threads-per-branch 1 --concurrent-requests 4"
     echo ""
-    echo "  # Backend without async support"
+    echo "  # One op at a time per thread"
     echo "  $0 xata db.sql --sweep-branches --threads 16 --mode sync"
     exit 1
 fi
@@ -200,18 +198,13 @@ BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
 BACKEND_LOWER=$(echo "$BACKEND" | tr '[:upper:]' '[:lower:]')
 
 # Validate backend
-if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|KPG|XATA|TXN|FILE_COPY|TIGER)$ ]]; then
+if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON|XATA|FILE_COPY)$ ]]; then
     echo "Error: Invalid backend '$BACKEND'"
     exit 1
 fi
 
-# Validate execution mode. Async needs a backend whose async path checks out
-# the worker's branch on every pooled connection.
+# Validate execution mode.
 if [ "$MODE" = "async" ]; then
-    if [[ ! "$BACKEND_UPPER" =~ ^(DOLT|DOLT_MYSQL|SEEKDB|NEON)$ ]]; then
-        echo "Error: async mode supports dolt, dolt_mysql, seekdb and neon only; use --mode sync for '$BACKEND'"
-        exit 1
-    fi
     USE_ASYNC="true"
 elif [ "$MODE" = "sync" ]; then
     if [ "$SWEEP_MODE" = "concurrency" ] || [ "$CONCURRENT_REQUESTS" -gt 1 ]; then
@@ -330,7 +323,7 @@ get_num_ops() {
         BRANCH_CREATE)
             echo 1
             ;;
-        BRANCH_CONNECT|CONNECT_FIRST|CONNECT_MID|CONNECT_LAST)
+        BRANCH_CONNECT)
             # Scale connect ops with the number of threads (2x)
             echo $((num_threads * 2))
             ;;
@@ -454,7 +447,6 @@ database_setup {
   }
 }
 
-autocommit: true
 num_threads: ${num_threads}
 measure_storage: false
 concurrent_requests: ${concurrent_requests}

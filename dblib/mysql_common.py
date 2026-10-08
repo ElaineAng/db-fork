@@ -116,3 +116,14 @@ def _load_copy_block(cur, f, table: str, cols: str) -> None:
             batch = []
     if batch:
         cur.executemany(sql, batch)
+
+
+from contextlib import asynccontextmanager as _asynccontextmanager
+
+
+@_asynccontextmanager
+async def aiomysql_pool_connection(pool):
+    """Borrow a connection from an aiomysql pool (its acquire() API differs
+    from psycopg_pool's connection())."""
+    async with pool.acquire() as conn:
+        yield conn

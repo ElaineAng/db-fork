@@ -33,33 +33,24 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 # Operation type enum (from dblib/result.proto)
-OP_TYPE_BRANCH_CREATE = 1
-OP_TYPE_BRANCH_CONNECT = 2
-OP_TYPE_READ = 3
-OP_TYPE_CONNECT_FIRST = 10
-OP_TYPE_CONNECT_MID = 11
-OP_TYPE_CONNECT_LAST = 12
+OP_TYPE_BRANCH_CREATE = 1   # BRANCH
+OP_TYPE_BRANCH_CONNECT = 10  # CONNECT (recorded by exec() on a branch switch)
+OP_TYPE_READ = 11
 
 # Backend colors - highly differentiable palette
 BACKEND_COLORS = {
     "dolt": "#0072B2",      # Strong Blue
     "neon": "#D55E00",      # Vermillion/Orange
-    "kpg": "#009E73",       # Teal/Green
     "xata": "#CC79A7",      # Pink/Magenta
     "file_copy": "#F0E442",  # Yellow
-    "txn": "#E69F00",       # Gold/Orange
-    "tiger": "#56B4E9",     # Sky Blue
 }
 
 # Backend markers - different shapes for differentiation
 BACKEND_MARKERS = {
     "dolt": "o",      # Circle
     "neon": "s",      # Square
-    "kpg": "^",       # Triangle up
     "xata": "D",      # Diamond
     "file_copy": "v", # Triangle down
-    "txn": "p",       # Pentagon
-    "tiger": "*",     # Star
 }
 
 
@@ -67,7 +58,7 @@ def parse_filename(filename, operation='branch'):
     """Extract backend and branch_count from filename.
 
     Example: dolt_tpcc_16_spine_branch.parquet -> ('dolt', 16)
-             TIGER_tpcc_16_spine_branch.parquet -> ('tiger', 16)
+             XATA_tpcc_16_spine_branch.parquet -> ('xata', 16)
              dolt_tpcc_16_spine_connect.parquet -> ('dolt', 16)
              dolt_tpcc_multitrd_16_spine.parquet -> ('dolt', 16)
              neon_tpcc_multitrd_16_fan_out.parquet -> ('neon', 16)
@@ -128,7 +119,7 @@ def load_branch_data(data_dir):
         # Read parquet file
         df = pq.read_table(filepath).to_pandas()
 
-        # Filter to only BRANCH_CREATE operations (op_type=1)
+        # Filter to only BRANCH operations (op_type=1)
         # Note: The file also contains CONNECT operations
         df_branch = df[df['op_type'] == OP_TYPE_BRANCH_CREATE].copy()
 
@@ -179,8 +170,7 @@ def load_connect_data(data_dir):
     for pattern in connect_patterns:
         files.extend(glob.glob(pattern))
 
-    # All CONNECT operation types (CONNECT=2, CONNECT_FIRST=10, CONNECT_MID=11, CONNECT_LAST=12)
-    connect_op_types = [OP_TYPE_BRANCH_CONNECT, OP_TYPE_CONNECT_FIRST, OP_TYPE_CONNECT_MID, OP_TYPE_CONNECT_LAST]
+    connect_op_types = [OP_TYPE_BRANCH_CONNECT]
 
     for filepath in files:
         # Try parsing with different operation names
@@ -197,7 +187,7 @@ def load_connect_data(data_dir):
         # Read parquet file
         df = pq.read_table(filepath).to_pandas()
 
-        # Filter to all CONNECT operations (op_type in [2, 10, 11, 12])
+        # Filter to CONNECT operations
         df_connect = df[df['op_type'].isin(connect_op_types)].copy()
 
         if len(df_connect) == 0:
