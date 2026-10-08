@@ -314,11 +314,100 @@ def plot_latency_by_op(runs: list[Run], outdir: str) -> None:
     plt.close(fig)
 
 
+def data_op_stats(run: Run) -> pd.DataFrame:
+    """median/p90/count per (label, op_name) for data statements (OK rows only).
+
+    The label is the workload role the statement was issued under (spine,
+    ingest, backfill, rollout_step, ...), so this separates the concurrent
+    TPC-C spine traffic from the statements the agent itself runs.
+    """
+    df = run.ops
+    if df.empty or "label" not in df.columns:
+        return pd.DataFrame(columns=["label", "op_name", "median", "p90", "count"])
+    ok = df[(df["status"] == "OK") & df["op_name"].isin(DATA_OPS)].copy()
+    ok["label"] = ok["label"].fillna("").replace("", "(none)")
+    g = ok.groupby(["label", "op_name"])["latency"]
+    return pd.DataFrame({"median": g.median(), "p90": g.quantile(0.9), "count": g.size()}).reset_index()
+
+
+def plot_data_ops(runs: list[Run], outdir: str) -> None:
+    """One panel per scenario: data statements broken down by role x statement type."""
+    scenarios, backends = _grid(runs)
+    panels = []
+    for s in scenarios:
+        present = [r for r in runs if r.scenario == s]
+        keys: list[tuple[str, str]] = []
+        for r in present:
+            for lab, op in data_op_stats(r)[["label", "op_name"]].itertuples(index=False):
+                if (lab, op) not in keys:
+                    keys.append((lab, op))
+        keys.sort(key=lambda k: (k[0] != "spine", k[0], DATA_OPS.index(k[1])))
+        if keys:
+            panels.append((s, keys))
+    if not panels:
+        return
+    ncols = min(2, len(panels))
+    nrows = int(np.ceil(len(panels) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(9 * ncols, 4.2 * nrows), squeeze=False)
+    for idx, (s, keys) in enumerate(panels):
+        ax = axes[idx // ncols][idx % ncols]
+        x = np.arange(len(keys))
+        width = 0.8 / max(1, len(backends))
+        for i, b in enumerate(backends):
+            r = _find(runs, s, b)
+            if r is None:
+                continue
+            st = data_op_stats(r).set_index(["label", "op_name"])
+            med = np.array([st.loc[k, "median"] * 1000 if k in st.index else np.nan for k in keys])
+            p90 = np.array([st.loc[k, "p90"] * 1000 if k in st.index else np.nan for k in keys])
+            pos = x + (i - (len(backends) - 1) / 2) * width
+            err = np.nan_to_num(p90 - med, nan=0.0)
+            ax.bar(pos, np.nan_to_num(med), width, yerr=[np.zeros_like(err), err],
+                   color=PALETTE(i), label=b, capsize=2, error_kw={"lw": 0.8})
+        ax.set_yscale("log")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{lab} {op}" for lab, op in keys], rotation=45, ha="right", fontsize=7)
+        ax.set_ylabel("median ms (whisker to p90)")
+        ax.set_title(SCENARIO_TITLES.get(s, s))
+        ax.grid(axis="y", alpha=0.3)
+        if idx == 0:
+            ax.legend(fontsize=8)
+    for idx in range(len(panels), nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+    fig.suptitle("Data statement latency by workload role and statement type")
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "latency_data_ops.png"), dpi=150)
+    plt.close(fig)
+
+
+def write_data_ops_table(runs: list[Run], outdir: str) -> None:
+    rows = []
+    for r in runs:
+        st = data_op_stats(r)
+        if st.empty:
+            continue
+        st.insert(0, "backend", r.backend)
+        st.insert(0, "scenario", r.scenario)
+        st["median_ms"] = (st.pop("median") * 1000).round(2)
+        st["p90_ms"] = (st.pop("p90") * 1000).round(2)
+        rows.append(st)
+    if not rows:
+        return
+    df = pd.concat(rows, ignore_index=True)
+    df.to_csv(os.path.join(outdir, "data_ops.csv"), index=False)
+    with open(os.path.join(outdir, "data_ops.md"), "w") as f:
+        f.write("# Data statement latency by role\n\n")
+        f.write("| " + " | ".join(df.columns) + " |\n")
+        f.write("|" + "---|" * len(df.columns) + "\n")
+        for row in df.itertuples(index=False):
+            f.write("| " + " | ".join(str(v) for v in row) + " |\n")
+
+
 def plot_latency_cdf(runs: list[Run], outdir: str) -> None:
     scenarios, backends = _grid(runs)
     for s in scenarios:
         present = [r for r in runs if r.scenario == s and not r.ops.empty]
-        verbs = [v for v in BRANCH_VERBS
+        verbs = [v for v in BRANCH_VERBS + DATA_OPS
                  if any(((r.ops["op_name"] == v) & (r.ops["status"] == "OK")).any() for r in present)]
         if not verbs:
             continue
@@ -440,6 +529,8 @@ def main() -> None:
     plot_elapsed(runs, args.outdir)
     plot_time_breakdown(runs, args.outdir)
     plot_latency_by_op(runs, args.outdir)
+    plot_data_ops(runs, args.outdir)
+    write_data_ops_table(runs, args.outdir)
     plot_latency_cdf(runs, args.outdir)
     plot_storage(runs, args.outdir)
 
@@ -447,7 +538,8 @@ def main() -> None:
             "invariants_passed", "invariants_failed"]
     print(df[[c for c in cols if c in df.columns]].to_string(index=False))
     print(f"\nwrote {len(runs)} run(s) to {args.outdir}: summary.md, summary.csv, "
-          f"elapsed.png, time_breakdown.png, latency_by_op.png, latency_cdf_<scenario>.png"
+          f"elapsed.png, time_breakdown.png, latency_by_op.png, latency_data_ops.png, "
+          f"data_ops.md, latency_cdf_<scenario>.png"
           + (", storage.png" if os.path.exists(os.path.join(args.outdir, 'storage.png')) else ""))
 
 

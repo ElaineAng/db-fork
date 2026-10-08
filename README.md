@@ -445,7 +445,8 @@ uv run python scripts/plotting/plot_macrobench.py \
 | `elapsed.png` | end-to-end time per scenario, setup vs workload, backends side by side |
 | `time_breakdown.png` | summed latency by group (branch verbs, data statements, connects) |
 | `latency_by_op.png` | median latency per operation type and scenario (whisker to p90) |
-| `latency_cdf_<scenario>.png` | latency CDF of each branch verb, one line per backend |
+| `latency_data_ops.png`, `data_ops.md/.csv` | data statements (READ/INSERT/UPDATE/DDL) split by workload role: spine traffic vs. the agent's own statements (ingest, backfill, rollout_step, ...) |
+| `latency_cdf_<scenario>.png` | latency CDF of each branch verb and data statement type, one line per backend |
 | `storage.png` | database size over the run (runs made with `--measure-storage`) |
 
 Only the newest run per (scenario, backend) is used unless `--all-runs` is
