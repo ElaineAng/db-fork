@@ -47,6 +47,8 @@ from dblib import dolt_mysql
 from dblib.dolt_mysql import DoltMySQLToolSuite
 from dblib import seekdb
 from dblib.seekdb import SeekDBToolSuite
+from dblib import matrixone
+from dblib.matrixone import MatrixOneToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
@@ -320,6 +322,10 @@ def create_db_tools(
         return SeekDBToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
+    if backend == tp.Backend.MATRIXONE:
+        return MatrixOneToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
     if backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.init_for_bench(
             result_collector,
@@ -425,6 +431,13 @@ class BackendManager:
             info.default_branch_id = db_name
             print(f"Default SeekDB connection URI: {info.default_uri}")
 
+        elif backend == tp.Backend.MATRIXONE:
+            info.default_uri = MatrixOneToolSuite.get_default_connection_uri()
+            info.default_branch_name = matrixone.MAIN_BRANCH
+            # A MatrixOne branch's ID is its database name; main is db_name.
+            info.default_branch_id = db_name
+            print(f"Default MatrixOne connection URI: {info.default_uri}")
+
         elif backend == tp.Backend.FILE_COPY:
             info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
             info.default_uri = FileCopyToolSuite.get_default_connection_uri()
@@ -479,6 +492,8 @@ class BackendManager:
             dolt_mysql.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.SEEKDB:
             seekdb.setup_database(db_name, sql_dump_path)
+        elif require_db_setup and backend == tp.Backend.MATRIXONE:
+            matrixone.setup_database(db_name, sql_dump_path)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
@@ -516,6 +531,12 @@ class BackendManager:
             try:
                 # Also drops every branch database forked from db_name.
                 seekdb.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.MATRIXONE and db_name:
+            try:
+                # Also drops every branch database and snapshot of the run.
+                matrixone.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
@@ -565,6 +586,8 @@ class BackendManager:
             return DoltMySQLToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.SEEKDB:
             return SeekDBToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.MATRIXONE:
+            return MatrixOneToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
             return FileCopyToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.NEON:

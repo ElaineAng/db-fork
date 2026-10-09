@@ -435,6 +435,24 @@ class DBToolSuite(ABC):
         caps["exec_async"] = cls.supports("exec_async")
         return caps
 
+    # How each supported verb is realised, for the report: "native" (one
+    # backend primitive), "composed" (several native primitives driven from
+    # here) or "simulated" (SQL emulation of something the backend lacks).
+    # Backends list only the verbs that are not plain "native".
+    IMPLEMENTATION: dict = {}
+    # Free-text detail per verb (optional).
+    IMPLEMENTATION_NOTES: dict = {}
+
+    @classmethod
+    def implementation(cls) -> dict:
+        out = {}
+        for verb in VERBS + ("commit_refs", "multi_ref_exec"):
+            if not cls.supports(verb):
+                out[verb] = "unsupported"
+            else:
+                out[verb] = cls.IMPLEMENTATION.get(verb, "native")
+        return out
+
     def _unsupported(self, op: str, reason: str = "") -> UnsupportedOperation:
         return UnsupportedOperation(op, self.BACKEND_NAME, reason)
 

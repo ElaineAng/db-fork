@@ -100,7 +100,11 @@ Every verb returns an `OpResult` with `status` OK, UNSUPPORTED (the backend
 has no such operation: zero latency, workload continues) or FAILED (the
 backend tried and errored). Nothing raises unless `raise_on_error=True`;
 `result.raise_for_status()` raises on demand. `DBToolSuite.capabilities()`
-reports which verbs a backend supports.
+reports which verbs a backend supports, and `DBToolSuite.implementation()`
+how each one is realised: `native` (one backend primitive), `composed`
+(several native primitives driven by the backend class) or `simulated` (SQL
+emulation of something the backend lacks). The macrobench e2e stats carry
+both under `capabilities` and `implementation`.
 
 | Backend | branch | commit/diff/log | merge | rebase/revert | reset | delete | commit refs | multi-branch exec | exec_async |
 |---------|--------|-----------------|-------|---------------|-------|--------|-------------|-------------------|------------|
@@ -108,6 +112,7 @@ reports which verbs a backend supports.
 | `neon` | yes | | | | restore (LSN/timestamp) | yes | | | yes |
 | `xata` | yes | | | | | yes | | | yes |
 | `seekdb` | yes | yes (SCN snapshots) | yes (SQL three-way) | yes | yes | yes | yes | yes | yes |
+| `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes | yes | yes | yes | yes |
 | `file_copy` | yes | | | | | yes | | | yes |
 
 ### exec()
@@ -117,7 +122,7 @@ results = db.exec(script, refs=["feature"], mode="per_ref", label="eval")
 ```
 
 runs `script` on each ref in turn (`mode="per_ref"`), or once with every ref
-addressable from one session (`mode="multi"`, Dolt and SeekDB only; other
+addressable from one session (`mode="multi"`, Dolt, SeekDB and MatrixOne only; other
 backends record it as UNSUPPORTED). A script is a list of SQL statements
 (strings or `(sql, params)`), Python source, or a callable. Python source
 runs with `db` (the session), `params` and `suite` in scope and may define
@@ -224,7 +229,7 @@ workload {
 | Argument | Description |
 |----------|-------------|
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
-| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
+| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 
 ```bash
@@ -278,7 +283,7 @@ Use `scripts/run_single_thread_bench.sh` to measure single-threaded operation la
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `sql_dump_path` | Path to SQL dump file (e.g., `db_setup/tpcc_schema.sql`) |
 | `num_branches` | Number of branches to create for testing |
 
@@ -356,7 +361,7 @@ than branches, threads share branches.
 
 | Argument | Description |
 |----------|-------------|
-| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `neon`, `xata`, `file_copy` |
+| `backend` | Database backend: `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `sql_dump_path` | Path to SQL dump file |
 | `--sweep-concurrency` | Fix threads and branches, vary concurrent requests (requires `--threads` and `--branches`; async only) |
 | `--sweep-branches` | Fix threads, vary branches (requires `--threads`) |
@@ -649,6 +654,83 @@ closes.
 Async mode (`use_async` / `concurrent_requests > 1`) uses an aiomysql pool,
 like `dolt_mysql`. Each pool connection is opened on the worker's branch
 database.
+
+---
+
+## MatrixOne backend — `matrixone`
+
+Runs against MatrixOne (MySQL-compatible, port 6001). Build it from source
+(`make build` in a checkout of https://github.com/matrixorigin/matrixone, Go
+1.26+ and cmake needed; v4.2.5 was used here) and start it with
+`./mo-service -launch ./etc/launch/launch.toml`, or run the
+`matrixorigin/matrixone` image. Connection settings come from `MO_HOST`
+(default `127.0.0.1`), `MO_PORT` (`6001`), `MO_USER` (`root`) and
+`MO_PASSWORD` (`111`, the standalone default). Storage is measured on the
+server's data directory, `MO_DATA_DIR` (default `~/mo/matrixone/mo-data`),
+which covers the whole server.
+
+MatrixOne ships "git for data" primitives: database and table branches with
+recorded lineage (`DATA BRANCH CREATE DATABASE ... FROM ... {snapshot}`), a
+three-way `DATA BRANCH DIFF` / `DATA BRANCH MERGE` that finds the lowest
+common ancestor itself, `DATA BRANCH PICK ... BETWEEN SNAPSHOT`, named
+snapshots with time-travel reads (`t{snapshot = 'x'}`, readable even after
+the database is dropped) and `RESTORE DATABASE ... {snapshot}`. As on
+SeekDB, each branch is its own database (`main` is `<db_name>`, branch `X`
+is `<db_name>__X`), and a multi-branch script addresses another branch as
+`` `<db>__<branch>`.`<table>` `` or a commit as `` `<db>`.`<table>`{snapshot = '...'} ``.
+
+A commit is a database snapshot; its message and order live in the branch
+database's `_bb_commits` table, which branches inherit. Per verb
+(`MatrixOneToolSuite.IMPLEMENTATION` / `IMPLEMENTATION_NOTES` carry the
+same summary for the report):
+
+- `branch()` (native): `CREATE SNAPSHOT` on the parent (the fork point)
+  and `DATA BRANCH CREATE DATABASE ... FROM ... {snapshot}`; the new branch
+  is snapshotted too so its own delta can be read later.
+- `commit()` (composed): `CREATE SNAPSHOT FOR DATABASE` plus the log row.
+  `log()` (simulated) reads the table.
+- `diff()` (native): `DATA BRANCH DIFF ... OUTPUT SUMMARY` per table.
+- `merge()` (composed): `DATA BRANCH MERGE <src>.<t> INTO <dst>.<t> WHEN
+  CONFLICT SKIP|ACCEPT` per table ("ours" | "theirs"); the conflict count,
+  and the rows a resolve callable gets (Dolt's `base_*`/`our_*`/`their_*`
+  shape), come from the two sides' native diffs against the fork snapshot.
+  A callable runs over the SKIP result. Tables and columns the source has
+  and the target lacks are added first (`DATA BRANCH CREATE TABLE ... FROM`,
+  `ALTER TABLE ADD COLUMN`); a differing primary key is a schema conflict
+  and the verb fails without touching data. Set `MO_COUNT_CONFLICTS=0` to
+  skip the conflict count when `on_conflict` is "ours"/"theirs".
+- `rebase()` (composed): a re-fork. A temporary clone of the upstream's
+  head snapshot receives the branch's delta since its fork point through
+  `DATA BRANCH PICK ... BETWEEN SNAPSHOT` (the branch's own snapshots;
+  key-less tables are replayed row by row), conflicts with the upstream's
+  delta over the same period are resolved per `on_conflict` ("ours" = the
+  upstream, "theirs" = the branch, as in git), and the clone replaces the
+  branch. Its lineage now starts at the upstream head, so MatrixOne's LCA
+  for a later merge is that head and the merge sees only newer changes.
+- `reset()` (native): `RESTORE DATABASE <branch> {snapshot}` when the
+  commit was made on the branch; a commit inherited from the parent is
+  restored row by row from the snapshot's time-travel view.
+- `revert()` (simulated): `DATA BRANCH DIFF` between the commit's snapshot
+  and its predecessor, inverse applied with SQL.
+- `delete()` (native): `DATA BRANCH DELETE DATABASE` (`DROP DATABASE` after
+  a restore, which leaves the database without branch metadata).
+
+MatrixOne's diff is reliable for two snapshots of one table, for a clone
+(or chain of clones) against its ancestor's head, and for a clone against
+the exact snapshot it was cloned from; it drops the ancestor's updates and
+deletes when a clone is compared with an *older* snapshot of the ancestor,
+which is why `rebase()` replays the branch's delta with `PICK` instead of
+merging the branch into the clone. `DATA BRANCH DIFF ... OUTPUT AS` fails
+on a table altered since the base (v4.2.5), so diff rows are fetched to the
+client. A native-merge conflict between an update and a delete keeps the
+update (the row is resurrected). Snapshot names are silently truncated to
+64 characters; the backend keeps its own below that. `CREATE INDEX IF NOT
+EXISTS` is not accepted (S2 falls back to `CREATE INDEX`).
+
+A commit ref used with `exec()` is materialised as a temporary branch
+(`<db>__tmp_*`) created from the snapshot and dropped when the connection
+closes. `drop_database()` drops every branch database and every snapshot of
+the run (`bb_<db>_*`). Async mode uses an aiomysql pool, like `dolt_mysql`.
 
 ---
 

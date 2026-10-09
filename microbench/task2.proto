@@ -10,6 +10,7 @@ enum Backend {
   FILE_COPY = 4;
   DOLT_MYSQL = 7;
   SEEKDB = 8;
+  MATRIXONE = 9;
 }
 
 // Operation types for benchmarking

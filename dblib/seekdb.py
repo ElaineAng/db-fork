@@ -297,6 +297,35 @@ class SeekDBToolSuite(DBToolSuite):
     BACKEND_NAME = "seekdb"
     SUPPORTS_COMMIT_REFS = True
     SUPPORTS_MULTI_REF_EXEC = True
+    # For the report: FORK/DROP DATABASE and cross-database queries are
+    # native; everything else is built on current_scn() + flashback reads.
+    IMPLEMENTATION = {
+        "branch": "native",
+        "commit": "simulated",
+        "diff": "simulated",
+        "log": "simulated",
+        "merge": "native" if SEEKDB_NATIVE_MERGE else "simulated",
+        "rebase": "simulated",
+        "revert": "simulated",
+        "reset": "simulated",
+        "delete": "native",
+        "commit_refs": "simulated",
+        "multi_ref_exec": "native",
+    }
+    IMPLEMENTATION_NOTES = {
+        "branch": "FORK DATABASE (restored to the snapshot for a commit ref)",
+        "commit": "current_scn() recorded in a _bb_commits row (flashback snapshot)",
+        "diff": "anti-joins between flashback reads",
+        "log": "SELECT from the _bb_commits bookkeeping table",
+        "merge": ("MERGE TABLE ... STRATEGY OURS|THEIRS per table (no common ancestor)"
+                  if SEEKDB_NATIVE_MERGE else "SQL three-way merge against the fork SCN"),
+        "rebase": "SQL three-way merge of the upstream into the branch",
+        "revert": "inverse of the commit's (before, after) flashback snapshots applied with SQL",
+        "reset": "rows restored with SQL from the flashback snapshot",
+        "delete": "DROP DATABASE",
+        "commit_refs": "flashback reads AS OF SNAPSHOT scn",
+        "multi_ref_exec": "cross-database queries",
+    }
 
     @classmethod
     def get_default_connection_uri(cls) -> str:

@@ -75,6 +75,7 @@ def _capabilities_for(backend) -> dict:
     from dblib.dolt import DoltToolSuite
     from dblib.dolt_mysql import DoltMySQLToolSuite
     from dblib.seekdb import SeekDBToolSuite
+    from dblib.matrixone import MatrixOneToolSuite
     from dblib.xata import XataToolSuite
     from dblib.file_copy import FileCopyToolSuite
 
@@ -82,12 +83,37 @@ def _capabilities_for(backend) -> dict:
         tp.Backend.DOLT: DoltToolSuite,
         tp.Backend.DOLT_MYSQL: DoltMySQLToolSuite,
         tp.Backend.SEEKDB: SeekDBToolSuite,
+        tp.Backend.MATRIXONE: MatrixOneToolSuite,
         tp.Backend.NEON: NeonToolSuite,
         tp.Backend.XATA: XataToolSuite,
         tp.Backend.FILE_COPY: FileCopyToolSuite,
     }
     cls = table.get(backend)
     return cls.capabilities() if cls else {}
+
+
+def _implementation_for(backend) -> dict:
+    """How the backend realises each verb (native/composed/simulated)."""
+    from dblib.dolt import DoltToolSuite
+    from dblib.dolt_mysql import DoltMySQLToolSuite
+    from dblib.seekdb import SeekDBToolSuite
+    from dblib.matrixone import MatrixOneToolSuite
+    from dblib.xata import XataToolSuite
+    from dblib.file_copy import FileCopyToolSuite
+
+    table = {
+        tp.Backend.DOLT: DoltToolSuite,
+        tp.Backend.DOLT_MYSQL: DoltMySQLToolSuite,
+        tp.Backend.SEEKDB: SeekDBToolSuite,
+        tp.Backend.MATRIXONE: MatrixOneToolSuite,
+        tp.Backend.NEON: NeonToolSuite,
+        tp.Backend.XATA: XataToolSuite,
+        tp.Backend.FILE_COPY: FileCopyToolSuite,
+    }
+    cls = table.get(backend)
+    if not cls:
+        return {}
+    return {"verbs": cls.implementation(), "notes": dict(cls.IMPLEMENTATION_NOTES)}
 
 
 def _fetch_neon_consumption(project_id, label="", wait_min=15, max_retries=10):
@@ -295,6 +321,7 @@ def main(argv=None):
             "workload": MessageToDict(config.workload),
             "setup": seed_stats,
             "capabilities": _capabilities_for(config.backend),
+            "implementation": _implementation_for(config.backend),
             "invariants": inv,
             "metrics": ctx.metrics,
         }
