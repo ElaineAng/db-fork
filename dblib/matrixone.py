@@ -1064,11 +1064,30 @@ class MatrixOneToolSuite(DBToolSuite):
 
     # -- delete ------------------------------------------------------------
 
+    # MatrixOne reports a catalog deadlock when several workers drop and
+    # create branch databases at once; the statement is safe to retry.
+    _ER_DEADLOCK = 20701
+    _DROP_RETRIES = 5
+
     def _drop_branch_db(self, db: str) -> None:
-        try:
-            self._execute(f"DATA BRANCH DELETE DATABASE {_quote(db)};")
-        except pymysql.MySQLError:
-            self._execute(f"DROP DATABASE IF EXISTS {_quote(db)};")
+        for attempt in range(self._DROP_RETRIES):
+            try:
+                self._execute(f"DATA BRANCH DELETE DATABASE {_quote(db)};")
+                return
+            except pymysql.MySQLError as e:
+                if e.args and e.args[0] == self._ER_DEADLOCK and attempt < self._DROP_RETRIES - 1:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                break
+        for attempt in range(self._DROP_RETRIES):
+            try:
+                self._execute(f"DROP DATABASE IF EXISTS {_quote(db)};")
+                return
+            except pymysql.MySQLError as e:
+                if e.args and e.args[0] == self._ER_DEADLOCK and attempt < self._DROP_RETRIES - 1:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                raise
 
     def _delete_impl(self, ref: Ref) -> None:
         db = self._db_for(ref.branch)
