@@ -38,7 +38,7 @@ script is one of:
 * a callable taking the session.
 
 Each statement the script issues through ``db.sql()`` is timed and recorded
-as its own row (READ/INSERT/UPDATE/DDL). Per ref, exec() also records a
+as its own row (READ/INSERT/UPDATE/DELETE_ROWS/DDL). Per ref, exec() also records a
 CONNECT row when it had to switch the connection, and one EXEC row with the
 script's total latency and the storage delta. Every statement autocommits.
 
@@ -231,14 +231,17 @@ class _SessionBase:
         return self.suite._qualified_table(Ref.parse(ref), table)
 
     def record_keys_touched(self, n: int) -> None:
-        """Keys the next statement touches."""
+        """Keys the next statement touches (overrides the driver's count)."""
         self._keys_touched = n
 
-    def _take_keys(self) -> int:
+    def _take_keys(self, rows_touched: int) -> int:
+        """Explicit count if the script gave one, else the rows the driver
+        reported (affected rows for writes, rows returned for reads)."""
         n, self._keys_touched = self._keys_touched, 0
-        return n
+        return n if n else max(int(rows_touched or 0), 0)
 
-    def _record(self, query, vars, status, latency, start, end, value, error):
+    def _record(self, query, vars, status, latency, start, end, value, error,
+                rows_touched: int = 0):
         result = OpResult(
             op="sql", status=status, ref=str(self.ref), latency=latency,
             value=value, error=error,
@@ -250,7 +253,7 @@ class _SessionBase:
                 rc.GetOpTypeFromSQL(query), status=status, latency=latency,
                 start_time=start, end_time=end, ref=str(self.ref),
                 exec_id=self.exec_id, label=self.label, sql_query=text,
-                error_message=error, num_keys_touched=self._take_keys(),
+                error_message=error, num_keys_touched=self._take_keys(rows_touched),
             )
         return result
 
@@ -291,7 +294,7 @@ class Session(_SessionBase):
         re-raises on error."""
         if timed is not None:
             saved, self.timed = self.timed, timed
-        rows, error, status = None, "", OpStatus.OK
+        rows, error, status, touched = None, "", OpStatus.OK, 0
         start_wall = time.time()
         start = time.perf_counter()
         try:
@@ -299,13 +302,16 @@ class Session(_SessionBase):
                 cur.execute(query, vars)
                 if cur.description is not None:
                     rows = cur.fetchall()
+                    touched = len(rows)
+                else:
+                    touched = getattr(cur, "rowcount", 0)
         except Exception as e:
             status, error = OpStatus.FAILED, f"{type(e).__name__}: {e}"
             raise
         finally:
             latency = time.perf_counter() - start
             self._record(query, vars, status, latency, start_wall, time.time(),
-                         rows, error)
+                         rows, error, touched)
             if timed is not None:
                 self.timed = saved
         return rows
@@ -335,7 +341,7 @@ class AsyncSession(_SessionBase):
     async def sql(self, query: str, vars=None, timed: bool = None):
         if timed is not None:
             saved, self.timed = self.timed, timed
-        rows, error, status = None, "", OpStatus.OK
+        rows, error, status, touched = None, "", OpStatus.OK, 0
         start_wall = time.time()
         start = time.perf_counter()
         try:
@@ -343,13 +349,16 @@ class AsyncSession(_SessionBase):
                 await cur.execute(query, vars)
                 if cur.description is not None:
                     rows = await cur.fetchall()
+                    touched = len(rows)
+                else:
+                    touched = getattr(cur, "rowcount", 0)
         except Exception as e:
             status, error = OpStatus.FAILED, f"{type(e).__name__}: {e}"
             raise
         finally:
             latency = time.perf_counter() - start
             self._record(query, vars, status, latency, start_wall, time.time(),
-                         rows, error)
+                         rows, error, touched)
             if timed is not None:
                 self.timed = saved
         return rows

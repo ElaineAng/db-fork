@@ -34,7 +34,7 @@ MIGRATIONS = [
     ("M2_stock_reorder", "stock",
      lambda k: f"ALTER TABLE stock ADD COLUMN s_reorder_{k} INT"),
     ("M3_item_category", "item",
-     lambda k: f"ALTER TABLE item ADD COLUMN i_category_{k} VARCHAR(16)"),
+     lambda k: f"ALTER TABLE item ADD COLUMN i_category_{k} VARCHAR(16) DEFAULT 'general'"),
     ("M4_promo_table", "promo",
      lambda k: f"CREATE TABLE promo_{k} (promo_id INT NOT NULL, i_id INT, "
                f"discount DECIMAL(4,2), PRIMARY KEY (promo_id))"),

@@ -289,7 +289,7 @@ class DeleteOperation(Operation):
         return True  # Needs existing rows to delete
 
     def get_operation_type(self) -> rslt.OpType:
-        return rslt.OpType.UPDATE  # DELETE is categorized as UPDATE in result proto
+        return rslt.OpType.DELETE_ROWS
 
 
 class RangeReadOperation(Operation):

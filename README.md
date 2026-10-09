@@ -132,7 +132,7 @@ def run(db):
 ```
 
 Every statement issued through `db.sql()` autocommits and is recorded as its
-own row (READ/INSERT/UPDATE/DDL). Per ref, `exec()` also records a CONNECT
+own row (READ/INSERT/UPDATE/DELETE_ROWS/DDL) whose `num_keys_touched` is the rows affected (writes) or returned (reads), unless the script set it with `db.record_keys_touched(n)`. Per ref, `exec()` also records a CONNECT
 row when it had to switch the connection to that branch, and one EXEC row
 with the script's total latency and storage delta. `exec_async()` runs the
 same thing on a connection pool (`open_async_pool(size)`) for throughput
@@ -441,12 +441,14 @@ uv run python scripts/plotting/plot_macrobench.py \
 
 | Output | Content |
 |---|---|
-| `summary.md`, `summary.csv` | per run: status, elapsed/setup time, support, invariants, op counts, median latency per verb, scenario metrics |
-| `elapsed.png` | end-to-end time per scenario, setup vs workload, backends side by side |
-| `time_breakdown.png` | summed latency by group (branch verbs, data statements, connects) |
-| `latency_by_op.png` | median latency per operation type and scenario (whisker to p90) |
-| `latency_data_ops.png`, `data_ops.md/.csv` | data statements (READ/INSERT/UPDATE/DDL) split by workload role: spine traffic vs. the agent's own statements (ingest, backfill, rollout_step, ...) |
-| `latency_cdf_<scenario>.png` | latency CDF of each branch verb and data statement type, one line per backend |
+| `data/summary.md`, `data/summary.csv` | per run: status, elapsed/setup time, support, invariants, agent op counts and median latency per verb (spine load excluded), spine throughput and statement latency, scenario metrics |
+| `time_breakdown.png` | summed latency split into branch ops (verbs plus the connection switch `exec()` does to reach a ref) and data ops (statements); spine load excluded |
+| `latency_by_op_branch.png`, `latency_by_op_data.png`, `data/latency_by_op.md/.csv` | one panel per operation (branch verbs + CONNECT in one figure; statements inside `exec()` + EXEC in the other, with READ/UPDATE/DELETE split into point vs range by rows touched, READ:scan for aggregate/join reads, INSERT:bulk for multi-row inserts): median latency with a 95% CI, grouped by scenario (shaded bands), colour = backend; ops some backends lack are grouped last; the .md adds a backend x op support matrix |
+| `latency_exec_by_label.png`, `data/exec_by_label.md/.csv` | `exec()` latency per script label (rollout_step, ingest, spine, ...) with statements per exec, and the mean exec time split into READ/INSERT/UPDATE/DELETE_ROWS/DDL/CONNECT/other |
+| `progress.png` | completed agent steps (branch verbs and `exec()` runs, background load excluded) against elapsed seconds, one curve per backend |
+| `exec_time_by_op.png` | per scenario, one horizontal 100% bar per script label and backend (adjacent rows) showing where `exec()` time goes: statement types, CONNECT, and `other` (untimed BEGIN/COMMIT/ROLLBACK round trips plus the Python between statements); mean ms and count at the bar end |
+| `data/data_ops.md/.csv` | data statements (READ/INSERT/UPDATE/DELETE_ROWS/DDL) split by workload role: spine traffic vs. the agent's own statements (ingest, backfill, rollout_step, ...) |
+| `cdf/latency_cdf_<scenario>.png` | latency CDF of each branch verb and data statement type (agent rows only), one line per backend |
 | `storage.png` | database size over the run (runs made with `--measure-storage`) |
 
 Only the newest run per (scenario, backend) is used unless `--all-runs` is

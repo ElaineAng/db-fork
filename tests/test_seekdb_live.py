@@ -185,3 +185,25 @@ def test_merge_survives_index_after_updates_on_branch(suite):
     suite.exec(["UPDATE t SET v = 'later' WHERE id = 3"], refs=["idx"])
     r = suite.reset("idx", c.value)
     assert r.ok, r.error
+
+
+def test_rebase_carries_column_default(suite):
+    """A column added with a DEFAULT on the spine reaches the branch with the
+    same default, so rows the branch writes afterwards get the value."""
+    suite.commit("main", "base")
+    assert suite.branch("feat", "main").ok
+    suite.exec(["ALTER TABLE t ADD COLUMN cat VARCHAR(16) DEFAULT 'general'",
+                "INSERT INTO t (id, v, n) VALUES (40,'forty',40)"], refs=["main"])
+    suite.commit("main", "migration")
+    suite.exec(["INSERT INTO t (id, v, n) VALUES (50,'fifty',50)"], refs=["feat"])
+    suite.commit("feat", "feature work")
+
+    r = suite.rebase("feat", "main")
+    assert r.ok, r.error
+    assert "t.cat" in r.value["schema_changes"]["added_columns"]
+    assert rows(suite, "feat", "SELECT column_default FROM information_schema.columns "
+                               "WHERE table_schema = DATABASE() AND table_name = 't' "
+                               "AND column_name = 'cat'") == [("general",)]
+    suite.exec(["INSERT INTO t (id, v, n) VALUES (60,'sixty',60)"], refs=["feat"])
+    got = dict(rows(suite, "feat", "SELECT id, cat FROM t WHERE id IN (40, 50, 60)"))
+    assert got[40] == "general" and got[60] == "general"

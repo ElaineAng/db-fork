@@ -510,13 +510,14 @@ class SeekDBToolSuite(DBToolSuite):
         return [r[0] for r in rows or []]
 
     def _columns(self, db: str, table: str) -> list:
-        """[(name, column_type, is_nullable)] in column order."""
+        """[(name, column_type, is_nullable, column_default)] in column order."""
         rows = self._execute(
-            "SELECT column_name, column_type, is_nullable FROM information_schema.columns "
+            "SELECT column_name, column_type, is_nullable, column_default "
+            "FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
             (db, table),
         )
-        return [(r[0], r[1], r[2]) for r in rows or []]
+        return [(r[0], r[1], r[2], r[3]) for r in rows or []]
 
     def _pk(self, db: str, table: str) -> list:
         rows = self._execute(
@@ -778,7 +779,7 @@ class SeekDBToolSuite(DBToolSuite):
             if target.schema is not None:
                 # Columns added after the commit are not part of its state.
                 keep = set(target.schema.get(table, ()))
-                for col, _, _ in self._columns(db, table):
+                for col, _, _, _ in self._columns(db, table):
                     if col not in keep:
                         self._execute(f"ALTER TABLE {_qt(db, table)} DROP COLUMN {_quote(col)}")
             restored.append(table)
@@ -883,15 +884,19 @@ class SeekDBToolSuite(DBToolSuite):
                     f"schema conflict on {table}: primary keys differ between "
                     f"{ours_db} and {theirs_db}")
             have = {c[0] for c in self._columns(ours_db, table)}
-            for name, ctype, nullable in self._columns(theirs_db, table):
+            for name, ctype, nullable, default in self._columns(theirs_db, table):
                 if name not in have:
-                    plan_cols.append((table, name, ctype))
+                    plan_cols.append((table, name, ctype, default))
         for table in plan_tables:
             self._execute(f"CREATE TABLE {_qt(ours_db, table)} LIKE {_qt(theirs_db, table)}")
-        for table, name, ctype in plan_cols:
-            self._execute(f"ALTER TABLE {_qt(ours_db, table)} ADD COLUMN {_quote(name)} {ctype} NULL")
+        for table, name, ctype, default in plan_cols:
+            # Carry the column default so rows written later on this side
+            # get the same value as on theirs.
+            self._execute(f"ALTER TABLE {_qt(ours_db, table)} ADD COLUMN {_quote(name)} {ctype} NULL"
+                          + (" DEFAULT %s" if default is not None else ""),
+                          (default,) if default is not None else None)
         return {"added_tables": plan_tables,
-                "added_columns": [f"{t}.{c}" for t, c, _ in plan_cols]}
+                "added_columns": [f"{t}.{c}" for t, c, _, _ in plan_cols]}
 
     def _three_way(self, ours_db: str, theirs: _State, base: _State,
                    on_conflict, ref: Ref, tag: str, new_tables: list) -> dict:

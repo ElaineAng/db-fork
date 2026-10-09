@@ -41,7 +41,8 @@ VERB_OP_TYPES = frozenset(
 
 # Per-statement rows emitted from inside an exec() script.
 STATEMENT_OP_TYPES = frozenset(
-    {rslt.OpType.READ, rslt.OpType.INSERT, rslt.OpType.UPDATE, rslt.OpType.DDL}
+    {rslt.OpType.READ, rslt.OpType.INSERT, rslt.OpType.UPDATE, rslt.OpType.DELETE_ROWS,
+     rslt.OpType.DDL}
 )
 
 
@@ -78,7 +79,7 @@ def GetOpTypeFromSQL(sql: str) -> rslt.OpType:
         "SELECT": rslt.OpType.READ,
         "INSERT": rslt.OpType.INSERT,
         "UPDATE": rslt.OpType.UPDATE,
-        "DELETE": rslt.OpType.UPDATE,  # DELETE is a write like UPDATE
+        "DELETE": rslt.OpType.DELETE_ROWS,
         "WITH": rslt.OpType.READ,
         "CREATE": rslt.OpType.DDL,
         "ALTER": rslt.OpType.DDL,

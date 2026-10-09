@@ -32,6 +32,7 @@ OP_TYPE_NAMES = {
     14: "DDL",
     15: "EXEC",
     16: "API_RETRY_WAIT",
+    17: "DELETE_ROWS",
 }
 
 
