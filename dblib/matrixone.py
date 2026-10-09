@@ -40,9 +40,11 @@ report uses):
                head, so a later merge back sees only newer changes)
     revert     DATA BRANCH DIFF between the commit's snapshot and its
                predecessor; the inverse is applied with SQL
-    reset      RESTORE DATABASE <branch> {snapshot} when the commit was made
-               on the branch; otherwise rows are restored with SQL from the
-               snapshot's time-travel view
+    reset      DATA BRANCH DIFF between the head and the commit's snapshot,
+               the differences undone with SQL (RESTORE DATABASE does it in
+               one statement, MO_NATIVE_RESET=1, but later diffs across the
+               restore misreport updated rows); a commit inherited from the
+               parent is restored row by row from its time-travel view
     delete     DATA BRANCH DELETE DATABASE (DROP DATABASE as fallback)
 
 A multi-ref script addresses another branch as `<db>__<branch>`.`<table>`
@@ -75,6 +77,13 @@ MO_DATA_DIR = os.path.expanduser(os.environ.get("MO_DATA_DIR", "~/mo/matrixone/m
 # Count conflicts (two native diffs + a join per table both sides changed)
 # even when on_conflict is "ours"/"theirs" and the count is only reported.
 MO_COUNT_CONFLICTS = os.environ.get("MO_COUNT_CONFLICTS", "1").lower() not in ("0", "false", "no")
+
+# Use RESTORE DATABASE for reset(). It is the native primitive, but it
+# gives the restored tables new identities and MatrixOne's later diffs
+# across that edge report updated rows as inserted on both sides (checked
+# on v4.2.5 with a 300k-row table), which breaks rebase/merge afterwards.
+# Off by default: reset() then restores the rows a native diff lists.
+MO_NATIVE_RESET = os.environ.get("MO_NATIVE_RESET", "").lower() in ("1", "true", "yes")
 
 MAIN_BRANCH = "main"
 _BRANCH_SEP = "__"
@@ -219,7 +228,7 @@ class MatrixOneToolSuite(DBToolSuite):
         "merge": "composed",
         "rebase": "composed",
         "revert": "simulated",
-        "reset": "native",
+        "reset": "native" if MO_NATIVE_RESET else "composed",
         "delete": "native",
         "commit_refs": "native",
         "multi_ref_exec": "native",
@@ -236,7 +245,10 @@ class MatrixOneToolSuite(DBToolSuite):
                   "SNAPSHOT replays the branch's delta, conflicts from two native diffs, "
                   "swap databases",
         "revert": "DATA BRANCH DIFF commit vs predecessor; inverse applied with SQL",
-        "reset": "RESTORE DATABASE {snapshot}; SQL row restore for commits inherited from a parent",
+        "reset": ("RESTORE DATABASE {snapshot}" if MO_NATIVE_RESET else
+                  "DATA BRANCH DIFF head vs the commit's snapshot, rows put back with SQL "
+                  "(RESTORE DATABASE breaks later lineage diffs)")
+                 + "; SQL row restore for commits inherited from a parent",
         "delete": "DATA BRANCH DELETE DATABASE (DROP DATABASE fallback)",
         "commit_refs": "time-travel reads t{snapshot = ...}",
         "multi_ref_exec": "cross-database queries",
@@ -958,7 +970,7 @@ class MatrixOneToolSuite(DBToolSuite):
     def _reset_impl(self, ref: Ref, to: str) -> None:
         db = self._on(ref)
         row = self._find_commit(db, to)
-        if row["db"] == db:
+        if row["db"] == db and MO_NATIVE_RESET:
             self._execute(f"RESTORE DATABASE {_quote(db)} {{snapshot = '{row['snap']}'}};")
             self._current_db = None
             self._use(db)
@@ -966,11 +978,64 @@ class MatrixOneToolSuite(DBToolSuite):
             # already cut at the commit; make sure of it anyway.
             self._execute(f"DELETE FROM {_qt(db, COMMITS_TABLE)} WHERE seq > %s", (int(row["seq"]),))
             return
+        if row["db"] == db:
+            self._undo_since(db, _State(db, row["snap"]))
+            self._execute(f"DELETE FROM {_qt(db, COMMITS_TABLE)} WHERE seq > %s", (int(row["seq"]),))
+            return
         self._warn(("reset_sql", db), f"reset of {db} to a commit made on {row['db']}: rows restored with SQL")
         self._restore_sql(db, _State(row["db"], row["snap"]))
         self._execute(
             f"DELETE FROM {_qt(db, COMMITS_TABLE)} WHERE seq > %s "
             "AND kind NOT IN ('fork', 'rebase', 'root')", (int(row["seq"]),))
+
+    def _snapshot_columns(self, state: _State, table: str) -> list:
+        with self.conn.cursor() as cur:
+            cur.execute(f"SELECT * FROM {state.expr(table)} LIMIT 0")
+            return [d[0] for d in cur.description if not str(d[0]).startswith("__mo_")]
+
+    def _undo_since(self, db: str, target: _State) -> None:
+        """Make db's tables equal to its own earlier snapshot ``target``
+        by undoing what a native diff of head vs snapshot lists; tables
+        and columns created since are dropped, dropped tables recreated."""
+        here = set(self._tables(db))
+        there = {t for t in self._tables(db) if self._readable(target, t)}
+        # Tables dropped since the snapshot are not listed by _tables(db);
+        # find them through the snapshot's catalog of the commits table's
+        # siblings is not possible, so probe the known table names of the
+        # log's schema: every table readable at the snapshot but absent now.
+        self._fk_checks(False)
+        try:
+            for table in sorted(here - there):
+                self._execute(f"DROP TABLE {_qt(db, table)}")
+            for table in sorted(there):
+                cols_now = [c[0] for c in self._columns(db, table)]
+                cols_then = self._snapshot_columns(target, table)
+                for col in cols_now:
+                    if col not in cols_then:
+                        self._execute(f"ALTER TABLE {_qt(db, table)} DROP COLUMN {_quote(col)}")
+                cols = [c for c in cols_now if c in cols_then]
+                pk = [c for c in self._pk(db, table) if c in cols]
+                dst = _qt(db, table)
+                diff = self._diff_rows(dst, target.expr(table))
+                if not diff[1]:
+                    continue
+                if not pk:
+                    # Undo = apply the diff with the flags inverted.
+                    inv = (diff[0], [("DELETE" if f == "INSERT" else "INSERT", v) for f, v in diff[1]])
+                    self._apply_nopk_delta(dst, cols, inv)
+                    continue
+                keyed = self._keyed(diff[0], diff[1], pk)
+                added = [k for k, (flag, _) in keyed.items() if flag == "INSERT"]
+                changed = [k for k, (flag, _) in keyed.items() if flag != "INSERT"]
+                for chunk in self._chunks(added):
+                    self._execute(f"DELETE FROM {dst} WHERE {self._in_keys(pk, chunk)}")
+                for chunk in self._chunks(changed):
+                    self._execute(self._upsert(
+                        dst, cols, pk,
+                        f"SELECT {self._cols('s', cols)} FROM {target.expr(table)} s "
+                        f"WHERE {self._in_keys(pk, chunk)}"))
+        finally:
+            self._fk_checks(True)
 
     def _restore_sql(self, db: str, target: _State) -> None:
         """Make db's tables equal to target's (common columns; tables

@@ -112,7 +112,7 @@ both under `capabilities` and `implementation`.
 | `neon` | yes | | | | restore (LSN/timestamp) | yes | | | yes |
 | `xata` | yes | | | | | yes | | | yes |
 | `seekdb` | yes | yes (SCN snapshots) | yes (SQL three-way) | yes | yes | yes | yes | yes | yes |
-| `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes | yes | yes | yes | yes |
+| `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes (diff-driven) | yes | yes | yes | yes |
 | `file_copy` | yes | | | | | yes | | | yes |
 
 ### exec()
@@ -707,9 +707,14 @@ same summary for the report):
   upstream, "theirs" = the branch, as in git), and the clone replaces the
   branch. Its lineage now starts at the upstream head, so MatrixOne's LCA
   for a later merge is that head and the merge sees only newer changes.
-- `reset()` (native): `RESTORE DATABASE <branch> {snapshot}` when the
-  commit was made on the branch; a commit inherited from the parent is
-  restored row by row from the snapshot's time-travel view.
+- `reset()` (composed): `DATA BRANCH DIFF` of the head against the commit's
+  snapshot, undone with SQL (rows added since are deleted, rows changed or
+  deleted put back, tables and columns created since dropped). The native
+  `RESTORE DATABASE <branch> {snapshot}` (`MO_NATIVE_RESET=1`) does it in
+  one statement but gives the tables new identities, and later lineage
+  diffs across that edge report updated rows as inserted on both sides,
+  which broke the rebase of reset batches in S6. A commit inherited from
+  the parent is restored row by row from the snapshot's time-travel view.
 - `revert()` (simulated): `DATA BRANCH DIFF` between the commit's snapshot
   and its predecessor, inverse applied with SQL.
 - `delete()` (native): `DATA BRANCH DELETE DATABASE` (`DROP DATABASE` after

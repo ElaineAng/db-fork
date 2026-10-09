@@ -303,3 +303,38 @@ def test_rebase_when_upstream_added_a_table(suite):
     assert sorted(k for (k,) in rows(suite, "dev", "SELECT id FROM t")) == [1, 2, 3, 50, 60]
     m = suite.merge("main", "dev")
     assert m.ok and m.value["conflicts"] == 0
+
+
+def test_reset_keeps_lineage_for_rebase_at_scale(suite):
+    """S6: a batch resets to an earlier commit, continues, and is rebased
+    and merged; the branch's delta must only hold its own changes."""
+    suite.exec(["CREATE TABLE big (id INT PRIMARY KEY, v INT)"], refs=["main"])
+    conn = suite.conn
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO big VALUES (%s, %s)", [(i, i) for i in range(200000)])
+    suite.commit("main", "seeded")
+    assert suite.branch("batch", "main").ok
+    with conn.cursor() as cur:
+        cur.execute("USE " + suite._db_for("batch"))
+        cur.executemany("INSERT INTO big VALUES (%s, %s)", [(i, i) for i in range(1000000, 1001000)])
+        cur.execute("UPDATE big SET v = v + 1 WHERE id < 500")
+    suite._current_db = None
+    c1 = suite.commit("batch", "step 1")
+    assert c1.ok
+    suite.exec(["INSERT INTO big VALUES (2000000, 1)", "UPDATE big SET v = 0 WHERE id = 600"], refs=["batch"])
+    suite.commit("batch", "step 2 (bad)")
+    r = suite.reset("batch", c1.value)
+    assert r.ok, r.error
+    assert rows(suite, "batch", "SELECT COUNT(*) FROM big WHERE id = 2000000 OR (id = 600 AND v = 0)") == [(0,)]
+    suite.exec(["INSERT INTO big VALUES (2000001, 1)"], refs=["batch"])
+    suite.commit("batch", "step 2 (redo)")
+    suite.exec(["INSERT INTO big VALUES (3000000, 3)", "UPDATE big SET v = -1 WHERE id = 100"], refs=["main"])
+    suite.commit("main", "spine moved")
+    rb = suite.rebase("batch", "main", on_conflict="ours")
+    assert rb.ok, rb.error
+    assert rb.value["conflicts"] == 1  # id 100: +1 on the batch, -1 on the spine
+    m = suite.merge("main", "batch")
+    assert m.ok, m.error
+    got = dict(rows(suite, "main", "SELECT id, v FROM big WHERE id IN (100, 200, 600, 1000000, 2000001, 3000000)"))
+    assert got == {100: -1, 200: 201, 600: 600, 1000000: 1000000, 2000001: 1, 3000000: 3}
+    assert rows(suite, "main", "SELECT COUNT(*) FROM big") == [(201002,)]
