@@ -857,8 +857,16 @@ class MatrixOneToolSuite(DBToolSuite):
             upstream_moved = bool(up_schema["added_tables"] or up_schema["added_columns"])
             self._fk_checks(False)
             try:
+                branch_base = _State(branch_db, s_b0)
                 for table in sorted(set(self._tables(tmp)) & set(self._tables(branch_db))):
-                    if table in schema["added_tables"] or not self._readable(branch_now, table):
+                    if table in schema["added_tables"] or table in up_schema["added_tables"] \
+                            or not self._readable(branch_now, table):
+                        continue
+                    if not self._readable(branch_base, table):
+                        # Created on both sides since the fork: nothing to replay.
+                        self._warn(("rebase_new_both", table),
+                                   f"{table} was created on both {branch_db} and {onto_db}; "
+                                   "the upstream's version is kept")
                         continue
                     pk = self._pk(tmp, table)
                     cols = self._common_cols(tmp, branch_db, table)

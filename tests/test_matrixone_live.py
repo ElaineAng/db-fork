@@ -285,3 +285,21 @@ def test_rebase_spine_onto_its_own_branch(suite):
     assert m.value["fast_forward"] is True and m.value["conflicts"] == 0
     msgs = [e["message"] for e in suite.log("main", limit=10).value]
     assert msgs[0] == "fast-forward to alternative" and "compaction" in msgs and "work" in msgs
+
+
+def test_rebase_when_upstream_added_a_table(suite):
+    """S4: a spine migration creates a table after the branch forked."""
+    suite.commit("main", "base")
+    assert suite.branch("dev", "main").ok
+    suite.exec(["INSERT INTO t VALUES (50,'dev',50)"], refs=["dev"])
+    suite.commit("dev", "dev work")
+    suite.exec(["CREATE TABLE promo_1 (promo_id INT PRIMARY KEY, i_id INT)",
+                "INSERT INTO promo_1 VALUES (1, 1)", "INSERT INTO t VALUES (60,'spine',60)"],
+               refs=["main"])
+    suite.commit("main", "migration")
+    r = suite.rebase("dev", "main", on_conflict="theirs")
+    assert r.ok, r.error
+    assert rows(suite, "dev", "SELECT COUNT(*) FROM promo_1") == [(1,)]
+    assert sorted(k for (k,) in rows(suite, "dev", "SELECT id FROM t")) == [1, 2, 3, 50, 60]
+    m = suite.merge("main", "dev")
+    assert m.ok and m.value["conflicts"] == 0
