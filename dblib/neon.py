@@ -171,7 +171,7 @@ class NeonAPIError(RuntimeError):
 
 
 def api_request(method: str, endpoint: str, record=None, max_retries: int = 8, **kwargs):
-    """One Neon API call through the token bucket, retrying 429/423/503
+    """One Neon API call through the token bucket, retrying 408/423/429/5xx
     (and connection errors) with Retry-After or jittered backoff.
     ``record(seconds)`` is told about every wait."""
     headers = kwargs.pop("headers", {})
@@ -197,7 +197,7 @@ def api_request(method: str, endpoint: str, record=None, max_retries: int = 8, *
             if r.status_code == 204 or not r.content:
                 return {}
             return r.json()
-        if r.status_code in (429, 423, 503) and attempt < max_retries - 1:
+        if r.status_code in (408, 423, 429, 500, 502, 503, 504) and attempt < max_retries - 1:
             retry_after = r.headers.get("Retry-After")
             try:
                 delay = float(retry_after) if retry_after else 0.5 * (2 ** attempt)
