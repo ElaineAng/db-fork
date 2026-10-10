@@ -18,14 +18,15 @@ API lacks are built from what it does have:
     commit     a row in the branch's _bb_commits table plus the branch's
                pg_current_wal_flush_lsn() as the commit's point in time
     log        SELECT FROM _bb_commits
-    diff       row hashes per table on each side (local to each compute),
-               then the differing tables pulled over postgres_fdw into
-               temp tables and compared locally
+    diff       per-table, per-key-bucket row hashes on each side (local
+               to each compute); only the differing buckets are pulled over
+               postgres_fdw into temp tables and compared locally
     merge      SQL three-way merge on the target's compute: base = a
                temporary branch at the source's fork LSN (created and
                timed inside the verb), theirs = the source branch over
-               postgres_fdw, both pulled into temp tables; conflicts per
-               on_conflict as on the other backends
+               postgres_fdw; only the key buckets theirs changed are
+               pulled into temp tables; conflicts per on_conflict as on
+               the other backends
     rebase     the same three-way merge of the upstream into the branch,
                after which a rebase row moves the branch's base to the
                upstream's LSN so the merge back only sees newer changes
@@ -791,6 +792,36 @@ class NeonToolSuite(DBToolSuite):
         rows = self._exec(conn, f'SELECT COUNT(*), COALESCE(SUM(hashtext(t::text)::bigint), 0) FROM {_q(table)} t')
         return (int(rows[0][0]), int(rows[0][1]))
 
+    _NB = 256  # hash buckets per table for change detection and partial pulls
+
+    def _bucket_expr(self, conn, table: str, pk: list, alias: str = None) -> str:
+        """SQL for a row's bucket (0..255) from its integer primary-key
+        columns, or None when the key has none. Built from immutable
+        functions only, so postgres_fdw ships the predicate to the remote
+        compute and only matching rows travel."""
+        types = {c[0]: c[1] for c in self._columns(conn, table)}
+        parts = []
+        for c in pk:
+            col = f"{alias}.{_q(c)}" if alias else _q(c)
+            t = types.get(c)
+            if t in ("integer", "smallint"):
+                parts.append(f"hashint4({col}::int)")
+            elif t == "bigint":
+                parts.append(f"hashint8({col})")
+        if not parts:
+            return None
+        return "((" + " # ".join(parts) + f") & {self._NB - 1})"
+
+    def _bucket_hashes(self, conn, table: str, bexpr: str) -> dict:
+        """{bucket: (rows, hash)} computed where the table lives."""
+        rows = self._exec(conn, f"SELECT {bexpr} AS b, COUNT(*), COALESCE(SUM(hashtext(t::text)::bigint), 0) "
+                                f"FROM {_q(table)} t GROUP BY 1") or []
+        return {int(b): (int(n), int(h)) for b, n, h in rows}
+
+    @staticmethod
+    def _changed_buckets(a: dict, b: dict) -> list:
+        return sorted(k for k in set(a) | set(b) if a.get(k, (0, 0)) != b.get(k, (0, 0)))
+
     @staticmethod
     def _type_sql(col) -> str:
         name, dtype, char_len, prec, scale, nullable, default = col
@@ -816,7 +847,8 @@ class NeonToolSuite(DBToolSuite):
         schema = f"bb_{remote_branch_id.replace('-', '_')}"
         self._exec(conn, f"CREATE SERVER IF NOT EXISTS {_q(srv)} FOREIGN DATA WRAPPER postgres_fdw "
                          f"OPTIONS (host '{pr.hostname}', dbname '{self.db_name}', port '5432', "
-                         f"sslmode 'require', fetch_size '10000')")
+                         f"sslmode 'require', fetch_size '10000', "
+                         f"options '-c idle_in_transaction_session_timeout=0 -c statement_timeout=0')")
         self._exec(conn, f"CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER SERVER {_q(srv)} "
                          f"OPTIONS (user '{pr.username}', password '{pr.password}')")
         self._exec(conn, f"DROP SCHEMA IF EXISTS {_q(schema)} CASCADE")
@@ -857,7 +889,7 @@ class NeonToolSuite(DBToolSuite):
         return out
 
     def _pull(self, conn, schema: str, table: str, local_name: str, cols: list, available=None,
-              types: dict = None) -> None:
+              types: dict = None, where: str = None) -> None:
         """Copy a foreign table into a local temp table with exactly ``cols``;
         columns the remote table lacks (``available`` lists what it has)
         come out NULL, cast to the local column's type (``types``)."""
@@ -867,7 +899,8 @@ class NeonToolSuite(DBToolSuite):
             return f"NULL::{types[c]} AS {_q(c)}" if types and c in types else f"NULL AS {_q(c)}"
         select = ", ".join(col(c) for c in cols)
         self._exec(conn, f"DROP TABLE IF EXISTS {_q(local_name)}")
-        self._exec(conn, f"CREATE TEMP TABLE {_q(local_name)} AS SELECT {select} FROM {_q(schema)}.{_q(table)}")
+        self._exec(conn, f"CREATE TEMP TABLE {_q(local_name)} AS SELECT {select} FROM {_q(schema)}.{_q(table)}"
+                         + (f" WHERE {where}" if where else ""))
 
     # ------------------------------------------------------------------
     # SQL fragments (Postgres)
@@ -1004,33 +1037,44 @@ class NeonToolSuite(DBToolSuite):
                 return {"tables": [], "rows_added": 0, "rows_deleted": 0, "rows_modified": 0}
             ta, tb = set(self._tables(ca)), set(self._tables(cb))
             out = []
-            changed = []
+            changed = {}
             for t in sorted(ta | tb):
                 if t in ta and t not in tb:
                     out.append({"table_name": t, "rows_added": 0, "rows_deleted": self._table_hash(ca, t)[0], "rows_modified": 0})
                 elif t in tb and t not in ta:
                     out.append({"table_name": t, "rows_added": self._table_hash(cb, t)[0], "rows_deleted": 0, "rows_modified": 0})
-                elif self._table_hash(ca, t) != self._table_hash(cb, t):
-                    changed.append(t)
+                else:
+                    pk0 = self._pk(cb, t)
+                    bexpr = self._bucket_expr(cb, t, pk0) if pk0 else None
+                    if bexpr is None:
+                        if self._table_hash(ca, t) != self._table_hash(cb, t):
+                            changed[t] = None
+                    else:
+                        diffb = self._changed_buckets(self._bucket_hashes(ca, t, bexpr), self._bucket_hashes(cb, t, bexpr))
+                        if diffb:
+                            changed[t] = f"{bexpr} IN ({', '.join(str(b) for b in diffb)})"
             if changed:
                 changed_fdw = True
-                schema = self._fdw_schema(cb, b_id, a_id, changed)
-                for t in changed:
+                schema = self._fdw_schema(cb, b_id, a_id, list(changed))
+                for t, where in changed.items():
                     cols_b = [c[0] for c in self._columns(cb, t)]
                     cols_a = {c[0] for c in self._columns(ca, t)}
                     cols = [c for c in cols_b if c in cols_a]
                     pk = [c for c in self._pk(cb, t) if c in cols] or cols
                     rest = [c for c in cols if c not in pk]
                     self._pull(cb, schema, t, "_bb_a", cols, available=cols_a,
-                               types={c[0]: self._type_sql(c) for c in self._columns(cb, t)})
-                    B = _q(t)
+                               types={c[0]: self._type_sql(c) for c in self._columns(cb, t)}, where=where)
+                    self._exec(cb, 'DROP TABLE IF EXISTS "_bb_bsub"')
+                    self._exec(cb, f'CREATE TEMP TABLE "_bb_bsub" AS SELECT {", ".join(_q(c) for c in cols)} FROM {_q(t)}'
+                                   + (f" WHERE {where}" if where else ""))
+                    B = '"_bb_bsub"'
                     added = self._exec(cb, f'SELECT COUNT(*) FROM {B} y LEFT JOIN "_bb_a" x ON {self._join("x", "y", pk)} WHERE x.{_q(pk[0])} IS NULL')[0][0]
                     deleted = self._exec(cb, f'SELECT COUNT(*) FROM "_bb_a" x LEFT JOIN {B} y ON {self._join("x", "y", pk)} WHERE y.{_q(pk[0])} IS NULL')[0][0]
                     modified = 0
                     if rest:
                         modified = self._exec(cb, f'SELECT COUNT(*) FROM "_bb_a" x JOIN {B} y ON {self._join("x", "y", pk)} WHERE NOT ({self._same("x", "y", rest)})')[0][0]
                     out.append({"table_name": t, "rows_added": int(added), "rows_deleted": int(deleted), "rows_modified": int(modified)})
-                    self._exec(cb, 'DROP TABLE IF EXISTS "_bb_a"')
+                    self._exec(cb, 'DROP TABLE IF EXISTS "_bb_a"; DROP TABLE IF EXISTS "_bb_bsub"')
             return {"tables": out, "rows_added": sum(x["rows_added"] for x in out),
                     "rows_deleted": sum(x["rows_deleted"] for x in out),
                     "rows_modified": sum(x["rows_modified"] for x in out)}
@@ -1087,8 +1131,28 @@ class NeonToolSuite(DBToolSuite):
         want_rows = callable(on_conflict)
         base_tables = set(self._tables(base_conn))
         tables = sorted((set(self._tables(ours)) & set(self._tables(theirs_conn))) - set(new_tables))
-        changed = [t for t in tables if t not in base_tables
-                   or self._table_hash(theirs_conn, t) != self._table_hash(base_conn, t)]
+        # Change detection per hash bucket of the key, each side hashing
+        # its own rows locally; only buckets theirs changed are pulled.
+        buckets = {}   # table -> (bexpr, theirs-changed buckets, ours-changed buckets) or None
+        changed = []
+        for t in tables:
+            pk = self._pk(ours, t)
+            bexpr = self._bucket_expr(ours, t, pk) if pk else None
+            if bexpr is None:
+                if t not in base_tables or self._table_hash(theirs_conn, t) != self._table_hash(base_conn, t):
+                    changed.append(t)
+                    buckets[t] = None
+                continue
+            h_t = self._bucket_hashes(theirs_conn, t, bexpr)
+            h_b = self._bucket_hashes(base_conn, t, bexpr) if t in base_tables else {}
+            tb = self._changed_buckets(h_t, h_b)
+            if not tb:
+                continue
+            h_o = self._bucket_hashes(ours, t, bexpr)
+            ob = self._changed_buckets(h_o, h_b)
+            info["ours_changes"] += len(ob)
+            changed.append(t)
+            buckets[t] = (bexpr, tb, ob)
         if not changed:
             return info, conflicts
         changed = self._fk_order(ours, changed)
@@ -1105,19 +1169,26 @@ class NeonToolSuite(DBToolSuite):
                 cols_t = {c[0] for c in self._columns(theirs_conn, t)}
                 cols = [c for c in cols_o if c in cols_t]
                 pk = [c for c in self._pk(ours, t) if c in cols]
-                T, B = f"_bb_t{i}", f"_bb_b{i}"
-                temps += [T, B]
-                self._pull(ours, s_t, t, T, cols)
+                T, B, OS = f"_bb_t{i}", f"_bb_b{i}", f"_bb_o{i}"
+                temps += [T, B, OS]
+                where = None
+                if buckets.get(t):
+                    bexpr, tb, _ = buckets[t]
+                    where = f"{bexpr} IN ({', '.join(str(b) for b in tb)})"
+                self._pull(ours, s_t, t, T, cols, where=where)
                 if t in base_tables:
-                    self._pull(ours, s_b, t, B, cols, available={c[0] for c in self._columns(base_conn, t)}, types=types)
+                    self._pull(ours, s_b, t, B, cols, available={c[0] for c in self._columns(base_conn, t)}, types=types, where=where)
                 else:
                     self._exec(ours, f'CREATE TEMP TABLE {_q(B)} AS SELECT {", ".join(_q(c) for c in cols)} FROM {_q(T)} WHERE FALSE')
-                plans[t] = {"cols": cols, "pk": pk, "T": _q(T), "B": _q(B), "O": _q(t)}
+                # Our rows in the same buckets (the only ones theirs can conflict with).
+                self._exec(ours, f'CREATE TEMP TABLE {_q(OS)} AS SELECT {", ".join(_q(c) for c in cols)} FROM {_q(t)}'
+                                 + (f" WHERE {where}" if where else ""))
+                plans[t] = {"cols": cols, "pk": pk, "T": _q(T), "B": _q(B), "O": _q(t), "OS": _q(OS)}
                 if not pk:
                     continue
                 rest = [c for c in cols if c not in pk]
                 kt, ko, kb = self._key("t", pk), self._key("o", pk), self._key("b", pk)
-                O, Tq, Bq = _q(t), _q(T), _q(B)
+                O, Tq, Bq = _q(OS), _q(T), _q(B)
                 d_tb = f"b.{_q(pk[0])} IS NULL" + (f" OR NOT ({self._same('t', 'b', rest)})" if rest else "")
                 d_ob = f"b.{_q(pk[0])} IS NULL" + (f" OR NOT ({self._same('o', 'b', rest)})" if rest else "")
                 TK, OK, CK = f"_bb_tk{i}", f"_bb_ok{i}", f"_bb_ck{i}"
@@ -1130,7 +1201,8 @@ class NeonToolSuite(DBToolSuite):
                 n_t = int(self._exec(ours, f'SELECT COUNT(*) FROM {_q(TK)}')[0][0])
                 n_o = int(self._exec(ours, f'SELECT COUNT(*) FROM {_q(OK)}')[0][0])
                 info["theirs_changes"] += n_t
-                info["ours_changes"] += n_o
+                if not buckets.get(t):
+                    info["ours_changes"] += n_o
                 same_ot = self._same("o", "t", rest) if rest else "TRUE"
                 self._exec(ours, f'CREATE TEMP TABLE {_q(CK)} AS SELECT a.k FROM {_q(TK)} a JOIN {_q(OK)} b ON b.k = a.k '
                                  f'LEFT JOIN {O} o ON {ko} = a.k LEFT JOIN {Tq} t ON {kt} = a.k '
@@ -1167,7 +1239,7 @@ class NeonToolSuite(DBToolSuite):
                     info["conflicts"] += pl["n_c"]
                     info["conflict_tables"].append(t)
                     if want_rows:
-                        conflicts.append({"table": t, "rows": self._conflict_rows(ours, pl["O"], pl["T"], pl["B"], pl["CK"], cols, pk)})
+                        conflicts.append({"table": t, "rows": self._conflict_rows(ours, pl["OS"], pl["T"], pl["B"], pl["CK"], cols, pk)})
             self._exec(ours, "COMMIT")
         except BaseException:
             try:
@@ -1298,20 +1370,25 @@ class NeonToolSuite(DBToolSuite):
             raise ValueError(f"Cannot rebase branch '{ref.branch}' onto itself")
         up_conn = self._open(up.branch_id)
         base_conn, base_id = None, None
+        theirs_conn, theirs_id = None, None
         try:
-            # Read the upstream at one point: its LSN now becomes the new base.
+            # Read the upstream at one point (a temporary branch at its LSN,
+            # since a spine under load keeps moving): that LSN becomes the
+            # branch's new base.
             up_lsn = up.lsn or self._flush_lsn(up_conn)
+            theirs_id = self._temp_branch(_State(up.branch, up.branch_id, up_lsn))
+            theirs_conn = self._open(theirs_id)
             base = self._merge_base(ours_id, up_conn, up.branch_id, ours)
             if base is None:
                 print(f"Warning: {ref.branch} and {onto.branch} share no fork point: upstream conflicts not detected")
             info = {"up_to_date": False}
             base_id = self._reading_branch(base) if base is not None else None
             base_conn = self._open(base_id) if base_id else None
-            schema = self._reconcile_schema(ours, up_conn, up.branch_id)
+            schema = self._reconcile_schema(ours, theirs_conn, theirs_id)
             # git: "ours" is the upstream, "theirs" the branch's own commits.
             keep_branch = (on_conflict == "theirs")
             if base_conn is not None:
-                tw_info, conflicts = self._three_way(ours, ours_id, up_conn, up.branch_id, base_conn, base_id,
+                tw_info, conflicts = self._three_way(ours, ours_id, theirs_conn, theirs_id, base_conn, base_id,
                                                      on_conflict, ref, schema["added_tables"], keep_ours=keep_branch or callable(on_conflict))
             else:
                 tw_info, conflicts = {"conflicts": 0, "conflict_tables": [], "ours_changes": 0, "theirs_changes": 0,
@@ -1337,9 +1414,11 @@ class NeonToolSuite(DBToolSuite):
             return info
         finally:
             self._close(up_conn)
+            if theirs_conn is not None:
+                self._close(theirs_conn)
             if base_conn is not None:
                 self._close(base_conn)
-            for bid in {up.branch_id, base_id}:
+            for bid in {theirs_id, base_id}:
                 if bid:
                     self._fdw_cleanup(ours, bid)
 
