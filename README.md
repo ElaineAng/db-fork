@@ -232,6 +232,7 @@ workload {
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
 | `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
+| `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
 | `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
 | `--measure-storage` | also measure storage around every operation |
 

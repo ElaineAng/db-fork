@@ -13,6 +13,7 @@ summary, the invariant results and the scenario's own metrics.
 import argparse
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -320,6 +321,14 @@ def main(argv=None):
         deadline_timer.daemon = True
         deadline_timer.start()
 
+    # An interrupt (Ctrl-C, SIGTERM) stops the scenario the way the runtime
+    # cap does: the workers see the stop event, the run is recorded as
+    # interrupted and its rows and stats are still written.
+    def _on_signal(signum, frame):
+        print(f"\nSignal {signal.Signals(signum).name}: stopping the scenario...", flush=True)
+        ctx.cancel_all()
+    previous_handlers = {s: signal.signal(s, _on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+
     print(f"\nStarting scenario {scenario.name}...")
     start_time = time.time()
     status = "completed"
@@ -333,13 +342,18 @@ def main(argv=None):
         status = f"crashed: {type(e).__name__}: {e}"
         traceback.print_exc()
     finally:
+        for s, h in previous_handlers.items():
+            signal.signal(s, h)
         if deadline_timer is not None:
             deadline_timer.cancel()
         if spine_load is not None:
             spine_load.stop()
         progress.close()
         elapsed = time.time() - start_time
-        timed_out = bool(args.max_runtime_sec) and ctx.stop_event.is_set()
+        stopped = ctx.stop_event.is_set()
+        timed_out = bool(args.max_runtime_sec) and stopped and elapsed >= args.max_runtime_sec
+        if status == "completed" and stopped:
+            status = "interrupted"
         print(f"\nScenario {status} in {elapsed:.1f}s")
         if timed_out:
             print("Run terminated early due to runtime cap.")
