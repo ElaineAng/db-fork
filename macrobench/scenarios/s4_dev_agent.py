@@ -214,10 +214,12 @@ class DevAgentScenario(Scenario):
 
         # Invariant: feature data never leaks into production.
         # MySQL-protocol backends list every database's tables in
-        # information_schema, so count only the current one there.
+        # information_schema, so count only the current one there; the
+        # dialect probe is untimed so its miss on Postgres is not a
+        # recorded failure.
         r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables "
                          "WHERE table_name = %s AND table_schema = DATABASE()",
-                         ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
+                         ("loyalty_tier",))], refs=[ctx.spine], label="invariant", timed=False)[0]
         if not r.ok:
             r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = %s",
                              ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
