@@ -223,7 +223,8 @@ workload {
 
 ```bash
 ./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] \
-    [--branch-intensity X] [--data-intensity Y] <scenario> <backend> [scale_factor]
+    [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] \
+    <scenario> <backend> [scale_factor]
 ```
 
 | Argument | Description |
@@ -231,6 +232,8 @@ workload {
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
 | `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
+| `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
+| `--measure-storage` | also measure storage around every operation |
 
 ```bash
 ./scripts/run_macrobench.sh --mini rl_env dolt
@@ -245,6 +248,29 @@ uv run python -m macrobench.runner --config macrobench/configs/ops_agent_mini.te
 A backend that lacks a verb still runs the whole scenario: the verb is
 recorded as UNSUPPORTED, `workflow_supported` is false in the e2e stats, and
 invariance checks that depend on it are reported as not applicable.
+
+#### Storage
+
+Every run records the backend's storage size (`DBToolSuite._storage_bytes()`:
+the database's own directory on Dolt, the whole server data directory on
+SeekDB and MatrixOne, which declare `STORAGE_SCOPE = "server"`) at four
+workflow-level points, written to the e2e stats under `storage.points`:
+
+| Point | When |
+|---|---|
+| `after_setup` | schema and seed data loaded, before the scenario |
+| `after_workflow` | the scenario is done (its branches deleted) |
+| `after_gc` | after the backend's GC/flush hook (`gc()`: `dolt_gc`, MatrixOne checkpoint; UNSUPPORTED on SeekDB) |
+| `after_cleanup` | the run's database dropped (and, on Dolt, the dropped databases purged) |
+
+A background sampler also records the size every 5 s during the scenario
+(`storage.samples`, wall-clock seconds and bytes); `--storage-sample-interval
+SEC` changes the interval (`0` turns it off), as does
+`storage_sample_interval_sec` in the config. `--measure-storage` additionally
+measures before and after every verb and every exec() call (two directory
+walks per operation; off by default, and not attributable under concurrent
+workers). The report's `storage.png` draws the sampled series with the four
+points as markers; `summary.md` carries them as `storage_after_*_mb`.
 
 ### Output
 

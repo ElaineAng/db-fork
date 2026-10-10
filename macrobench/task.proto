@@ -269,9 +269,16 @@ message MacroBenchConfig {
     DatabaseSetup database_setup = 3;
     SchemaConfig schema = 4;
     Workload workload = 5;
-    // Measure storage (disk_size_before/after) around each timed operation.
+    // Measure storage (disk_size_before/after) around each timed operation
+    // (expensive: two directory walks per operation; the workflow-level
+    // storage points and the sampler below are always on).
     bool measure_storage = 6;
     // Seed for every random choice in the run (0 = 42).
     int32 seed = 7;
     Invariants invariants = 8;
+    // Seconds between background samples of the backend's storage size
+    // during the scenario (0 = the default of 5 s; the runner's
+    // --storage-sample-interval overrides it, and a negative value or
+    // --storage-sample-interval 0 turns the sampler off).
+    float storage_sample_interval_sec = 9;
 }

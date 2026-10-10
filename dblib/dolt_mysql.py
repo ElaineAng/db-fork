@@ -86,10 +86,13 @@ def setup_database(db_name: str, sql_path: str = None) -> None:
 
 
 def drop_database(db_name: str) -> None:
+    """Drop db_name and purge Dolt's copy of dropped databases, which it
+    keeps under .dolt_dropped_databases until purged."""
     conn = connect()
     try:
         with conn.cursor() as cur:
             cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
+            cur.execute("CALL DOLT_PURGE_DROPPED_DATABASES();")
         print(f"Database '{db_name}' deleted successfully.")
     finally:
         conn.close()
@@ -174,6 +177,11 @@ class DoltMySQLToolSuite(DBToolSuite):
         return dbutil.get_directory_size_bytes(
             os.path.join(DOLT_MYSQL_DATA_DIR, self.db_name)
         )
+
+    def _gc_impl(self) -> None:
+        # dolt_gc needs a current database.
+        self._execute(f"USE `{self.db_name}`;")
+        self._execute("CALL DOLT_GC();")
 
     def _connect_impl(self, ref: Ref) -> None:
         if not ref.commit:

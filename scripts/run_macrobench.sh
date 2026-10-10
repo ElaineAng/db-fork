@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] \
-#       [--branch-intensity X] [--data-intensity Y] \
+#       [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] \
 #       <scenario> <backend> [scale_factor]
 #
 # Arguments:
@@ -26,6 +26,7 @@ OUTDIR="run_stats/"
 BRANCH_INTENSITY=""
 DATA_INTENSITY=""
 MAX_RUNTIME_SEC=0
+STORAGE_SAMPLE_INTERVAL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,12 +36,13 @@ while [[ $# -gt 0 ]]; do
         --branch-intensity) BRANCH_INTENSITY="$2"; shift 2 ;;
         --data-intensity)   DATA_INTENSITY="$2"; shift 2 ;;
         --max-runtime-sec) MAX_RUNTIME_SEC="$2"; shift 2 ;;
+        --storage-sample-interval) STORAGE_SAMPLE_INTERVAL="$2"; shift 2 ;;
         *)                 break ;;
     esac
 done
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-    echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] [--branch-intensity X] [--data-intensity Y] <scenario> <backend> [scale_factor]"
+    echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] <scenario> <backend> [scale_factor]"
     echo "  scenario:  rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent"
     echo "  backend:   dolt | dolt_mysql | seekdb | matrixone | neon | xata | file_copy"
     exit 1
@@ -104,6 +106,9 @@ echo "======================"
 EXTRA_FLAGS=()
 if $MEASURE_STORAGE; then
     EXTRA_FLAGS+=(--measure-storage)
+fi
+if [[ -n "$STORAGE_SAMPLE_INTERVAL" ]]; then
+    EXTRA_FLAGS+=(--storage-sample-interval "$STORAGE_SAMPLE_INTERVAL")
 fi
 
 PYTHONUNBUFFERED=1 uv run python -m macrobench.runner \

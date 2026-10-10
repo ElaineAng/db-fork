@@ -364,7 +364,15 @@ def summary_row(run: Run) -> dict:
     for k, v in (s.get("metrics") or {}).items():
         if isinstance(v, (int, float, str, bool)):
             row[f"m_{k}"] = v
-    if s.get("storage_before_bytes") is not None:
+    st = s.get("storage") or {}
+    points = st.get("points") or {}
+    if points:
+        row["storage_scope"] = st.get("scope")
+        for name in ("after_setup", "after_workflow", "after_gc", "after_cleanup"):
+            if points.get(name) is not None:
+                row[f"storage_{name}_mb"] = round(points[name] / 1e6, 1)
+        row["storage_gc"] = (st.get("gc") or {}).get("status")
+    elif s.get("storage_before_bytes") is not None:
         row["storage_before_bytes"] = s.get("storage_before_bytes")
         row["storage_after_bytes"] = s.get("storage_after_bytes")
     return row
@@ -896,31 +904,58 @@ def write_exec_by_label(runs: list[Run], outdir: str) -> None:
             f.write("| " + " | ".join(str(v) for v in row) + " |\n")
 
 
+def _storage_series(run: Run):
+    """(seconds into the run, MB) from the background sampler, else from
+    per-operation measurements, else None."""
+    st = run.stats.get("storage") or {}
+    samples = st.get("samples") or []
+    if samples:
+        t0 = st.get("run_start_time") or samples[0][0]
+        return (np.array([p[0] for p in samples]) - t0,
+                np.array([p[1] for p in samples]) / 1e6)
+    if not run.ops.empty and "disk_size_after" in run.ops and (run.ops["disk_size_after"] > 0).any():
+        df = run.ops[run.ops["disk_size_after"] > 0].sort_values("end_time")
+        t0 = df["end_time"].iloc[0]
+        return (df["end_time"] - t0).to_numpy(), (df["disk_size_after"] / 1e6).to_numpy()
+    return None
+
+
 def plot_storage(runs: list[Run], outdir: str) -> None:
-    with_storage = [r for r in runs if not r.ops.empty and (r.ops["disk_size_after"] > 0).any()]
+    """Storage over the run (sampler or per-op), with the workflow-level
+    points after setup, after the scenario, after GC and after cleanup
+    drawn as markers at the right edge. Server-scope backends (SeekDB,
+    MatrixOne) report the whole data directory."""
+    with_storage = [r for r in runs if _storage_series(r) is not None]
     if not with_storage:
         return
     scenarios, backends = _grid(with_storage)
     ncols = min(3, len(scenarios))
     nrows = int(np.ceil(len(scenarios) / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False)
+    point_markers = {"after_setup": "o", "after_workflow": "s", "after_gc": "^", "after_cleanup": "x"}
     for idx, s in enumerate(scenarios):
         ax = axes[idx // ncols][idx % ncols]
         for i, b in enumerate(backends):
             r = _find(with_storage, s, b)
             if r is None:
                 continue
-            df = r.ops[r.ops["disk_size_after"] > 0].sort_values("end_time")
-            t0 = df["end_time"].iloc[0]
-            ax.plot(df["end_time"] - t0, df["disk_size_after"] / 1e6, color=PALETTE(i), label=b)
-        ax.set_xlabel("seconds into run")
+            t, mb = _storage_series(r)
+            scope = (r.stats.get("storage") or {}).get("scope") or ""
+            ax.plot(t, mb, color=PALETTE(i), label=f"{b}" + (f" ({scope})" if scope else ""))
+            points = (r.stats.get("storage") or {}).get("points") or {}
+            x_end = t[-1] if len(t) else 0
+            for j, (name, m) in enumerate(point_markers.items()):
+                if points.get(name) is not None:
+                    ax.plot([x_end + (j + 1) * max(1.0, x_end * 0.02)], [points[name] / 1e6],
+                            marker=m, color=PALETTE(i), linestyle="none", markersize=6)
+        ax.set_xlabel("seconds into run (markers right of the series: setup o, workflow s, gc ^, cleanup x)")
         ax.set_ylabel("MB")
         ax.set_title(SCENARIO_TITLES.get(s, s))
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
     for idx in range(len(scenarios), nrows * ncols):
         axes[idx // ncols][idx % ncols].axis("off")
-    fig.suptitle("Database size over the run")
+    fig.suptitle("Storage over the run")
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, "storage.png"), dpi=150)
     plt.close(fig)

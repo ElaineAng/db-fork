@@ -218,6 +218,7 @@ class _State:
 
 class MatrixOneToolSuite(DBToolSuite):
     BACKEND_NAME = "matrixone"
+    STORAGE_SCOPE = "server"
     SUPPORTS_COMMIT_REFS = True
     SUPPORTS_MULTI_REF_EXEC = True
     IMPLEMENTATION = {
@@ -513,7 +514,13 @@ class MatrixOneToolSuite(DBToolSuite):
     # ------------------------------------------------------------------
 
     def _storage_bytes(self) -> int:
+        """Size of the server's data directory (object store plus log
+        service): MatrixOne has no per-database directory."""
         return dbutil.get_directory_size_bytes(MO_DATA_DIR)
+
+    def _gc_impl(self) -> None:
+        # No GC command; a forced checkpoint flushes memtables to objects.
+        self._execute("SELECT mo_ctl('dn', 'checkpoint', '');")
 
     def _connect_impl(self, ref: Ref) -> None:
         if ref.commit:

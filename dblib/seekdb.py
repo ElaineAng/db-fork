@@ -295,6 +295,7 @@ class _State:
 
 class SeekDBToolSuite(DBToolSuite):
     BACKEND_NAME = "seekdb"
+    STORAGE_SCOPE = "server"
     SUPPORTS_COMMIT_REFS = True
     SUPPORTS_MULTI_REF_EXEC = True
     # For the report: FORK/DROP DATABASE and cross-database queries are

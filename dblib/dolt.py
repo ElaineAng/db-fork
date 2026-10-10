@@ -25,6 +25,18 @@ DOLT_PORT = int(os.environ.get("DOLT_PORT", "5432"))
 DOLT_DATA_DIR = os.environ.get("DOLT_DATA_DIR", "~/doltgres/databases")
 
 
+def purge_dropped_databases(uri: str) -> None:
+    """Free the storage of dropped databases, which Dolt keeps under
+    .dolt_dropped_databases until purged (tens of GB after a sweep)."""
+    conn = psycopg2.connect(uri)
+    try:
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        with conn.cursor() as cur:
+            cur.execute("SELECT dolt_purge_dropped_databases();")
+    finally:
+        conn.close()
+
+
 def commit_dolt_schema(db_uri: str, message: str = "Load SQL schema") -> None:
     """Commit everything in the working set over db_uri (setup helper)."""
     conn = None
@@ -140,6 +152,9 @@ class DoltToolSuite(DBToolSuite):
     # ------------------------------------------------------------------
     # Hooks
     # ------------------------------------------------------------------
+
+    def _gc_impl(self) -> None:
+        self._execute("SELECT dolt_gc();")
 
     def _storage_bytes(self) -> int:
         """Physical size of the database's directory. Dolt's prolly trees

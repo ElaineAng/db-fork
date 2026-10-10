@@ -71,6 +71,44 @@ def _flush_to_disk(suite):
     os.sync()
 
 
+DEFAULT_STORAGE_SAMPLE_SEC = 5.0
+
+
+class StorageSampler(threading.Thread):
+    """Records the backend's storage size every ``interval`` seconds while
+    the scenario runs: (wall-clock seconds, bytes) pairs, cheap enough to
+    stay on by default (one directory walk per sample) and attributable to
+    workflow phases through the operation rows' timestamps."""
+
+    def __init__(self, suite, interval: float):
+        super().__init__(daemon=True, name="storage-sampler")
+        self.suite = suite
+        self.interval = interval
+        self.samples: list = []
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.is_set():
+            t = time.time()
+            self.samples.append((round(t, 3), self.suite._safe_storage()))
+            self._stop.wait(self.interval)
+
+    def stop(self):
+        self._stop.set()
+        self.join(timeout=60)
+
+
+def storage_sample_interval(config, cli_value) -> float:
+    """Seconds between samples: the CLI value if given, else the config's
+    (0 = the default); 0 or a negative value turns the sampler off."""
+    if cli_value is not None:
+        return max(0.0, float(cli_value))
+    v = float(config.storage_sample_interval_sec or 0)
+    if v == 0:
+        return DEFAULT_STORAGE_SAMPLE_SEC
+    return max(0.0, v)
+
+
 def _capabilities_for(backend) -> dict:
     from dblib.dolt import DoltToolSuite
     from dblib.dolt_mysql import DoltMySQLToolSuite
@@ -177,6 +215,9 @@ def main(argv=None):
                         help="Measure disk_size_before/after around each timed operation.")
     parser.add_argument("--max-runtime-sec", type=int, default=0,
                         help="Cap the scenario runtime in seconds (0 = no limit).")
+    parser.add_argument("--storage-sample-interval", type=float, default=None,
+                        help="Seconds between background storage samples during the "
+                             f"scenario (default {DEFAULT_STORAGE_SAMPLE_SEC:g}; 0 = off).")
     args = parser.parse_args(argv)
 
     try:
@@ -204,6 +245,8 @@ def main(argv=None):
         print("Storage measurement: enabled")
     if args.max_runtime_sec:
         print(f"Runtime cap: {args.max_runtime_sec}s")
+    sample_sec = storage_sample_interval(config, args.storage_sample_interval)
+    print(f"Storage sampling: every {sample_sec:g}s" if sample_sec > 0 else "Storage sampling: off")
 
     backend_mgr = BackendManager(
         BackendSetup(backend=config.backend, database_setup=config.database_setup)
@@ -234,14 +277,21 @@ def main(argv=None):
     if config.database_setup.WhichOneof("source") != "existing_db":
         seed_stats = setup_data(config, scenario, setup_suite)
 
-    storage_before = 0
-    if measure_storage:
-        try:
-            _flush_to_disk(setup_suite)
-            storage_before = setup_suite._storage_bytes()
-            print(f"Storage before workflow: {storage_before} bytes")
-        except Exception as e:
-            print(f"Warning: could not measure storage before workflow: {e}")
+    # Workflow-level storage points (always on; a directory walk each):
+    # after setup, after the scenario (its branches deleted), after the
+    # backend's GC/flush, and after the database itself is dropped.
+    storage_points = {}
+    try:
+        _flush_to_disk(setup_suite)
+    except Exception as e:
+        print(f"Warning: flush before the workflow failed: {e}")
+    storage_points["after_setup"] = setup_suite._safe_storage()
+    storage_before = storage_points["after_setup"]
+    print(f"Storage after setup: {storage_before} bytes ({setup_suite.STORAGE_SCOPE} scope)")
+    sampler = None
+    if sample_sec > 0:
+        sampler = StorageSampler(setup_suite, sample_sec)
+        sampler.start()
 
     progress = SharedProgress(total=scenario.total_units(),
                               desc=f"{scenario.name} ({backend_name})",
@@ -291,15 +341,21 @@ def main(argv=None):
         if timed_out:
             print("Run terminated early due to runtime cap.")
 
-        storage_after = 0
-        if measure_storage:
-            try:
-                _flush_to_disk(setup_suite)
-                storage_after = setup_suite._storage_bytes()
-                print(f"Storage after workflow: {storage_after} bytes "
-                      f"(delta {storage_after - storage_before})")
-            except Exception as e:
-                print(f"Warning: could not measure storage after workflow: {e}")
+        if sampler is not None:
+            sampler.stop()
+        try:
+            _flush_to_disk(setup_suite)
+        except Exception as e:
+            print(f"Warning: flush after the workflow failed: {e}")
+        storage_after = storage_points["after_workflow"] = setup_suite._safe_storage()
+        print(f"Storage after workflow: {storage_after} bytes "
+              f"(delta {storage_after - storage_before})")
+        gc_result = setup_suite.gc()
+        if gc_result.ok:
+            os.sync()
+        storage_points["after_gc"] = setup_suite._safe_storage()
+        print(f"Storage after gc ({gc_result.status_name}, {gc_result.latency:.1f}s): "
+              f"{storage_points['after_gc']} bytes")
         ctx.close_suite(setup_suite)
 
         neon_consumption = None
@@ -308,6 +364,23 @@ def main(argv=None):
                 backend_info.neon_project_id, label="after")
 
         inv = invariants.summary()
+
+        # Drop the database before the record is written so the last
+        # storage point sees the server without it.
+        for attempt in range(2):
+            try:
+                backend_mgr.cleanup()
+                break
+            except Exception as e:
+                if attempt == 0:
+                    print(f"Cleanup failed ({type(e).__name__}), retrying...")
+                    time.sleep(2)
+                else:
+                    print(f"Cleanup failed after retry: {e}")
+        os.sync()
+        storage_points["after_cleanup"] = setup_suite._safe_storage()
+        print(f"Storage after cleanup: {storage_points['after_cleanup']} bytes")
+
         e2e = {
             "run_id": config.run_id,
             "backend": backend_name,
@@ -329,10 +402,20 @@ def main(argv=None):
         if spine_load is not None:
             e2e["spine_load"] = {"transactions": spine_load.counts,
                                  "failures": spine_load.failures}
-        if config.measure_storage:
-            e2e["storage_before_bytes"] = storage_before
-            e2e["storage_after_bytes"] = storage_after
-            e2e["storage_delta_bytes"] = storage_after - storage_before
+        e2e["storage_before_bytes"] = storage_before
+        e2e["storage_after_bytes"] = storage_after
+        e2e["storage_delta_bytes"] = storage_after - storage_before
+        e2e["storage"] = {
+            "unit": "bytes",
+            "scope": setup_suite.STORAGE_SCOPE,
+            "points": storage_points,
+            "gc": {"status": gc_result.status_name, "latency_sec": round(gc_result.latency, 3),
+                   "error": gc_result.error},
+            "per_operation": measure_storage,
+            "sample_interval_sec": sample_sec,
+            "run_start_time": round(start_time, 3),
+            "samples": sampler.samples if sampler is not None else [],
+        }
         if neon_consumption:
             e2e["neon_metrics_count"] = neon_consumption.get("count", 0)
             e2e["neon_all_metrics"] = neon_consumption.get("all_metrics", [])
@@ -355,17 +438,6 @@ def main(argv=None):
             print(f"Metrics: {json.dumps(ctx.metrics, default=str)}")
 
         collector.write_to_parquet(append=False)
-
-        for attempt in range(2):
-            try:
-                backend_mgr.cleanup()
-                break
-            except Exception as e:
-                if attempt == 0:
-                    print(f"Cleanup failed ({type(e).__name__}), retrying...")
-                    time.sleep(2)
-                else:
-                    print(f"Cleanup failed after retry: {e}")
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ from microbench import task2_pb2 as tp
 from dblib import result_pb2 as rslt
 
 # Database backend imports
+from dblib import dolt
 from dblib.dolt import DoltToolSuite, commit_dolt_schema
 from dblib import dolt_mysql
 from dblib.dolt_mysql import DoltMySQLToolSuite
@@ -548,6 +549,9 @@ class BackendManager:
                 print(f"Database '{db_name}' deleted successfully.")
                 cur.close()
                 conn.close()
+                if self.config.backend == tp.Backend.DOLT:
+                    # Dolt keeps dropped databases on disk until purged.
+                    dolt.purge_dropped_databases(info.default_uri)
             except Exception as e:
                 print(f"Error deleting database: {e}")
 

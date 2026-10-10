@@ -391,6 +391,10 @@ class DBToolSuite(ABC):
     """
 
     BACKEND_NAME = "base"
+    # What _storage_bytes() covers: "database" (this database and its
+    # branches only) or "server" (the whole server's data directory, for
+    # backends without a per-database directory).
+    STORAGE_SCOPE = "database"
     # Can a ref name a commit ("branch@hash")?
     SUPPORTS_COMMIT_REFS = False
     # Can one SQL statement address several branches (exec mode="multi")?
@@ -512,6 +516,11 @@ class DBToolSuite(ABC):
 
     def _delete_impl(self, ref: Ref) -> None:
         raise self._unsupported("delete")
+
+    def _gc_impl(self) -> None:
+        """Reclaim or flush storage (Dolt's dolt_gc, a checkpoint, ...)
+        so that a storage measurement reflects what the backend keeps."""
+        raise self._unsupported("gc")
 
     def _qualified_table(self, ref: Ref, table: str) -> str:
         raise self._unsupported("multi_ref_exec")
@@ -732,6 +741,21 @@ class DBToolSuite(ABC):
             storage=storage, label=label, raise_on_error=raise_on_error,
             fallback=fallback,
         )
+
+    def gc(self) -> OpResult:
+        """Run the backend's storage reclamation/flush (see _gc_impl). Not
+        recorded as an operation row; the result carries status and
+        latency for the run's storage summary."""
+        status, error = OpStatus.OK, ""
+        start = time.perf_counter()
+        try:
+            self._gc_impl()
+        except UnsupportedOperation as e:
+            status, error = OpStatus.UNSUPPORTED, e.reason or str(e)
+        except Exception as e:
+            status, error = OpStatus.FAILED, f"{type(e).__name__}: {e}"
+        return OpResult(op="gc", status=status, latency=time.perf_counter() - start,
+                        error=error)
 
     # ------------------------------------------------------------------
     # exec
