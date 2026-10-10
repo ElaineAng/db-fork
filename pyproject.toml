@@ -26,6 +26,7 @@ dependencies = [
     "tqdm",
     "setuptools",
     "pandas>=2.3,<3",  # pandas 3 has breaking API changes (plot scripts)
+    "snowflake-connector-python>=4,<5",  # 5.x (asyncio, Rust core) is still a release candidate
 ]
 
 [dependency-groups]

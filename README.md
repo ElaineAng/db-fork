@@ -1,7 +1,8 @@
 # Database Benchmarking Framework
 
 A parametrized and extensible benchmarking framework for branchable database
-backends (Dolt, Neon, Xata, SeekDB, plain Postgres copies, ...). Every backend
+backends (Dolt, Neon, Xata, SeekDB, MatrixOne, Snowflake, plain Postgres copies,
+...). Every backend
 is driven through one git-like API (`dblib/db_api.py`): `branch`, `commit`,
 `diff`, `log`, `merge`, `rebase`, `revert`, `reset`, `delete`, plus `exec()`
 to run a workload script on one or more branches. Each operation is timed and
@@ -113,6 +114,7 @@ both under `capabilities` and `implementation`.
 | `xata` | yes | | | | | yes | | | yes |
 | `seekdb` | yes | yes (SCN snapshots) | yes (SQL three-way) | yes | yes | yes | yes | yes | yes |
 | `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes (diff-driven) | yes | yes | yes | yes |
+| `snowflake` | yes | yes (Time Travel) | yes (SQL three-way) | yes | yes (CLONE AT + SWAP) | yes | yes | yes | |
 | `file_copy` | yes | | | | | yes | | | yes |
 
 ### exec()
@@ -122,7 +124,7 @@ results = db.exec(script, refs=["feature"], mode="per_ref", label="eval")
 ```
 
 runs `script` on each ref in turn (`mode="per_ref"`), or once with every ref
-addressable from one session (`mode="multi"`, Dolt, SeekDB and MatrixOne only; other
+addressable from one session (`mode="multi"`, Dolt, SeekDB, MatrixOne and Snowflake only; other
 backends record it as UNSUPPORTED). A script is a list of SQL statements
 (strings or `(sql, params)`), Python source, or a callable. Python source
 runs with `db` (the session), `params` and `suite` in scope and may define
@@ -229,7 +231,7 @@ workload {
 | Argument | Description |
 |----------|-------------|
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
-| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
+| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `snowflake`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 
 ```bash
@@ -739,6 +741,106 @@ the run (`bb_<db>_*`). Async mode uses an aiomysql pool, like `dolt_mysql`.
 
 ---
 
+## Snowflake backend — `snowflake`
+
+Runs against a Snowflake account (macrobench only for now: no SQL dump
+loading, so microbench is not supported, and no `exec_async`).
+
+### Account setup
+
+1. Create an account (a trial works; Enterprise edition). Pick the region
+   closest to where the benchmark runs: every statement crosses the network.
+2. Create a key pair for a service user (Snowflake no longer accepts
+   password-only sign-ins):
+   ```bash
+   openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out ~/.ssh/snowflake_bb.p8
+   openssl rsa -in ~/.ssh/snowflake_bb.p8 -pubout   # paste the body (no header/footer) below
+   ```
+3. As ACCOUNTADMIN, in a Snowsight worksheet:
+   ```sql
+   CREATE ROLE BRANCHBENCH;
+   CREATE WAREHOUSE BRANCHBENCH_WH WAREHOUSE_SIZE = XSMALL
+     AUTO_SUSPEND = 300 AUTO_RESUME = TRUE INITIALLY_SUSPENDED = TRUE;
+   GRANT USAGE, OPERATE ON WAREHOUSE BRANCHBENCH_WH TO ROLE BRANCHBENCH;
+   GRANT CREATE DATABASE ON ACCOUNT TO ROLE BRANCHBENCH;
+   CREATE USER BRANCHBENCH_SVC TYPE = SERVICE
+     DEFAULT_ROLE = BRANCHBENCH DEFAULT_WAREHOUSE = BRANCHBENCH_WH
+     RSA_PUBLIC_KEY = '<public key body>';
+   GRANT ROLE BRANCHBENCH TO USER BRANCHBENCH_SVC;
+   -- Caps what a runaway run can spend:
+   CREATE RESOURCE MONITOR BRANCHBENCH_RM WITH CREDIT_QUOTA = 50
+     TRIGGERS ON 90 PERCENT DO SUSPEND;
+   ALTER WAREHOUSE BRANCHBENCH_WH SET RESOURCE_MONITOR = BRANCHBENCH_RM;
+   ```
+4. Put the connection settings in `.env` (see [Environment
+   Variables](#environment-variables)).
+
+Run `uv run pytest tests/test_snowflake_live.py` to check the setup (about
+8 minutes; skipped when `SNOWFLAKE_ACCOUNT` is unset).
+
+### How the verbs map
+
+Each branch is a transient database (`main` is `<DB_NAME>`, branch `x` is
+`<DB_NAME>__X`; Snowflake upper-cases unquoted names, so workload SQL in
+lower case resolves to them). A multi-branch script addresses another branch
+as `"<DB>__<BRANCH>".PUBLIC."<TABLE>"`, and a commit as the same table with
+`AT(STATEMENT => '<query id>')`.
+
+A commit is a row in the branch's `_BB_COMMITS` table; its snapshot is the
+Time Travel point of the INSERT that wrote it, which is recorded in
+`<DB_NAME>__BBMETA.SNAPSHOTS` (a query id is only known after the statement
+ran). Clones copy the log, so a branch inherits its parent's history, and a
+clone taken at a commit carries the log as of that commit.
+
+- `branch()` (native): `CREATE TRANSIENT DATABASE ... CLONE <parent>`,
+  `AT(STATEMENT => ...)` for a commit ref.
+- `commit()` (composed): the log row; Time Travel is the snapshot.
+  `log()` (simulated) reads the table.
+- `diff()` (simulated): one primary-key `FULL OUTER JOIN` per table between
+  the two states.
+- `merge()` (simulated): SQL three-way merge, as on SeekDB. The base is the
+  newest log row both branches have, or the fork/rebase point by which one
+  descends from the other. Tables the source added are cloned in, added
+  columns are added, a differing primary key is a schema conflict.
+- `rebase()` (composed): clone the upstream, three-way merge the branch's
+  changes into the clone, and `ALTER DATABASE ... SWAP WITH` it in for the
+  branch. As in Dolt, `on_conflict="ours"` keeps the upstream's row.
+- `reset()` (composed): clone the commit's snapshot, then SWAP it in.
+- `revert()` (simulated): the inverse of the commit's (before, after)
+  snapshots, applied with SQL.
+- `delete()` (native): `DROP DATABASE`.
+
+A clone has no Time Travel history from before it was created, so each
+snapshot names the database that holds it. reset and rebase keep the
+swapped-out database as `<DB_NAME>__ARCH_<n>` and repoint its snapshots
+there; writes to the branch during the swap would be lost, so the branch
+must be quiesced (the scenarios do this around spine resets).
+`drop_database()` drops every database of the run (branches, temporaries,
+archives and `__BBMETA`).
+
+### Behaviour to expect
+
+- Primary keys and unique constraints are recorded but not enforced; the
+  merge uses them to match rows.
+- Standard tables have no secondary indexes: `CREATE INDEX` fails (S2's index
+  DDL is skipped).
+- UPDATE, DELETE and MERGE lock the whole table, so concurrent writers to one
+  table (the TPC-C spine load) mostly run one at a time. Sessions set
+  `LOCK_TIMEOUT = 120` seconds.
+- Each statement costs a network round trip and usually tens to hundreds of
+  milliseconds; start with the `--mini` configs.
+- Sessions set `USE_CACHED_RESULT = FALSE`, so repeated reads are executed.
+- Time Travel reads use a table's current columns (a column added later
+  reads as NULL); clones taken at a commit have that commit's tables and
+  columns.
+- Per-operation storage is not measured (`--measure-storage` is ignored):
+  Snowflake's storage figures lag by up to a couple of hours.
+- Snapshots older than the databases' Time Travel retention
+  (`SNOWFLAKE_RETENTION_DAYS`, default and maximum for transient databases:
+  1 day) can no longer be read.
+
+---
+
 ## Environment Variables
 
 Create a `.env` file for backend-specific configuration:
@@ -750,6 +852,15 @@ NEON_API_KEY_ORG=your_key_here
 # Database connection strings (if needed)
 DOLT_CONNECTION_STRING=postgresql://user:pass@localhost:5432/dbname
 NEON_CONNECTION_STRING=postgresql://user:pass@host.neon.tech/dbname
+
+# Snowflake (see "Snowflake backend")
+SNOWFLAKE_ACCOUNT=<orgname>-<accountname>   # Snowsight: account menu -> account identifier
+SNOWFLAKE_USER=BRANCHBENCH_SVC
+SNOWFLAKE_PRIVATE_KEY_PATH=~/.ssh/snowflake_bb.p8
+# SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=...      # if the key is encrypted
+# SNOWFLAKE_PASSWORD=...                    # instead of a key: a password or access token
+SNOWFLAKE_ROLE=BRANCHBENCH
+SNOWFLAKE_WAREHOUSE=BRANCHBENCH_WH
 ```
 
 ---

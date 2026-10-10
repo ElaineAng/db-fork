@@ -49,6 +49,8 @@ from dblib import seekdb
 from dblib.seekdb import SeekDBToolSuite
 from dblib import matrixone
 from dblib.matrixone import MatrixOneToolSuite
+from dblib import snowflake
+from dblib.snowflake import SnowflakeToolSuite
 from dblib.neon import NeonToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
@@ -326,6 +328,10 @@ def create_db_tools(
         return MatrixOneToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
+    if backend == tp.Backend.SNOWFLAKE:
+        return SnowflakeToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
     if backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.init_for_bench(
             result_collector,
@@ -438,6 +444,13 @@ class BackendManager:
             info.default_branch_id = db_name
             print(f"Default MatrixOne connection URI: {info.default_uri}")
 
+        elif backend == tp.Backend.SNOWFLAKE:
+            info.default_uri = SnowflakeToolSuite.get_default_connection_uri()
+            info.default_branch_name = snowflake.MAIN_BRANCH
+            # A Snowflake branch's ID is its database name; main is db_name.
+            info.default_branch_id = db_name
+            print(f"Default Snowflake connection URI: {info.default_uri}")
+
         elif backend == tp.Backend.FILE_COPY:
             info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
             info.default_uri = FileCopyToolSuite.get_default_connection_uri()
@@ -494,6 +507,8 @@ class BackendManager:
             seekdb.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.MATRIXONE:
             matrixone.setup_database(db_name, sql_dump_path)
+        elif require_db_setup and backend == tp.Backend.SNOWFLAKE:
+            snowflake.setup_database(db_name, sql_dump_path)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
@@ -537,6 +552,13 @@ class BackendManager:
             try:
                 # Also drops every branch database and snapshot of the run.
                 matrixone.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.SNOWFLAKE and db_name:
+            try:
+                # Also drops every branch, temporary and archive database
+                # of the run, and its metadata database.
+                snowflake.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
@@ -588,6 +610,8 @@ class BackendManager:
             return SeekDBToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.MATRIXONE:
             return MatrixOneToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.SNOWFLAKE:
+            return SnowflakeToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
             return FileCopyToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.NEON:
