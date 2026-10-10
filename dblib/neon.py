@@ -398,6 +398,7 @@ class NeonToolSuite(DBToolSuite):
     # and how many open connections each one has. Shared by every suite.
     _ACTIVE: dict = {}
     _HOLDS: dict = {}
+    _SUSPENDING: set = set()     # branch ids with a suspend request in flight
     _ACT_LOCK = threading.Lock()
 
     @classmethod
@@ -530,7 +531,13 @@ class NeonToolSuite(DBToolSuite):
             return
         cls = type(self)
         with cls._ACT_LOCK:
+            # Chosen as a victim while unheld, but a thread may have taken
+            # it since: a suspend would close that connection.
+            if cls._HOLDS.get(branch_id, 0) > 0 or branch_id in cls._SUSPENDING:
+                self.observe("suspend_skipped_held")
+                return
             last = cls._ACTIVE.pop(branch_id, None)
+            cls._SUSPENDING.add(branch_id)
         try:
             self._api("POST", f"projects/{self.project_id}/endpoints/{ep}/suspend")
         except NeonAPIError as e:
@@ -543,6 +550,9 @@ class NeonToolSuite(DBToolSuite):
             with cls._ACT_LOCK:
                 if last is not None:
                     cls._ACTIVE.setdefault(branch_id, last)
+        finally:
+            with cls._ACT_LOCK:
+                cls._SUSPENDING.discard(branch_id)
 
     def _make_room(self, target: str) -> None:
         """Keep the process under NEON_ACTIVE_BUDGET active computes: before
@@ -559,13 +569,15 @@ class NeonToolSuite(DBToolSuite):
             victims = []
             now = time.monotonic()
             while len(cls._ACTIVE) + 1 > NEON_ACTIVE_BUDGET:
-                # Only computes nobody holds and nobody touched recently: a
-                # worker switching branches releases one for a moment.
-                idle = [b for b in cls._ACTIVE if cls._HOLDS.get(b, 0) <= 0 and b != default_id
-                        and now - cls._ACTIVE[b] > 20.0]
-                if not idle:
+                # Computes nobody holds, those untouched for 20 s first (a
+                # worker switching branches releases one for a moment);
+                # when that is not enough, the least recently used of the
+                # rest: a resume later is the cost of the quota.
+                unheld = [b for b in cls._ACTIVE if cls._HOLDS.get(b, 0) <= 0 and b != default_id]
+                if not unheld:
                     break
-                lru = min(idle, key=lambda b: cls._ACTIVE[b])
+                idle = [b for b in unheld if now - cls._ACTIVE[b] > 20.0]
+                lru = min(idle or unheld, key=lambda b: cls._ACTIVE[b])
                 del cls._ACTIVE[lru]
                 victims.append(lru)
             cls._ACTIVE[target] = time.monotonic()
@@ -597,7 +609,9 @@ class NeonToolSuite(DBToolSuite):
                     continue
                 b = e.get("branch_id")
                 self._endpoints.setdefault(b, e["id"])
-                if e.get("current_state") == "active" or e.get("pending_state") == "active":
+                # A compute on its way to idle (our suspend in flight) is
+                # not active; one on its way up is.
+                if (e.get("pending_state") or e.get("current_state")) == "active":
                     seen.add(b)
                     if b != default_id and b not in cls._ACTIVE:
                         cls._ACTIVE[b] = now - 60.0
@@ -644,15 +658,43 @@ class NeonToolSuite(DBToolSuite):
         active-compute limit (or failing while the compute changes state)
         is retried, with the waits recorded."""
         uri = self._uri(branch_id)
+        cls = type(self)
         self._make_room(branch_id)
+        # Held from here on: a compute being connected to is not a victim
+        # for the LRU or the quota reconcile of another thread. A suspend
+        # already in flight for it is allowed to land first, so the new
+        # connection is not the one it closes.
+        deadline = time.monotonic() + 30.0
+        while True:
+            with cls._ACT_LOCK:
+                if branch_id not in cls._SUSPENDING or time.monotonic() > deadline:
+                    cls._HOLDS[branch_id] = cls._HOLDS.get(branch_id, 0) + 1
+                    break
+            time.sleep(0.05)
         t0 = time.perf_counter()
+        attempt = 0
+        try:
+            conn = self._connect_loop(uri, branch_id, max_wait, t0)
+        except BaseException:
+            with cls._ACT_LOCK:
+                cls._HOLDS[branch_id] = max(0, cls._HOLDS.get(branch_id, 0) - 1)
+            raise
+        with cls._ACT_LOCK:
+            if branch_id != self._branches[self.default_branch]["id"]:
+                cls._ACTIVE[branch_id] = time.monotonic()
+        if not hasattr(self, "_conn_owner"):
+            self._conn_owner = {}
+        self._conn_owner[id(conn)] = branch_id
+        return conn
+
+    def _connect_loop(self, uri: str, branch_id: str, max_wait: float, t0: float):
         attempt = 0
         while True:
             self._check_cancel()
             try:
                 conn = psycopg2.connect(uri, connect_timeout=30)
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-                break
+                return conn
             except psycopg2.OperationalError as e:
                 msg = str(e)
                 attempt += 1
@@ -674,15 +716,6 @@ class NeonToolSuite(DBToolSuite):
                     self.observe("connect_error: " + " ".join(msg.split())[:70])
                 self._wait_row(delay, label)
                 time.sleep(delay)
-        cls = type(self)
-        with cls._ACT_LOCK:
-            if branch_id != self._branches[self.default_branch]["id"]:
-                cls._ACTIVE[branch_id] = time.monotonic()
-            cls._HOLDS[branch_id] = cls._HOLDS.get(branch_id, 0) + 1
-        if not hasattr(self, "_conn_owner"):
-            self._conn_owner = {}
-        self._conn_owner[id(conn)] = branch_id
-        return conn
 
     def list_branches(self) -> list:
         self._refresh_branches()
