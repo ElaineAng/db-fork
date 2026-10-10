@@ -97,14 +97,101 @@ def str_to_op_type(op_str: str) -> rslt.OpType:
         return rslt.OpType.UNSPECIFIED
 
 
+# Parquet schema of a Result row (fixed, so spilled row groups match).
+RESULT_SCHEMA = pa.schema(
+    [
+        ("run_id", pa.string()),
+        ("thread_id", pa.int64()),
+        ("random_seed", pa.int64()),
+        ("iteration_number", pa.int64()),
+        ("op_type", pa.int64()),
+        ("op_name", pa.string()),
+        ("status", pa.string()),
+        ("ref", pa.string()),
+        ("refs", pa.list_(pa.string())),
+        ("label", pa.string()),
+        ("exec_id", pa.int64()),
+        ("initial_db_size", pa.int64()),
+        ("table_name", pa.string()),
+        ("table_schema", pa.string()),
+        ("num_keys_touched", pa.int64()),
+        ("latency", pa.float64()),
+        ("disk_size_before", pa.int64()),
+        ("disk_size_after", pa.int64()),
+        ("sql_query", pa.string()),
+        ("error_message", pa.string()),
+        ("commit_ref_fallback", pa.bool_()),
+        ("branch_count", pa.int64()),
+        ("step_id", pa.int64()),
+        ("start_time", pa.float64()),
+        ("end_time", pa.float64()),
+        ("pool_wait_time", pa.float64()),
+    ]
+)
+
+
+def _row_dict(result) -> dict:
+    return {
+        "run_id": result.run_id,
+        "thread_id": result.thread_id,
+        "random_seed": result.random_seed,
+        "iteration_number": result.iteration_number,
+        "op_type": result.op_type,
+        "op_name": rslt.OpType.Name(result.op_type),
+        "status": rslt.OpStatus.Name(result.status),
+        "ref": result.ref,
+        "refs": list(result.refs),
+        "label": result.label,
+        "exec_id": result.exec_id,
+        "initial_db_size": result.initial_db_size,
+        "table_name": result.table_name,
+        "table_schema": result.table_schema,
+        "num_keys_touched": result.num_keys_touched,
+        "latency": result.latency,
+        "disk_size_before": result.disk_size_before,
+        "disk_size_after": result.disk_size_after,
+        "sql_query": result.sql_query,
+        "error_message": result.error_message,
+        "commit_ref_fallback": result.commit_ref_fallback,
+        "branch_count": result.branch_count,
+        "step_id": result.step_id,
+        "start_time": result.start_time,
+        "end_time": result.end_time,
+        "pool_wait_time": result.pool_wait_time,
+    }
+
+
+def _status_bucket(status) -> str:
+    if status == rslt.OpStatus.OK:
+        return "ok"
+    if status == rslt.OpStatus.UNSUPPORTED:
+        return "unsupported"
+    return "failed"
+
+
 class ResultCollector:
     def __init__(
         self,
         run_id: str = None,
         output_dir: str = "/tmp/run_stats",
+        spill_rows: int = 0,
     ):
+        """``spill_rows`` > 0 bounds memory: once that many rows are held,
+        they are written to a partial parquet file next to the final one
+        and dropped from ``results`` (which then only holds the tail).
+        A long run with a spine load emits millions of rows; held as
+        protobufs they cost a few KB each."""
         self.run_id = run_id or str(uuid.uuid4())
         self.output_dir = output_dir
+        self.spill_rows = max(0, int(spill_rows or 0))
+        # Spilled batches are written outside self._lock (a write takes a
+        # second or two), serialized by this lock.
+        self._spill_lock = threading.Lock()
+        self._writer = None
+        self._spill_path = None
+        self._spilled_rows = 0
+        # Per-op-type status counts over every row emitted (spilled or not)
+        self._status_counts: dict = {}
 
         self._lock = threading.Lock()
 
@@ -164,12 +251,53 @@ class ResultCollector:
         return not getattr(self._thread_local, "recording_disabled", False)
 
     def reset(self):
-        """Drop all collected rows (shared state only)."""
+        """Drop all collected rows (shared state only), spilled ones included."""
         with self._lock:
             self.results = []
             self.iteration_counter = 0
             self.failed_operations = []
             self.unsupported_ops = set()
+            self._status_counts = {}
+        with self._spill_lock:
+            path = self._close_spill()
+            self._spilled_rows = 0
+            if path and os.path.exists(path):
+                os.remove(path)
+
+    @property
+    def total_rows(self) -> int:
+        """Rows emitted so far, spilled ones included."""
+        with self._lock:
+            held = len(self.results)
+        with self._spill_lock:
+            return self._spilled_rows + held
+
+    # -- spilling (under self._spill_lock, never under self._lock) --------
+
+    def _write_batch(self, batch: list) -> None:
+        with self._spill_lock:
+            self._write_batch_locked(batch)
+
+    def _write_batch_locked(self, batch: list) -> None:
+        if not batch:
+            return
+        if self._writer is None:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self._spill_path = os.path.join(self.output_dir, f"{self.run_id}.parquet.partial")
+            self._writer = pq.ParquetWriter(self._spill_path, RESULT_SCHEMA)
+        self._writer.write_table(
+            pa.Table.from_pylist([_row_dict(r) for r in batch], schema=RESULT_SCHEMA))
+        self._spilled_rows += len(batch)
+
+    def _close_spill(self):
+        """Finish the partial file (caller holds _spill_lock); returns its
+        path, None if nothing was spilled."""
+        if self._writer is None:
+            return None
+        self._writer.close()
+        self._writer = None
+        path, self._spill_path = self._spill_path, None
+        return path
 
     def set_context(
         self,
@@ -283,6 +411,14 @@ class ResultCollector:
                 result.iteration_number = self.iteration_counter
                 self.results.append(result)
                 self.iteration_counter += 1
+                c = self._status_counts.setdefault(
+                    rslt.OpType.Name(op_type), {"ok": 0, "unsupported": 0, "failed": 0})
+                c[_status_bucket(status)] += 1
+                batch = None
+                if self.spill_rows and len(self.results) >= self.spill_rows:
+                    batch, self.results = self.results, []
+            if batch:
+                self._write_batch(batch)
         except Exception as e:
             import sys
             import traceback
@@ -337,18 +473,8 @@ class ResultCollector:
     def support_summary(self) -> dict:
         """Support information for the run's summary JSON."""
         with self._lock:
-            rows = list(self.results)
+            counts = {k: dict(v) for k, v in self._status_counts.items()}
             unsupported = sorted(self.unsupported_ops)
-        counts = {}
-        for r in rows:
-            name = rslt.OpType.Name(r.op_type)
-            c = counts.setdefault(name, {"ok": 0, "unsupported": 0, "failed": 0})
-            if r.status == rslt.OpStatus.OK:
-                c["ok"] += 1
-            elif r.status == rslt.OpStatus.UNSUPPORTED:
-                c["unsupported"] += 1
-            else:
-                c["failed"] += 1
         return {
             "workflow_supported": not unsupported,
             "unsupported_ops": unsupported,
@@ -357,49 +483,45 @@ class ResultCollector:
 
     def write_to_parquet(self, filename: str = None, append: bool = True):
         """Write all collected rows to a parquet file, appending if it
-        exists (``append=False`` replaces it: one file per run)."""
-        if not self.results:
+        exists (``append=False`` replaces it: one file per run). Rows
+        spilled during the run are moved into the file row group by row
+        group, never all in memory at once."""
+        with self._lock:
+            held, self.results = self.results, []
+        with self._spill_lock:
+            if self._writer is not None:
+                self._write_batch_locked(held)   # the tail joins the partial file
+                held = []
+            spilled = self._close_spill()
+            n_spilled, self._spilled_rows = self._spilled_rows, 0
+        if not held and not spilled:
             print("No results to write.")
             return
 
         filename = filename or f"{self.run_id}.parquet"
         filepath = os.path.join(self.output_dir, filename)
+        os.makedirs(self.output_dir, exist_ok=True)
 
-        rows = []
-        for result in self.results:
-            rows.append(
-                {
-                    "run_id": result.run_id,
-                    "thread_id": result.thread_id,
-                    "random_seed": result.random_seed,
-                    "iteration_number": result.iteration_number,
-                    "op_type": result.op_type,
-                    "op_name": rslt.OpType.Name(result.op_type),
-                    "status": rslt.OpStatus.Name(result.status),
-                    "ref": result.ref,
-                    "refs": list(result.refs),
-                    "label": result.label,
-                    "exec_id": result.exec_id,
-                    "initial_db_size": result.initial_db_size,
-                    "table_name": result.table_name,
-                    "table_schema": result.table_schema,
-                    "num_keys_touched": result.num_keys_touched,
-                    "latency": result.latency,
-                    "disk_size_before": result.disk_size_before,
-                    "disk_size_after": result.disk_size_after,
-                    "sql_query": result.sql_query,
-                    "error_message": result.error_message,
-                    "commit_ref_fallback": result.commit_ref_fallback,
-                    "branch_count": result.branch_count,
-                    "step_id": result.step_id,
-                    "start_time": result.start_time,
-                    "end_time": result.end_time,
-                    "pool_wait_time": result.pool_wait_time,
-                }
-            )
+        if spilled:
+            if append and os.path.exists(filepath):
+                tmp = filepath + ".tmp"
+                total = 0
+                with pq.ParquetWriter(tmp, RESULT_SCHEMA) as w:
+                    for src in (filepath, spilled):
+                        pf = pq.ParquetFile(src)
+                        for i in range(pf.num_row_groups):
+                            t = pf.read_row_group(i).cast(RESULT_SCHEMA)
+                            w.write_table(t)
+                            total += len(t)
+                os.replace(tmp, filepath)
+                os.remove(spilled)
+                print(f"Appended {n_spilled} results to {filepath} (total: {total} rows)")
+            else:
+                os.replace(spilled, filepath)
+                print(f"Wrote {n_spilled} benchmark results to {filepath}")
+            return
 
-        new_table = pa.Table.from_pylist(rows)
-
+        new_table = pa.Table.from_pylist([_row_dict(r) for r in held], schema=RESULT_SCHEMA)
         if append and os.path.exists(filepath):
             try:
                 existing_table = pq.read_table(filepath)
@@ -408,13 +530,13 @@ class ResultCollector:
                 )
                 pq.write_table(combined_table, filepath)
                 print(
-                    f"Appended {len(rows)} results to {filepath} "
+                    f"Appended {len(new_table)} results to {filepath} "
                     f"(total: {len(combined_table)} rows)"
                 )
             except Exception as e:
                 print(f"Error reading existing file, overwriting: {e}")
                 pq.write_table(new_table, filepath)
-                print(f"Wrote {len(rows)} benchmark results to {filepath}")
+                print(f"Wrote {len(new_table)} benchmark results to {filepath}")
         else:
             pq.write_table(new_table, filepath)
-            print(f"Wrote {len(rows)} benchmark results to {filepath}")
+            print(f"Wrote {len(new_table)} benchmark results to {filepath}")

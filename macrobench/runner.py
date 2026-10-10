@@ -253,7 +253,10 @@ def main(argv=None):
     )
     backend_info = backend_mgr.setup()
 
-    collector = rc.ResultCollector(run_id=config.run_id, output_dir=args.outdir)
+    # A long run with a spine load emits millions of rows; spill them to
+    # the parquet file as they come so the run's memory stays bounded.
+    collector = rc.ResultCollector(run_id=config.run_id, output_dir=args.outdir,
+                                   spill_rows=int(os.environ.get("MACRO_SPILL_ROWS", "200000")))
     # Per-op storage is too expensive on Neon (pg_database_size per branch).
     measure_storage = config.measure_storage and config.backend != tp.Backend.NEON
     db_name = config.database_setup.db_name
