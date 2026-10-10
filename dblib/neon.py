@@ -333,7 +333,7 @@ class _State:
 
 class NeonToolSuite(DBToolSuite):
     BACKEND_NAME = "neon"
-    STORAGE_SCOPE = "database"
+    STORAGE_SCOPE = "default-branch"
     SUPPORTS_COMMIT_REFS = True
     SUPPORTS_MULTI_REF_EXEC = False
     IMPLEMENTATION = {
@@ -830,10 +830,26 @@ class NeonToolSuite(DBToolSuite):
     # ------------------------------------------------------------------
 
     def _storage_bytes(self) -> int:
-        """Sum of the branches' logical sizes as the API reports them (no
-        connections, so suspended computes stay suspended)."""
-        resp = api_request("GET", f"projects/{self.project_id}/branches")
-        return sum(int(b.get("logical_size") or 0) for b in resp.get("branches", []))
+        """pg_database_size() of the run's database on the default branch,
+        over a dedicated connection (the API's logical_size and the
+        project's synthetic_storage_size lag by more than a run, so they
+        cannot feed the sampler). Branch computes are not touched, so this
+        is the spine's logical size, not the project's billed storage."""
+        for attempt in range(2):
+            try:
+                if getattr(self, "_size_conn", None) is None:
+                    self._size_conn = self._open(self._branch_id(self.default_branch), max_wait=60)
+                return int(self._exec(self._size_conn, "SELECT pg_database_size(current_database())")[0][0])
+            except Exception:
+                try:
+                    if getattr(self, "_size_conn", None) is not None:
+                        self._size_conn.close()
+                except Exception:
+                    pass
+                self._size_conn = None
+                if attempt == 1:
+                    raise
+        return 0
 
     def _branch_impl(self, name: str, from_ref: Ref) -> None:
         st = self._state(from_ref)
@@ -1412,6 +1428,12 @@ class NeonToolSuite(DBToolSuite):
                                 "cross-branch reads run once per branch")
 
     def close_connection(self) -> None:
+        if getattr(self, "_size_conn", None) is not None:
+            try:
+                self._size_conn.close()
+            except Exception:
+                pass
+            self._size_conn = None
         for key, bid in list(self._temp.items()):
             try:
                 self._delete_branch(bid)
