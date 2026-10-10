@@ -899,10 +899,12 @@ class NeonToolSuite(DBToolSuite):
         project's synthetic_storage_size lag by more than a run, so they
         cannot feed the sampler). Branch computes are not touched, so this
         is the spine's logical size, not the project's billed storage."""
+        if getattr(self, "_closed", False):
+            return 0  # the run's project is gone (after cleanup)
         for attempt in range(2):
             try:
                 if getattr(self, "_size_conn", None) is None:
-                    self._size_conn = self._open(self._branch_id(self.default_branch), max_wait=60)
+                    self._size_conn = self._open(self._branch_id(self.default_branch), max_wait=15)
                 return int(self._exec(self._size_conn, "SELECT pg_database_size(current_database())")[0][0])
             except Exception:
                 try:
@@ -1467,6 +1469,7 @@ class NeonToolSuite(DBToolSuite):
                                 "cross-branch reads run once per branch")
 
     def close_connection(self) -> None:
+        self._closed = True
         if getattr(self, "_size_conn", None) is not None:
             try:
                 self._close(self._size_conn)
