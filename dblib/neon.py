@@ -536,8 +536,12 @@ class NeonToolSuite(DBToolSuite):
                 cls._ACTIVE[target] = time.monotonic()
                 return
             victims = []
+            now = time.monotonic()
             while len(cls._ACTIVE) + 1 > NEON_ACTIVE_BUDGET:
-                idle = [b for b in cls._ACTIVE if cls._HOLDS.get(b, 0) <= 0 and b != default_id]
+                # Only computes nobody holds and nobody touched recently: a
+                # worker switching branches releases one for a moment.
+                idle = [b for b in cls._ACTIVE if cls._HOLDS.get(b, 0) <= 0 and b != default_id
+                        and now - cls._ACTIVE[b] > 20.0]
                 if not idle:
                     break
                 lru = min(idle, key=lambda b: cls._ACTIVE[b])
@@ -550,6 +554,13 @@ class NeonToolSuite(DBToolSuite):
                 self.observe("lru_suspends")
             except Exception as e:
                 print(f"Warning: could not suspend compute of {b}: {e}")
+
+    def _reserve(self, branch_id: str, n: int = 1) -> None:
+        """Hold (or release, n=-1) a compute without a connection, so the
+        LRU never suspends it mid-verb."""
+        cls = type(self)
+        with cls._ACT_LOCK:
+            cls._HOLDS[branch_id] = max(0, cls._HOLDS.get(branch_id, 0) + n)
 
     def _close(self, conn) -> None:
         """Close a connection opened by _open and release its hold."""
@@ -1300,12 +1311,19 @@ class NeonToolSuite(DBToolSuite):
                              seq=int(r["seq"]))
 
     def _merge_impl(self, into: Ref, source: Ref, message: str, on_conflict="ours") -> dict:
-        ours_id = self._on(into)
-        ours = self.conn
         src = self._state(source)
         theirs_id = self._reading_branch(src)
-        if theirs_id == ours_id:
-            raise ValueError(f"Cannot merge branch '{source.branch}' into itself")
+        self._reserve(theirs_id)
+        try:
+            ours_id = self._on(into)
+            if theirs_id == ours_id:
+                raise ValueError(f"Cannot merge branch '{source.branch}' into itself")
+            return self._merge_reserved(into, source, message, on_conflict, src, theirs_id, ours_id)
+        finally:
+            self._reserve(theirs_id, -1)
+
+    def _merge_reserved(self, into, source, message, on_conflict, src, theirs_id, ours_id) -> dict:
+        ours = self.conn
         theirs_conn = self._open(theirs_id)
         base_conn, base_id = None, None
         try:
@@ -1513,7 +1531,20 @@ class NeonToolSuite(DBToolSuite):
 
     def _delete_branch(self, branch_id: str) -> None:
         resp = self._api("DELETE", f"projects/{self.project_id}/branches/{branch_id}")
-        self._wait(resp.get("operations"))
+        try:
+            self._wait(resp.get("operations"))
+        except RuntimeError as e:
+            # A compute suspend that failed alongside the delete is harmless
+            # once the branch is gone.
+            try:
+                self._api("GET", f"projects/{self.project_id}/branches/{branch_id}")
+            except NeonAPIError as g:
+                if g.status == 404:
+                    print(f"Warning: delete of {branch_id}: {e} (branch is gone)")
+                else:
+                    raise e
+            else:
+                raise
         with type(self)._ACT_LOCK:
             type(self)._ACTIVE.pop(branch_id, None)
             type(self)._HOLDS.pop(branch_id, None)
