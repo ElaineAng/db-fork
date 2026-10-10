@@ -80,9 +80,15 @@ NEON_PG_VERSION = int(os.environ.get("NEON_PG_VERSION", "17"))
 NEON_COMPUTE_CU = float(os.environ.get("NEON_COMPUTE_CU", "2"))
 # How long Neon keeps history (commit refs are LSNs inside this window).
 NEON_HISTORY_RETENTION_SEC = int(os.environ.get("NEON_HISTORY_RETENTION_SEC", str(2 * 86400)))
-# Scale-to-zero backstop for branch computes (0 = the plan default, 5 min on
-# Launch, which is also its minimum); the default branch never suspends.
-NEON_BRANCH_SUSPEND_TIMEOUT_SEC = int(os.environ.get("NEON_BRANCH_SUSPEND_TIMEOUT_SEC", "0"))
+# Scale-to-zero of branch computes: -1 (never) by default. Neon's
+# autosuspend counts only running statements as activity, not open
+# connections: with the plan default (5 min on Launch, its minimum) a
+# branch compute that a worker holds but has not queried for 5 minutes
+# (waiting for a lock, in a quiet review phase, or read over postgres_fdw
+# by a merge that is busy elsewhere) is suspended under its connections,
+# which then fail with "SSL connection has been closed unexpectedly".
+# The active-compute budget below suspends computes explicitly instead.
+NEON_BRANCH_SUSPEND_TIMEOUT_SEC = int(os.environ.get("NEON_BRANCH_SUSPEND_TIMEOUT_SEC", "-1"))
 # Active computes the process keeps at most (the plan allows 20 besides the
 # default branch): when a new compute is needed above this, the least
 # recently used idle one is suspended first.
@@ -358,9 +364,10 @@ class NeonToolSuite(DBToolSuite):
         "multi_ref_exec": "unsupported",
     }
     IMPLEMENTATION_NOTES = {
-        "branch": "POST /branches with parent_id (+ parent_lsn for a commit) and a 2 CU compute, "
-                  "waiting for the operations; the branch's compute is suspended when the "
-                  "connection leaves it (CONNECT carries the resume)",
+        "branch": "POST /branches with parent_id (+ parent_lsn for a commit) and a 2 CU compute "
+                  "that never auto-suspends, waiting for the operations; computes are suspended "
+                  "by the process's active-compute budget (LRU) and on delete (CONNECT carries "
+                  "the resume)",
         "commit": "_bb_commits row + pg_current_wal_flush_lsn() as the point in time",
         "log": "SELECT from the _bb_commits bookkeeping table",
         "diff": "per-table row hashes on each compute, differing tables pulled over postgres_fdw "

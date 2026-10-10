@@ -775,9 +775,14 @@ from `.env`. Each run creates a project of its own (`project_<db_name>`,
 region `NEON_REGION`, default `aws-us-east-1`, Postgres `NEON_PG_VERSION`
 17, a 2-day history window `NEON_HISTORY_RETENTION_SEC`) and deletes it
 afterwards; stale benchmark projects left by interrupted runs are deleted
-before a run starts. Every compute is a fixed `NEON_COMPUTE_CU` (2 CU); the
-default branch never suspends, branch computes keep the plan's
-scale-to-zero default.
+before a run starts. Every compute is a fixed `NEON_COMPUTE_CU` (2 CU) and never
+auto-suspends (`NEON_BRANCH_SUSPEND_TIMEOUT_SEC=-1`): Neon's scale-to-zero
+counts only running statements as activity, so with the plan default (5
+min on Launch) a compute that a worker holds but has not queried for 5
+minutes, or one a merge reads over `postgres_fdw` while busy elsewhere, is
+suspended under its connections ("SSL connection has been closed
+unexpectedly"). Computes are suspended explicitly instead, by the
+active-compute budget below and on delete.
 
 Branches are Neon branches with one read-write compute each. Neon versions
 storage but has no commits, diff or merge, so the adapter builds them from
@@ -790,7 +795,7 @@ point-in-time branching (`parent_lsn`), branch restore and `postgres_fdw`:
 - `commit()` (composed): a row in the branch's `_bb_commits` table plus
   `pg_current_wal_flush_lsn()` as the commit's point in time; `log()` reads
   the table. A commit ref is read through a temporary branch at that LSN,
-  cached and suspended between uses, deleted when the connection closes.
+  cached between uses, deleted when the connection closes.
 - `diff()`: per table a row hash on each compute; the differing tables are
   pulled over `postgres_fdw` into temp tables and compared locally.
 - `merge()`: SQL three-way merge on the target's compute. The base is a
@@ -817,10 +822,12 @@ point-in-time branching (`parent_lsn`), branch restore and `postgres_fdw`:
 
 Quotas are capacity, not errors. Neon limits *active computes* per
 project (20 on the Launch plan, the default branch exempt), not branches,
-so a branch's compute is suspended when the connection moves off it
-(`NEON_SUSPEND_ON_SWITCH=0` disables) and resumes on the next connect; both
-land in `CONNECT`. A connect refused for the compute limit waits and
-retries. All API calls share one process-wide token bucket under the
+so the process keeps at most `NEON_ACTIVE_BUDGET` (18) computes active:
+when a compute is needed above that, the least recently used one that no
+connection holds is suspended first (`NEON_SUSPEND_ON_SWITCH=1` instead
+suspends a branch's compute whenever the connection moves off it); a
+suspended compute resumes on the next connect, and both land in `CONNECT`.
+A connect refused for the compute limit waits and retries. All API calls share one process-wide token bucket under the
 documented 700 requests/minute (`NEON_API_RATE_PER_MIN`, `NEON_API_BURST`);
 bucket waits are part of the verb's cost and are summed in the e2e stats'
 `backend_observations`, while reactive waits (429/423/503 backoff, compute
