@@ -180,7 +180,7 @@ class DataAgentScenario(Scenario):
                 # Pipeline stage failed: go back to an earlier commit.
                 back_step, back_hash = rng.choice(committed)
                 if suite.supports("reset"):
-                    rs = suite.reset(branch, back_hash, label="batch_reset")
+                    rs = ctx.retry(lambda: suite.reset(branch, back_hash, label="batch_reset"))
                     ok = rs.ok
                 else:
                     nb = f"{branch}_r{resets + 1}"
@@ -216,9 +216,9 @@ class DataAgentScenario(Scenario):
         # The spine load is paused while merging so its uncommitted writes
         # cannot land between the pre-merge commit and the merge.
         with self._merge_lock, self.quiesced():
-            rb = suite.rebase(branch, ctx.spine, on_conflict=additive_resolver, label="batch_rebase")
-            m = suite.merge(ctx.spine, branch, message=f"merge batch {b}",
-                            on_conflict=additive_resolver, label="batch_merge")
+            rb = ctx.retry(lambda: suite.rebase(branch, ctx.spine, on_conflict=additive_resolver, label="batch_rebase"))
+            m = ctx.retry(lambda: suite.merge(ctx.spine, branch, message=f"merge batch {b}",
+                                              on_conflict=additive_resolver, label="batch_merge"))
         if rb.ok and isinstance(rb.value, dict):
             ctx.bump_metric("rebase_conflicts", int(rb.value.get("conflicts", 0)))
         if m.ok:

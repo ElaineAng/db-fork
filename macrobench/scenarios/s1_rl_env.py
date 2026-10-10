@@ -222,7 +222,7 @@ class RlEnvScenario(Scenario):
                 v = res.value if (res.ok and isinstance(res.value, dict)) else {}
                 rewards.append(-sum(x for x in v.values() if x > 0))
         for ref in leaf_refs:
-            d = w.suite.diff(task_ref, ref, label="score_diff")
+            d = ctx.retry(lambda: w.suite.diff(task_ref, ref, label="score_diff"))
             if d.ok and isinstance(d.value, dict):
                 ctx.bump_metric("diff_rows_modified", int(d.value.get("rows_modified") or 0))
         return rewards

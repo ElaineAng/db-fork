@@ -96,7 +96,7 @@ class OpsAgentScenario(Scenario):
             else:
                 to = target["hash"] or target["timestamp"]
                 with self.quiesced():
-                    reset = suite.reset(ctx.spine, to, label="pitr_reset")
+                    reset = ctx.retry(lambda: suite.reset(ctx.spine, to, label="pitr_reset"))
                 ctx.add_metric("reset_status", reset.status_name)
                 ctx.add_metric("reset_target_commit", target["k"])
                 ctx.add_metric("fault_commit", fault_k)
@@ -161,7 +161,7 @@ class OpsAgentScenario(Scenario):
             return {"violations": violations, "bad_deploy_rows": int(rows[0][0]) if rows else None}
         r = w.exec(script, branch, label="investigate")
         value = r.value if (r.ok and isinstance(r.value, dict)) else {"violations": {}, "bad_deploy_rows": None}
-        suite.diff(ctx.spine, branch, label="investigate_diff")
+        ctx.retry(lambda: suite.diff(ctx.spine, branch, label="investigate_diff"))
         w.commit(branch, f"findings at commit {k}", label="findings_commit")
         if k < fault_k:
             if h is None:

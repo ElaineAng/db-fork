@@ -178,7 +178,7 @@ class DevAgentScenario(Scenario):
                     inv.expect(f"S4.2a spine sentinel invisible on {branch} before rebase",
                                sentinel_visible(), 0)
                 with self._spine_lock:
-                    rb = suite.rebase(branch, ctx.spine, on_conflict="theirs", label="dev_rebase")
+                    rb = ctx.retry(lambda: suite.rebase(branch, ctx.spine, on_conflict="theirs", label="dev_rebase"))
                 rebases_done += 1
                 if rb.ok and isinstance(rb.value, dict):
                     ctx.bump_metric("rebase_conflicts", int(rb.value.get("conflicts", 0)))

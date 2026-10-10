@@ -234,8 +234,8 @@ class MultiAgentScenario(Scenario):
         suite.log(branch, limit=5, label="history")
         suite.log(ctx.spine, limit=10, label="history")
         with self._merge_lock:
-            m = suite.merge(ctx.spine, branch, message=f"merge agent {a} round {r}",
-                            on_conflict=fixed_policy, label="agent_merge")
+            m = ctx.retry(lambda: suite.merge(ctx.spine, branch, message=f"merge agent {a} round {r}",
+                                              on_conflict=fixed_policy, label="agent_merge"))
             conflicts = int(m.value.get("conflicts", 0)) if (m.ok and isinstance(m.value, dict)) else 0
             if m.ok:
                 w.exec(self._integration_script(a), ctx.spine, label="integrate")

@@ -79,11 +79,18 @@ class InvariantRecorder:
 
 
 def is_retryable_error(msg: str) -> bool:
-    """Neon/Xata rate- and resource-limit errors worth waiting out."""
+    """Errors worth retrying after a wait: Neon/Xata rate- and
+    resource-limit errors, and a connection the server dropped (a compute
+    restarted or suspended under it). A verb that failed this way left no
+    partial state (the composed merges run in one transaction), so the
+    retry repeats the whole operation; the failed attempt stays recorded."""
     msg = (msg or "").lower()
     return any(p in msg for p in (
         "429", "too many", "running operations", "branches limit",
         "endpoints limit", "limit reached",
+        "ssl connection has been closed", "connection already closed",
+        "server closed the connection", "ssl syscall error",
+        "terminating connection", "could not connect to server",
     ))
 
 
@@ -266,8 +273,9 @@ class ScenarioContext:
 
     def retry(self, fn: Callable[[], OpResult], max_retries: int = 8,
               base_delay: float = 1.0) -> OpResult:
-        """Call ``fn`` again with backoff while it FAILS with a rate-limit
-        error; each wait is an API_RETRY_WAIT row."""
+        """Call ``fn`` again with backoff while it FAILS with a retryable
+        error (see is_retryable_error); each wait is an API_RETRY_WAIT
+        row labelled "retry", and every attempt's own row stays."""
         for attempt in range(max_retries):
             result = fn()
             if not result.failed or attempt == max_retries - 1:
