@@ -522,13 +522,21 @@ class NeonToolSuite(DBToolSuite):
         ep = self._endpoint_id(branch_id)
         if not ep:
             return
-        with type(self)._ACT_LOCK:
-            type(self)._ACTIVE.pop(branch_id, None)
+        cls = type(self)
+        with cls._ACT_LOCK:
+            last = cls._ACTIVE.pop(branch_id, None)
         try:
             self._api("POST", f"projects/{self.project_id}/endpoints/{ep}/suspend")
         except NeonAPIError as e:
             if e.status not in (409, 422, 423):   # already suspended / in transition
                 raise
+            # In transition (most likely starting for another connection):
+            # still active as far as the quota goes, so it stays a candidate
+            # for the next time room is needed.
+            self.observe("suspend_in_transition")
+            with cls._ACT_LOCK:
+                if last is not None:
+                    cls._ACTIVE.setdefault(branch_id, last)
 
     def _make_room(self, target: str) -> None:
         """Keep the process under NEON_ACTIVE_BUDGET active computes: before
@@ -561,6 +569,48 @@ class NeonToolSuite(DBToolSuite):
                 self.observe("lru_suspends")
             except Exception as e:
                 print(f"Warning: could not suspend compute of {b}: {e}")
+
+    def _reconcile_actives(self) -> int:
+        """Rebuild the registry from Neon's own view of the project's
+        computes and suspend active ones no connection holds, least
+        recently used first, until the budget has room. Called when a
+        connect is refused for the active-compute limit: the registry may
+        have missed a compute (a suspend refused in transition, a compute
+        another path started), and a compute used a moment ago is still
+        a legitimate victim when the alternative is waiting. Returns the
+        number of suspends issued."""
+        resp = self._api("GET", f"projects/{self.project_id}/endpoints")
+        default_id = self._branches[self.default_branch]["id"]
+        cls = type(self)
+        victims = []
+        with cls._ACT_LOCK:
+            now = time.monotonic()
+            seen = set()
+            for e in resp.get("endpoints", []):
+                if e.get("type") != "read_write":
+                    continue
+                b = e.get("branch_id")
+                self._endpoints.setdefault(b, e["id"])
+                if e.get("current_state") == "active" or e.get("pending_state") == "active":
+                    seen.add(b)
+                    if b != default_id and b not in cls._ACTIVE:
+                        cls._ACTIVE[b] = now - 60.0
+                        self.observe("active_compute_unregistered")
+            for b in [b for b in cls._ACTIVE if b not in seen]:
+                del cls._ACTIVE[b]
+            unheld = sorted((b for b in cls._ACTIVE if cls._HOLDS.get(b, 0) <= 0 and b != default_id),
+                            key=lambda b: cls._ACTIVE[b])
+            while len(cls._ACTIVE) + 1 > NEON_ACTIVE_BUDGET and unheld:
+                b = unheld.pop(0)
+                del cls._ACTIVE[b]
+                victims.append(b)
+        for b in victims:
+            try:
+                self._suspend(b)
+                self.observe("limit_suspends")
+            except Exception as e:
+                print(f"Warning: could not suspend compute of {b}: {e}")
+        return len(victims)
 
     def _reserve(self, branch_id: str, n: int = 1) -> None:
         """Hold (or release, n=-1) a compute without a connection, so the
@@ -603,7 +653,13 @@ class NeonToolSuite(DBToolSuite):
                     raise
                 if _ACTIVE_LIMIT_MSG in msg:
                     self.observe("active_compute_limit_hits")
-                    delay = 2.0 + random.random()
+                    # Make room from Neon's view of what is active, then retry.
+                    try:
+                        freed = self._reconcile_actives()
+                    except Exception as re:
+                        freed = 0
+                        print(f"Warning: could not reconcile active computes: {re}")
+                    delay = (0.5 if freed else 2.0) + random.random()
                     label = "compute_wait"
                 else:
                     delay = min(3.0, 0.5 * attempt)

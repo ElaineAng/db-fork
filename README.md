@@ -827,7 +827,11 @@ when a compute is needed above that, the least recently used one that no
 connection holds is suspended first (`NEON_SUSPEND_ON_SWITCH=1` instead
 suspends a branch's compute whenever the connection moves off it); a
 suspended compute resumes on the next connect, and both land in `CONNECT`.
-A connect refused for the compute limit waits and retries. All API calls share one process-wide token bucket under the
+A connect refused for the compute limit rebuilds the registry from
+Neon's own list of active computes, suspends the least recently used
+ones no connection holds, and retries (`active_compute_limit_hits`,
+`limit_suspends` and `active_compute_unregistered` in the e2e stats'
+`backend_observations` count how often that happened). All API calls share one process-wide token bucket under the
 documented 700 requests/minute (`NEON_API_RATE_PER_MIN`, `NEON_API_BURST`);
 bucket waits are part of the verb's cost and are summed in the e2e stats'
 `backend_observations`, while reactive waits (429/423/503 backoff, compute
