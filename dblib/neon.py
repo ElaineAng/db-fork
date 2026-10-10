@@ -1241,8 +1241,14 @@ class NeonToolSuite(DBToolSuite):
                 pl = plans[t]
                 cols, pk = pl["cols"], pl["pk"]
                 if not pk:
-                    self._exec(ours, f'INSERT INTO {pl["O"]} ({", ".join(_q(c) for c in cols)}) SELECT {self._cols("t", cols)} FROM {pl["T"]} t '
-                                     f'WHERE NOT EXISTS (SELECT 1 FROM {pl["B"]} b WHERE {self._same("b", "t", cols)})')
+                    # Rows theirs added since base, as a multiset difference:
+                    # EXCEPT ALL hashes (NULLs compare equal), where an anti-join
+                    # on IS NOT DISTINCT FROM over every column is a nested loop
+                    # that grows with |theirs| x |base| (the history table of a
+                    # dev_agent run made that the rebase's dominant cost).
+                    cl = ", ".join(_q(c) for c in cols)
+                    self._exec(ours, f'INSERT INTO {pl["O"]} ({cl}) SELECT {cl} FROM '
+                                     f'(SELECT {cl} FROM {pl["T"]} EXCEPT ALL SELECT {cl} FROM {pl["B"]}) x')
                     info["merged_tables"].append(t)
                     info["skipped_tables"][t] = "no primary key: new rows only"
                     continue
