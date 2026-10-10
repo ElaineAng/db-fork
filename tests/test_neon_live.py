@@ -169,3 +169,26 @@ def test_delete_parent_is_deferred(suite):
     assert d.ok  # deferred until q is gone
     assert suite.delete("q").ok
     assert "p" not in suite.list_branches()
+
+
+def test_reset_twice_to_an_older_commit(suite):
+    """A restore re-parents the branch under its backup at the restore
+    LSN; a second reset to an older commit must restore from that
+    ancestor (Neon refuses it from the branch itself)."""
+    b = suite.branch("twice", "main")
+    assert b.ok, b.error
+    suite.exec(["INSERT INTO t VALUES (10,'s1',1)"], refs=["twice"])
+    c1 = suite.commit("twice", "s1")
+    suite.exec(["INSERT INTO t VALUES (11,'s2',2)"], refs=["twice"])
+    c2 = suite.commit("twice", "s2")
+    suite.exec(["INSERT INTO t VALUES (12,'s3',3)"], refs=["twice"])
+    c3 = suite.commit("twice", "s3")
+    assert c1.ok and c2.ok and c3.ok
+    r2 = suite.reset("twice", c2.value)
+    assert r2.ok, r2.error
+    assert [r[0] for r in rows(suite, "twice", "SELECT id FROM t WHERE id >= 10 ORDER BY id")] == [10, 11]
+    r1 = suite.reset("twice", c1.value)
+    assert r1.ok, r1.error
+    assert [r[0] for r in rows(suite, "twice", "SELECT id FROM t WHERE id >= 10 ORDER BY id")] == [10]
+    log = suite.log("twice", limit=5)
+    assert log.ok and log.value[0]["message"] == "s1"

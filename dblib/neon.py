@@ -1519,12 +1519,33 @@ class NeonToolSuite(DBToolSuite):
 
     # -- reset / revert ------------------------------------------------------
 
+    def _ancestor_holding(self, branch_id: str, lsn: str) -> str:
+        """The branch, or the nearest ancestor, whose timeline contains
+        ``lsn``: walk up while the LSN is older than the branch's fork
+        point (its parent_lsn)."""
+        by_id = {info["id"]: info for info in self._branches.values()}
+        target = lsn_to_int(lsn)
+        cur = branch_id
+        while True:
+            info = by_id.get(cur)
+            if not info or not info.get("parent_id") or not info.get("parent_lsn"):
+                return cur
+            if target >= lsn_to_int(info["parent_lsn"]):
+                return cur
+            cur = info["parent_id"]
+
     def _reset_impl(self, ref: Ref, to: str) -> None:
         bid = self._on(ref)
         row = self._find_commit(self.conn, to)
         if not row["lsn"]:
             raise ValueError(f"commit {to} has no LSN")
-        src = row["branch_id"] or bid
+        # A restore with preserve_under_name makes the backup branch the
+        # parent of the restored branch at the restore LSN, so a later
+        # reset to an older commit must name the ancestor whose timeline
+        # holds that LSN (Neon refuses "LSN is older than parent" from the
+        # branch itself).
+        self._refresh_branches()
+        src = self._ancestor_holding(row["branch_id"] or bid, row["lsn"])
         n = len([k for k in self._branches if k.startswith(f"{ref.branch}_bk_")])
         body = {"source_branch_id": src, "source_lsn": row["lsn"],
                 "preserve_under_name": f"{ref.branch}_bk_{n + 1}_{int(time.time()) % 100000}"}
