@@ -607,12 +607,15 @@ class DBToolSuite(ABC):
         status, value, error, exc = OpStatus.OK, None, "", None
         start_wall = time.time()
         start = time.perf_counter()
+        token = self.result_collector.begin_op(verb.upper(), str(ref) if ref else "", label)
         try:
             value = fn()
         except UnsupportedOperation as e:
             status, error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
         except Exception as e:
             status, error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+        finally:
+            self.result_collector.end_op(token)
         latency = time.perf_counter() - start if status != OpStatus.UNSUPPORTED else 0.0
         end_wall = time.time()
         after = self._safe_storage() if storage and status != OpStatus.UNSUPPORTED else 0
@@ -890,12 +893,15 @@ class DBToolSuite(ABC):
         exc = None
         start_wall = time.time()
         start = time.perf_counter()
+        token = self.result_collector.begin_op("EXEC", result.ref, label)
         try:
             result.value = self._run_script(script, session, params, self)
         except UnsupportedOperation as e:
             result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
         except Exception as e:
             result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+        finally:
+            self.result_collector.end_op(token)
         result.latency = time.perf_counter() - start
         result.statements = session.statements
         result.storage_after = self._safe_storage() if storage else 0

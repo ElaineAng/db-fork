@@ -201,3 +201,30 @@ def test_parquet_output(suite, tmp_path):
     assert set(df["op_name"]) == {"COMMIT", "MERGE", "READ", "EXEC"}
     assert set(df["status"]) == {"OK", "UNSUPPORTED"}
     assert "ref" in df.columns and "exec_id" in df.columns
+
+
+def test_in_flight_ops_and_stall_detection(tmp_path):
+    import threading
+    import time as _time
+    from dblib.result_collector import ResultCollector
+
+    c = ResultCollector(run_id="t", output_dir=str(tmp_path))
+    started = threading.Event()
+    release = threading.Event()
+
+    def op():
+        t = c.begin_op("REBASE", "dev_1", "dev_rebase")
+        started.set()
+        release.wait()
+        c.end_op(t)
+
+    th = threading.Thread(target=op)
+    th.start()
+    assert started.wait(2)
+    _time.sleep(0.05)
+    live = c.in_flight_ops()
+    assert [(o["op"], o["ref"], o["label"]) for o in live] == [("REBASE", "dev_1", "dev_rebase")]
+    assert c.stalled_ops(0.01) and not c.stalled_ops(60)
+    release.set()
+    th.join(2)
+    assert c.in_flight_ops() == []

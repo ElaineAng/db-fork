@@ -222,8 +222,8 @@ workload {
 ### Running
 
 ```bash
-./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] \
-    [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] \
+./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--op-stall-sec N] \
+    [--measure-storage] [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] \
     <scenario> <backend> [scale_factor]
 ```
 
@@ -233,6 +233,7 @@ workload {
 | `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 | `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
+| `--op-stall-sec N` | stall limit for one operation: when a verb or an exec has been running longer than this (default 600 s, 0 = off), the run is stopped the same way, and the e2e stats' `stop_reason` names the operation |
 | `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
 | `--measure-storage` | also measure storage around every operation |
 

@@ -192,6 +192,9 @@ class ResultCollector:
         self._spilled_rows = 0
         # Per-op-type status counts over every row emitted (spilled or not)
         self._status_counts: dict = {}
+        # Operations in flight: token -> (op name, ref, label, thread id, start)
+        self._in_flight: dict = {}
+        self._next_token = 1
 
         self._lock = threading.Lock()
 
@@ -326,6 +329,35 @@ class ResultCollector:
 
     def record_step_id(self, step_id: int) -> None:
         self._get_thread_state().step_id = step_id
+
+    # ------------------------------------------------------------------
+    # Operations in flight (for a stall watchdog)
+    # ------------------------------------------------------------------
+
+    def begin_op(self, op_name: str, ref: str = "", label: str = "") -> int:
+        """Register an operation that just started; returns its token."""
+        with self._lock:
+            token = self._next_token
+            self._next_token += 1
+            self._in_flight[token] = (op_name, ref or "", label or "",
+                                      get_current_thread_id(), time.time())
+        return token
+
+    def end_op(self, token: int) -> None:
+        with self._lock:
+            self._in_flight.pop(token, None)
+
+    def in_flight_ops(self) -> list:
+        """Operations running now, as dicts with their elapsed seconds."""
+        now = time.time()
+        with self._lock:
+            items = list(self._in_flight.values())
+        return [{"op": op, "ref": ref, "label": label, "thread_id": tid,
+                 "elapsed_sec": now - start} for op, ref, label, tid, start in items]
+
+    def stalled_ops(self, threshold_sec: float) -> list:
+        """Operations in flight for longer than ``threshold_sec``."""
+        return [o for o in self.in_flight_ops() if o["elapsed_sec"] > threshold_sec]
 
     def next_exec_id(self) -> int:
         with self._lock:

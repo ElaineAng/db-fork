@@ -73,6 +73,40 @@ def _flush_to_disk(suite):
 
 
 DEFAULT_STORAGE_SAMPLE_SEC = 5.0
+DEFAULT_OP_STALL_SEC = 600.0
+
+
+class StallWatchdog(threading.Thread):
+    """Stops the scenario when one operation (a verb or an exec) has been
+    running for longer than ``threshold``: a run-wide cap says little
+    about a single diff or rebase that never returns. Checks every
+    ``interval`` seconds; the first stall names the operation in the
+    stop reason."""
+
+    def __init__(self, collector, ctx, threshold: float, interval: float = None):
+        super().__init__(daemon=True, name="stall-watchdog")
+        self.collector = collector
+        self.ctx = ctx
+        self.threshold = threshold
+        # A quarter of the threshold, between 0.5 s and 5 s.
+        self.interval = interval if interval is not None else min(5.0, max(0.5, threshold / 4.0))
+        self.fired = None
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.wait(self.interval):
+            stalled = self.collector.stalled_ops(self.threshold)
+            if not stalled:
+                continue
+            worst = max(stalled, key=lambda o: o["elapsed_sec"])
+            desc = f"{worst['op']} on {worst['ref'] or '?'}" + (f" ({worst['label']})" if worst["label"] else "")
+            self.fired = f"operation stalled: {desc} running for {worst['elapsed_sec']:.0f}s (limit {self.threshold:.0f}s)"
+            print(f"\nStall watchdog: {self.fired}; stopping the scenario...", flush=True)
+            self.ctx.cancel_all(self.fired)
+            return
+
+    def stop(self):
+        self._stop.set()
 
 
 class StorageSampler(threading.Thread):
@@ -216,6 +250,9 @@ def main(argv=None):
                         help="Measure disk_size_before/after around each timed operation.")
     parser.add_argument("--max-runtime-sec", type=int, default=0,
                         help="Cap the scenario runtime in seconds (0 = no limit).")
+    parser.add_argument("--op-stall-sec", type=float, default=DEFAULT_OP_STALL_SEC,
+                        help="Stop the run when one operation (verb or exec) runs longer "
+                             f"than this many seconds (default {DEFAULT_OP_STALL_SEC:g}; 0 = off).")
     parser.add_argument("--storage-sample-interval", type=float, default=None,
                         help="Seconds between background storage samples during the "
                              f"scenario (default {DEFAULT_STORAGE_SAMPLE_SEC:g}; 0 = off).")
@@ -246,6 +283,8 @@ def main(argv=None):
         print("Storage measurement: enabled")
     if args.max_runtime_sec:
         print(f"Runtime cap: {args.max_runtime_sec}s")
+    if args.op_stall_sec > 0:
+        print(f"Operation stall limit: {args.op_stall_sec:g}s")
     sample_sec = storage_sample_interval(config, args.storage_sample_interval)
     print(f"Storage sampling: every {sample_sec:g}s" if sample_sec > 0 else "Storage sampling: off")
 
@@ -317,16 +356,22 @@ def main(argv=None):
 
     deadline_timer = None
     if args.max_runtime_sec:
-        deadline_timer = threading.Timer(args.max_runtime_sec, ctx.cancel_all)
+        deadline_timer = threading.Timer(
+            args.max_runtime_sec, ctx.cancel_all, args=(f"runtime cap of {args.max_runtime_sec}s reached",))
         deadline_timer.daemon = True
         deadline_timer.start()
+    watchdog = None
+    if args.op_stall_sec > 0:
+        watchdog = StallWatchdog(collector, ctx, args.op_stall_sec)
+        watchdog.start()
 
     # An interrupt (Ctrl-C, SIGTERM) stops the scenario the way the runtime
     # cap does: the workers see the stop event, the run is recorded as
     # interrupted and its rows and stats are still written.
     def _on_signal(signum, frame):
-        print(f"\nSignal {signal.Signals(signum).name}: stopping the scenario...", flush=True)
-        ctx.cancel_all()
+        name = signal.Signals(signum).name
+        print(f"\nSignal {name}: stopping the scenario...", flush=True)
+        ctx.cancel_all(f"signal {name}")
     previous_handlers = {s: signal.signal(s, _on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
 
     print(f"\nStarting scenario {scenario.name}...")
@@ -346,6 +391,8 @@ def main(argv=None):
             signal.signal(s, h)
         if deadline_timer is not None:
             deadline_timer.cancel()
+        if watchdog is not None:
+            watchdog.stop()
         if spine_load is not None:
             spine_load.stop()
         progress.close()
@@ -355,8 +402,8 @@ def main(argv=None):
         if status == "completed" and stopped:
             status = "interrupted"
         print(f"\nScenario {status} in {elapsed:.1f}s")
-        if timed_out:
-            print("Run terminated early due to runtime cap.")
+        if stopped:
+            print(f"Run stopped early: {ctx.stop_reason or 'stop requested'}")
 
         if sampler is not None:
             sampler.stop()
@@ -406,6 +453,8 @@ def main(argv=None):
             "elapsed_sec": round(elapsed, 2),
             "max_runtime_sec": args.max_runtime_sec,
             "timed_out": timed_out,
+            "stop_reason": ctx.stop_reason if stopped else "",
+            "op_stall_sec": args.op_stall_sec,
             "seed": ctx.seed,
             "schema": MessageToDict(config.schema),
             "workload": MessageToDict(config.workload),

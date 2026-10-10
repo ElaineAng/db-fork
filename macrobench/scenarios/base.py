@@ -96,6 +96,7 @@ class ScenarioContext:
     invariants: InvariantRecorder
     progress: object = None         # SharedProgress or None
     stop_event: threading.Event = field(default_factory=threading.Event)
+    stop_reason: str = ""
     log: Callable[[str], None] = print
     metrics: dict = field(default_factory=dict)
     worker_conns: dict = field(default_factory=dict)
@@ -182,8 +183,11 @@ class ScenarioContext:
         except Exception:
             pass
 
-    def cancel_all(self) -> None:
-        """Deadline hook: cancel in-flight statements on every suite."""
+    def cancel_all(self, reason: str = "") -> None:
+        """Stop the scenario (deadline, stall watchdog, signal): set the
+        stop event and cancel in-flight statements on every suite."""
+        if reason and not self.stop_reason:
+            self.stop_reason = reason
         self.stop_event.set()
         with self._lock:
             suites = list(self.worker_conns.values())
