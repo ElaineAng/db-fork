@@ -20,6 +20,7 @@ Design principles:
 """
 
 import argparse
+import re
 import asyncio
 import json
 import os
@@ -462,7 +463,7 @@ class BackendManager:
                 info.default_branch_id = neon_project["branch"]["id"]
                 info.default_branch_name = neon_project["branch"]["name"]
                 print(f"Neon project ID: {info.neon_project_id}")
-                print(f"Default Neon connection URI: {info.default_uri}")
+                print(f"Default Neon connection URI: {re.sub(r'://([^:/]+):[^@]*@', r'://\1:***@', info.default_uri)}")
             else:
                 info.neon_project_id = config.database_setup.existing_db.neon_project_id
                 proj_branches = NeonToolSuite.get_project_branches(info.neon_project_id)
