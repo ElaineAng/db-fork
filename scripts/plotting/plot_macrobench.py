@@ -962,8 +962,11 @@ def plot_storage(runs: list[Run], outdir: str) -> None:
         ax.legend(fontsize=8)
     for idx in range(len(scenarios), nrows * ncols):
         axes[idx // ncols][idx % ncols].axis("off")
-    fig.suptitle("Storage over the run (markers right of each series: setup o, workflow s, gc ^, cleanup x)")
-    fig.tight_layout()
+    fig.suptitle("Storage over the run")
+    fig.text(0.5, 0.005, "markers right of each series: after setup o, after workflow s, after gc ^, "
+             "after cleanup x (a zero-byte point is not drawn on a log axis)",
+             ha="center", fontsize=8)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(os.path.join(outdir, "storage.png"), dpi=150)
     plt.close(fig)
 
