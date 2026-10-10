@@ -20,9 +20,6 @@ from microbench.operations.branch import (
     BranchCreateOperation,
     BranchConnectOperation,
     BranchDeleteOperation,
-    ConnectFirstOperation,
-    ConnectMidOperation,
-    ConnectLastOperation,
 )
 from microbench.operations.ddl import (
     AddColumnOperation,
@@ -55,9 +52,6 @@ __all__ = [
     "BranchCreateOperation",
     "BranchConnectOperation",
     "BranchDeleteOperation",
-    "ConnectFirstOperation",
-    "ConnectMidOperation",
-    "ConnectLastOperation",
     "AddColumnOperation",
     "AddIndexOperation",
     "RemoveColumnOperation",

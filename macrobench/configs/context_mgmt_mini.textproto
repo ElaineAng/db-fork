@@ -1,0 +1,10 @@
+# S2 Agent context management, smoke size.
+run_id: "macro_context_mgmt_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_context_mgmt_mini" cleanup: true generated {} }
+schema { base: NO_BASE }
+workload {
+  branch_ops { commit_interval: 2 retention_steps: 4 }
+  data_ops { statements_per_step: 4 rows_per_write: 10 write_fraction: 0.5 }
+  context_mgmt { compaction_interval: 4 fanout: 3 compaction_cycles: 3 rejected_cycle: 2 }
+}

@@ -1,0 +1,10 @@
+# S6 Data agent, smoke size.
+run_id: "macro_data_agent_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_data_agent_mini" cleanup: true generated {} }
+schema { base: CH_BENCH scale_factor: 1 items: 1000 customers_per_district: 100 orders_per_district: 100 suppliers: 100 }
+workload {
+  branch_ops { commit_interval: 1 }
+  data_ops { statements_per_step: 4 rows_per_write: 3 write_fraction: 0.8 spine_clients: 1 analytical_fraction: 0.8 }
+  data_agent { batches: 4 concurrent_batches: 2 batch_rows: 30 days_back: 2 steps_per_batch: 3 reset_prob: 0.5 }
+}

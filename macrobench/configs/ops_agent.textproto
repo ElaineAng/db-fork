@@ -1,0 +1,10 @@
+# S5 Operations agent: dense commits, bad deploy, investigation, PITR.
+run_id: "macro_ops_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_ops_agent" cleanup: true generated {} }
+schema { base: CH_BENCH scale_factor: 1 }
+workload {
+  branch_ops { commit_interval: 1 }
+  data_ops { statements_per_step: 4 rows_per_write: 10 spine_clients: 8 analytical_fraction: 0.05 worker_threads: 4 }
+  ops_agent { spine_commits: 500 fault_commit_offset: 40 investigation_branches: 8 history_offset: 100 load_during_investigation: true }
+}

@@ -1,10 +1,22 @@
+"""Plain PostgreSQL backend where a branch is a database copy.
+
+    branch   CREATE DATABASE <name> TEMPLATE <parent> STRATEGY = FILE_COPY
+    connect  open a connection to the branch's database
+    delete   DROP DATABASE <name>
+
+Postgres has no commits and no cross-database queries, so everything else
+is unsupported. CREATE DATABASE ... TEMPLATE needs no open connections on
+the template, so branching from the connected database first moves the
+connection to the neutral "postgres" database.
+"""
+
 import os
 import threading
 
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import psycopg2
 from psycopg2.extensions import connection as _pgconn
-from dblib.db_api import DBToolSuite
+from dblib.db_api import DBToolSuite, Ref
 import dblib.result_collector as rc
 import dblib.util as dbutil
 
@@ -16,21 +28,17 @@ PGSQL_DATA_DIR = os.environ.get("PGSQL_DATA_DIR", "")
 
 
 class FileCopyToolSuite(DBToolSuite):
-    """
-    A suite of tools for interacting with a PGSQL database on a shared connection.
-    """
+    BACKEND_NAME = "file_copy"
+    SUPPORTS_COMMIT_REFS = False
+    SUPPORTS_MULTI_REF_EXEC = False
 
     @classmethod
     def get_default_connection_uri(cls) -> str:
-        return dbutil.format_db_uri(
-            PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres"
-        )
+        return dbutil.format_db_uri(PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, "postgres")
 
     @classmethod
     def get_branch_uri(cls, branch_name) -> str:
-        return dbutil.format_db_uri(
-            PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, branch_name
-        )
+        return dbutil.format_db_uri(PGSQL_USER, PGSQL_PASSWORD, PGSQL_HOST, PGSQL_PORT, branch_name)
 
     @classmethod
     def get_initial_connection_uri(cls, db_name: str) -> str:
@@ -41,28 +49,23 @@ class FileCopyToolSuite(DBToolSuite):
         cls,
         collector: rc.ResultCollector,
         db_name: str,
-        autocommit: bool,
         default_branch_name: str,
         shared_branches: set,
         shared_branches_lock: threading.Lock,
         create_db_lock: threading.Lock,
+        measure_storage: bool = False,
     ):
-        # Connect to the actual database for initial setup (loading SQL dump, etc.)
-        uri = cls.get_branch_uri(db_name)
-
-        conn = psycopg2.connect(uri)
-        if autocommit:
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        conn = psycopg2.connect(cls.get_branch_uri(default_branch_name or db_name))
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         return cls(
             connection=conn,
             collector=collector,
             db_name=db_name,
-            connection_uri=uri,
-            autocommit=autocommit,
-            default_branch_name=default_branch_name,
+            default_branch_name=default_branch_name or db_name,
             shared_branches=shared_branches,
             shared_branches_lock=shared_branches_lock,
             create_db_lock=create_db_lock,
+            measure_storage=measure_storage,
         )
 
     def __init__(
@@ -70,185 +73,148 @@ class FileCopyToolSuite(DBToolSuite):
         connection: _pgconn,
         collector: rc.ResultCollector,
         db_name: str,
-        connection_uri: str,
-        autocommit: bool,
         default_branch_name: str,
         shared_branches: set,
         shared_branches_lock: threading.Lock,
         create_db_lock: threading.Lock,
+        measure_storage: bool = False,
     ):
-        super().__init__(connection, result_collector=collector)
-        self._connection_uri = connection_uri
-        self.autocommit = autocommit
+        super().__init__(connection, collector, measure_storage)
+        self.db_name = db_name
+        self.default_branch = default_branch_name
+        # Branch databases known across all workers (for storage accounting
+        # and cleanup), and a lock serialising CREATE DATABASE.
         self.shared_branches = shared_branches
         self._shared_branches_lock = shared_branches_lock
         self._create_db_lock = create_db_lock
-        self._all_branches_lock = threading.Lock()  # Per-instance lock for _all_branches
-
-        # Thread-safe add to shared branches
         with self._shared_branches_lock:
             shared_branches.add(db_name)
+        self._current_ref = Ref(default_branch_name)
 
-        self._all_branches = dict()
-        self._template_db = db_name  # Track the template database for creating branches
+    def _connect_to(self, uri: str) -> None:
+        if self.conn:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self.conn = psycopg2.connect(uri)
+        self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
 
-        # Set current branch to db_name since we're connected to it for setup
-        self.current_branch_name = db_name
+    def _go_neutral(self) -> None:
+        """Move the connection off any branch database."""
+        self._connect_to(self.get_default_connection_uri())
+        self._current_ref = None
 
-    def get_total_storage_bytes(self) -> int:
-        """Get total physical storage across all branch databases.
-
-        On macOS, PGSQL_DATA_DIR is required — it must point to an isolated
-        volume (sparse disk image) so shutil.disk_usage() measures only DB
-        files. See db_setup/setup_pg_volume.sh.
-
-        On Linux, falls back to per-OID st_blocks (accurate without CoW).
-        """
-        if PGSQL_DATA_DIR:
-            return dbutil.get_volume_usage_bytes(PGSQL_DATA_DIR)
-        return self._get_storage_via_st_blocks()
-
-    def _get_storage_via_st_blocks(self) -> int:
-        """Fallback: sum st_blocks across per-OID directories.
-
-        Accurate on Linux ext4/XFS where FILE_COPY does a real copy (no CoW).
-        Would overcount on btrfs or XFS with reflinks — use PGSQL_DATA_DIR
-        with an isolated volume in that case.
-        """
-        with self._shared_branches_lock:
-            branch_names = list(self.shared_branches)
-        if not branch_names:
-            return 0
-
-        cur = self.conn.cursor()
-        cur.execute("SHOW data_directory;")
-        pg_data_dir = cur.fetchone()[0]
-
-        cur.execute(
-            "SELECT oid FROM pg_database WHERE datname = ANY(%s);",
-            (branch_names,),
-        )
-        oids = [str(row[0]) for row in cur.fetchall()]
-        cur.close()
-
-        base_dir = os.path.join(pg_data_dir, "base")
-        total = 0
-        for oid in oids:
-            total += dbutil.get_directory_size_bytes(
-                os.path.join(base_dir, oid)
-            )
-        return total
-
-    def list_branches(self) -> list[str]:
+    def list_branches(self) -> list:
         with self._shared_branches_lock:
             return list(self.shared_branches)
 
-    def _create_branch_impl(self, branch_name: str, parent_name: str) -> None:
-        # CREATE DATABASE ... TEMPLATE requires no active connections to the template database.
-        # Close current connection if it's connected to the parent we want to use as template.
+    # ------------------------------------------------------------------
+    # Hooks
+    # ------------------------------------------------------------------
+
+    def _storage_bytes(self) -> int:
+        """Physical storage of all branch databases.
+
+        With PGSQL_DATA_DIR set (an isolated volume, see
+        db_setup/setup_pg_volume.sh) this is the volume's usage, which is
+        right under copy-on-write. Otherwise it sums st_blocks over the
+        per-database directories, which is accurate without CoW.
+        """
+        if PGSQL_DATA_DIR:
+            return dbutil.get_volume_usage_bytes(PGSQL_DATA_DIR)
+        with self._shared_branches_lock:
+            branch_names = list(self.shared_branches)
+        if not branch_names or not self.conn:
+            return 0
+        with self.conn.cursor() as cur:
+            cur.execute("SHOW data_directory;")
+            pg_data_dir = cur.fetchone()[0]
+            cur.execute("SELECT oid FROM pg_database WHERE datname = ANY(%s);", (branch_names,))
+            oids = [str(row[0]) for row in cur.fetchall()]
+        base_dir = os.path.join(pg_data_dir, "base")
+        return sum(dbutil.get_directory_size_bytes(os.path.join(base_dir, oid)) for oid in oids)
+
+    def _connect_impl(self, ref: Ref) -> None:
+        self._connect_to(self.get_branch_uri(ref.branch))
+
+    def _branch_impl(self, name: str, from_ref: Ref) -> None:
+        parent = from_ref.branch
+        if self._current_ref and self._current_ref.branch == parent:
+            # The template must have no connections.
+            self._go_neutral()
         temp_conn = None
         try:
-            # Use template database as parent if no parent specified
-            if not parent_name:
-                parent_name = self._template_db
-
-            # If we're currently connected to the parent database, disconnect first
-            # (PostgreSQL requirement: template database must have 0 active connections)
-            if self.current_branch_name == parent_name and self.conn and not self.conn.closed:
-                self.conn.close()
-                # Reconnect to neutral "postgres" database to maintain valid connection
-                neutral_uri = self.__class__.get_default_connection_uri()
-                self.conn = psycopg2.connect(neutral_uri)
-                if self.autocommit:
-                    self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-
-            cmd = f"CREATE DATABASE {branch_name} TEMPLATE {parent_name} STRATEGY = FILE_COPY"
-
-            # Serialize CREATE DATABASE operations to avoid PostgreSQL contention
             with self._create_db_lock:
-                # Create temporary connection to neutral database
-                temp_uri = self.__class__.get_default_connection_uri()
-                temp_conn = psycopg2.connect(temp_uri)
+                temp_conn = psycopg2.connect(self.get_default_connection_uri())
                 temp_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-
-                # Execute CREATE DATABASE on temporary connection
-                cur = temp_conn.cursor()
-                cur.execute(cmd)
-                cur.close()
-
+                with temp_conn.cursor() as cur:
+                    cur.execute(
+                        f"CREATE DATABASE {name} TEMPLATE {parent} STRATEGY = FILE_COPY"
+                    )
         except psycopg2.errors.DuplicateDatabase as e:
-            raise Exception(
-                f"Cannot create branch {branch_name}, already exists: {e}"
-            )
+            raise Exception(f"Cannot create branch {name}, already exists: {e}")
         finally:
             if temp_conn:
                 temp_conn.close()
-
-        self.current_branch_name = branch_name
-
-        # Thread-safe updates to shared state
-        with self._all_branches_lock:
-            self._all_branches[branch_name] = self.__class__.get_branch_uri(
-                branch_name
-            )
-
         with self._shared_branches_lock:
-            self.shared_branches.add(branch_name)
+            self.shared_branches.add(name)
 
-    def _connect_branch_impl(self, branch_name: str) -> None:
-        with self._all_branches_lock:
-            if branch_name in self._all_branches:
-                uri = self._all_branches[branch_name]
-            else:
-                uri = self.__class__.get_branch_uri(branch_name)
-                self._all_branches[branch_name] = uri
-
-        self.conn.close()
-        self.conn = psycopg2.connect(uri)
-        if self.autocommit:
-            self.conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-        self.current_branch_name = branch_name
-
-    def _get_current_branch_impl(self) -> tuple[str, str]:
-        # branch_name substituted for branch_id, allows _create_branch_impl to
-        # work correctly with the way the runners call the API
-        return (self.current_branch_name, self.current_branch_name)
-
-    def delete_db(self, db_name: str) -> None:
-        # Close current connection first
-        if self.conn:
-            self.conn.close()
-            self.conn = None
-
-        # Connect to the default postgres database
-        default_uri = self.__class__.get_default_connection_uri()
-        conn = psycopg2.connect(default_uri)
-        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-
+    def _delete_impl(self, ref: Ref) -> None:
+        if self._current_ref and self._current_ref.branch == ref.branch:
+            self._go_neutral()
+        temp_conn = psycopg2.connect(self.get_default_connection_uri())
+        temp_conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         try:
-            with conn.cursor() as cur:
-                cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
-        except Exception as e:
-            raise Exception(f"Error deleting database: {e}")
+            with temp_conn.cursor() as cur:
+                cur.execute(f"DROP DATABASE {ref.branch};")
         finally:
-            conn.close()
+            temp_conn.close()
+        with self._shared_branches_lock:
+            self.shared_branches.discard(ref.branch)
+
+    # ------------------------------------------------------------------
+    # Async: a psycopg pool on the branch the suite is on when opened; a
+    # script on another branch gets its own connection.
+    # ------------------------------------------------------------------
+
+    async def open_async_pool(self, size: int) -> None:
+        from psycopg_pool import AsyncConnectionPool
+
+        if self._current_ref is None:
+            raise ValueError("Not connected to a branch")
+        self._pool_branch = self._current_ref.branch
+        self.async_pool = AsyncConnectionPool(
+            self.get_branch_uri(self._pool_branch),
+            min_size=size, max_size=size, kwargs={"autocommit": True}, open=False,
+        )
+        await self.async_pool.open(wait=True)
+
+    async def _connect_impl_async(self, conn, ref: Ref):
+        if ref.branch == self._pool_branch:
+            return conn
+        import psycopg
+
+        return await psycopg.AsyncConnection.connect(
+            self.get_branch_uri(ref.branch), autocommit=True
+        )
+
+    # ------------------------------------------------------------------
+    # Cleanup helpers used by the runners
+    # ------------------------------------------------------------------
 
     @classmethod
     def cleanup(cls, info):
         conn = None
         cur = None
-        db_name = info.db_name
         try:
-            # Change back to original file copy method
             info.change_file_copy_method(info.prev_method)
-
-            uri = cls.get_default_connection_uri()
-            conn = psycopg2.connect(uri)
+            conn = psycopg2.connect(cls.get_default_connection_uri())
             conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
             cur = conn.cursor()
             for branch in info.branches:
                 cur.execute(f"DROP DATABASE IF EXISTS {branch};")
-            print(f"Database '{db_name}' deleted successfully.")
+            print(f"Database '{info.db_name}' deleted successfully.")
         except Exception as e:
             print(f"Error deleting database: {e}")
         finally:
@@ -258,30 +224,26 @@ class FileCopyToolSuite(DBToolSuite):
                 conn.close()
 
     class FileCopyInfo:
+        """Branch names and locks shared by every worker's suite."""
+
         def __init__(self, db_name: str):
-            # Meta object stores branch names for cleanup outside of FCTS class
-            self.branches = set()  # enforces unique name on branches
+            self.branches = set()
             self.db_name = db_name
             self.prev_method = ""
-
-            # Thread synchronization locks for multi-threaded scenarios
-            self.branches_lock = threading.Lock()  # Protects self.branches set
-            self.create_db_lock = threading.Lock()  # Serializes CREATE DATABASE operations
-
+            self.branches_lock = threading.Lock()
+            self.create_db_lock = threading.Lock()
             self.change_file_copy_method("clone")
 
         def change_file_copy_method(self, method: str) -> None:
-            """Changes file_copy_method and stores old method"""
+            """Set file_copy_method server-wide, remembering the old value."""
             conn = None
             cur = None
-            uri = FileCopyToolSuite.get_default_connection_uri()
             try:
-                conn = psycopg2.connect(uri)
+                conn = psycopg2.connect(FileCopyToolSuite.get_default_connection_uri())
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
                 cur = conn.cursor()
                 cur.execute("SHOW file_copy_method;")
-                res = cur.fetchone()
-                self.prev_method = res[0]
+                self.prev_method = cur.fetchone()[0]
                 cur.execute(f"ALTER SYSTEM SET file_copy_method = '{method}';")
                 cur.execute("SELECT pg_reload_conf();")
                 print(f"Changed file copy method to {method}")

@@ -1,0 +1,10 @@
+# S2 Agent context management: long-lived spine, 3 candidates per compaction.
+run_id: "macro_context_mgmt_dolt"
+backend: DOLT
+database_setup { db_name: "macro_context_mgmt" cleanup: true generated {} }
+schema { base: NO_BASE }
+workload {
+  branch_ops { commit_interval: 2 retention_steps: 20 }
+  data_ops { statements_per_step: 6 rows_per_write: 50 write_fraction: 0.6 }
+  context_mgmt { compaction_interval: 25 fanout: 3 compaction_cycles: 8 rejected_cycle: 3 }
+}

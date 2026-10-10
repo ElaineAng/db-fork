@@ -1,0 +1,10 @@
+# S4 Development agent: busy production spine, long-lived dev branches.
+run_id: "macro_dev_agent_dolt"
+backend: DOLT
+database_setup { db_name: "macro_dev_agent" cleanup: true generated {} }
+schema { base: CH_BENCH scale_factor: 1 }
+workload {
+  branch_ops { commit_interval: 2 retention_steps: 5 }
+  data_ops { statements_per_step: 6 rows_per_write: 200 write_fraction: 0.8 spine_clients: 8 analytical_fraction: 0.1 }
+  dev_agent { dev_branches: 24 concurrent_branches: 4 dev_phase_steps: 30 review_phase_steps: 60 review_modification_prob: 0.1 rebases_per_branch: 2 spine_migration_interval: 40 key_overlap: 0.3 }
+}

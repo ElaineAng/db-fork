@@ -47,12 +47,12 @@ from dblib import dolt_mysql
 from dblib.dolt_mysql import DoltMySQLToolSuite
 from dblib import seekdb
 from dblib.seekdb import SeekDBToolSuite
+from dblib import matrixone
+from dblib.matrixone import MatrixOneToolSuite
 from dblib.neon import NeonToolSuite
-from dblib.kpg import KpgToolSuite
 from dblib.file_copy import FileCopyToolSuite
-from dblib.transaction import TxnToolSuite
 from dblib.xata import XataToolSuite
-from dblib.tiger import TigerToolSuite
+from dblib.db_api import DBToolSuite, Ref
 from dblib import result_collector as rc
 
 # Operation imports
@@ -67,16 +67,9 @@ from microbench.operations import (
     BranchCreateOperation,
     BranchConnectOperation,
     BranchDeleteOperation,
-    ConnectFirstOperation,
-    ConnectMidOperation,
-    ConnectLastOperation,
     AddIndexOperation,
     RemoveIndexOperation,
     VacuumOperation,
-    AddColumnOperation,
-    RemoveColumnOperation,
-    BackfillOperation,
-    AddColumnWithDefaultOperation,
     AddColumnOperation,
     RemoveColumnOperation,
     BackfillOperation,
@@ -164,15 +157,6 @@ class BenchmarkConfig:
                 "Concurrent writes pollute per-thread storage deltas."
             )
 
-        # Validate async mode configuration
-        if self.use_async:
-            if not self._proto.autocommit:
-                raise ValueError(
-                    "Async mode (use_async or concurrent_requests > 1) requires "
-                    "autocommit = true. Async mode does not support transaction "
-                    "management."
-                )
-
         # Backend-specific validation
         if self._proto.backend == tp.Backend.NEON:
             db_setup = self._proto.database_setup
@@ -210,10 +194,6 @@ class BenchmarkConfig:
     @property
     def scale_factor(self) -> int:
         return self._proto.scale_factor
-
-    @property
-    def autocommit(self) -> bool:
-        return self._proto.autocommit
 
     @property
     def num_threads(self) -> int:
@@ -307,14 +287,74 @@ class BackendInfo:
 
     default_uri: str = ""
     default_branch_id: str = ""
+    # Branch workers start on (the last setup branch once setup has run)
     default_branch_name: str = ""
+    # The backend's own default branch, which some backends refuse to delete
+    root_branch_name: str = ""
     neon_project_id: Optional[str] = None
     xata_project_id: Optional[str] = None
-    tiger: Optional[dict] = None
     file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
-    txn_conn: Optional[psycopg2.extensions.connection] = None
-    txn_branch_state: Optional[dict] = None
     setup_branches: list = None
+
+
+def create_db_tools(
+    backend: int,
+    backend_info: BackendInfo,
+    db_name: str,
+    result_collector: rc.ResultCollector,
+    measure_storage: bool = False,
+) -> DBToolSuite:
+    """Open one worker's DBToolSuite on the backend's default branch.
+
+    Shared with the macrobench runner. ``backend`` is a Backend enum value
+    (the microbench and macrobench enums use the same numbering).
+    """
+    default_branch = backend_info.default_branch_name
+    if backend == tp.Backend.DOLT:
+        return DoltToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
+    if backend == tp.Backend.DOLT_MYSQL:
+        return DoltMySQLToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
+    if backend == tp.Backend.SEEKDB:
+        return SeekDBToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
+    if backend == tp.Backend.MATRIXONE:
+        return MatrixOneToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
+    if backend == tp.Backend.FILE_COPY:
+        return FileCopyToolSuite.init_for_bench(
+            result_collector,
+            db_name,
+            default_branch,
+            backend_info.file_copy_info.branches,
+            backend_info.file_copy_info.branches_lock,
+            backend_info.file_copy_info.create_db_lock,
+            measure_storage,
+        )
+    if backend == tp.Backend.NEON:
+        return NeonToolSuite.init_for_bench(
+            result_collector,
+            backend_info.neon_project_id,
+            backend_info.default_branch_id,
+            default_branch,
+            db_name,
+            measure_storage,
+        )
+    if backend == tp.Backend.XATA:
+        return XataToolSuite.init_for_bench(
+            result_collector,
+            backend_info.xata_project_id,
+            backend_info.default_branch_id,
+            default_branch,
+            db_name,
+            measure_storage,
+        )
+    raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
 
 
 @dataclass
@@ -363,7 +403,13 @@ class BackendManager:
         config = self.config
         backend = config.backend
         db_name = config.db_name
-        require_db_setup = config.database_setup.WhichOneof("source") == "sql_dump"
+        source = config.database_setup.WhichOneof("source")
+        # An existing database is reused as is; a sql_dump is loaded; a
+        # "generated" (or unset) source gets an empty database the caller
+        # populates (the macrobench schema generators).
+        require_db_setup = source != "existing_db"
+        sql_dump_path = (config.database_setup.sql_dump.sql_dump_path
+                         if source == "sql_dump" else None)
 
         info = BackendInfo()
 
@@ -385,15 +431,12 @@ class BackendManager:
             info.default_branch_id = db_name
             print(f"Default SeekDB connection URI: {info.default_uri}")
 
-        elif backend == tp.Backend.KPG:
-            info.default_uri = KpgToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default KPG connection URI: {info.default_uri}")
-
-        elif backend == tp.Backend.TXN:
-            info.default_uri = TxnToolSuite.get_default_connection_uri()
-            info.default_branch_name = "main"
-            print(f"Default PostgreSQL connection URI: {info.default_uri}")
+        elif backend == tp.Backend.MATRIXONE:
+            info.default_uri = MatrixOneToolSuite.get_default_connection_uri()
+            info.default_branch_name = matrixone.MAIN_BRANCH
+            # A MatrixOne branch's ID is its database name; main is db_name.
+            info.default_branch_id = db_name
+            print(f"Default MatrixOne connection URI: {info.default_uri}")
 
         elif backend == tp.Backend.FILE_COPY:
             info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
@@ -423,33 +466,6 @@ class BackendManager:
                         info.default_branch_id = branch["id"]
                         break
 
-        elif backend == tp.Backend.TIGER:
-            if require_db_setup:
-                tiger_service = TigerToolSuite.create_tiger_service(
-                    name=f"service_{db_name}"
-                )
-                info.tiger = dict()
-                info.tiger["password"] = tiger_service["initial_password"]
-                info.tiger["service_id"] = tiger_service["service_id"]
-                info.tiger["project_id"] = tiger_service["project_id"]
-                info.tiger["service_name"] = tiger_service["name"]
-                info.tiger["region"] = tiger_service["region_code"]
-                info.tiger["services"] = dict()
-                tiger_service = TigerToolSuite.wait_for_service(
-                    info.tiger["project_id"], info.tiger["service_id"]
-                )
-                info.default_uri = (
-                    f"postgresql://tsdbadmin:{info.tiger['password']}"
-                    f"@{tiger_service['endpoint']['host']}"
-                    f":{tiger_service['endpoint']['port']}/tsdb"
-                )
-                info.default_branch_id = tiger_service["service_id"]
-                info.default_branch_name = tiger_service["name"]
-                print(f"Tiger service ID: {info.tiger['service_id']}")
-                print(f"Default Tiger connection URI: {info.default_uri}")
-            else:
-                raise NotImplementedError("Tiger with existing service not implemented")
-
         elif backend == tp.Backend.XATA:
             if require_db_setup:
                 (
@@ -473,26 +489,22 @@ class BackendManager:
         # Create database and load schema if needed
         if require_db_setup and backend == tp.Backend.DOLT_MYSQL:
             # Not a Postgres server, so psql/psycopg2 can't be used to set it up.
-            dolt_mysql.setup_database(
-                db_name, config.database_setup.sql_dump.sql_dump_path
-            )
+            dolt_mysql.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.SEEKDB:
-            seekdb.setup_database(
-                db_name, config.database_setup.sql_dump.sql_dump_path
-            )
+            seekdb.setup_database(db_name, sql_dump_path)
+        elif require_db_setup and backend == tp.Backend.MATRIXONE:
+            matrixone.setup_database(db_name, sql_dump_path)
         elif require_db_setup:
-            if not info.tiger:
-                self._create_database(info.default_uri, db_name)
+            self._create_database(info.default_uri, db_name)
 
-            # Load SQL dump
-            db_uri = self._get_connection_uri(info)
-            sql_dump_path = config.database_setup.sql_dump.sql_dump_path
-            load_sql_file(db_uri, sql_dump_path)
+            if sql_dump_path:
+                db_uri = self._get_connection_uri(info)
+                load_sql_file(db_uri, sql_dump_path)
+                # Commit schema changes for Dolt
+                if backend == tp.Backend.DOLT:
+                    commit_dolt_schema(db_uri)
 
-            # Commit schema changes for Dolt
-            if backend == tp.Backend.DOLT:
-                commit_dolt_schema(db_uri)
-
+        info.root_branch_name = info.default_branch_name
         self.backend_info = info
         return info
 
@@ -510,18 +522,6 @@ class BackendManager:
         # Backend-specific cleanup
         if info.file_copy_info:
             FileCopyToolSuite.cleanup(info.file_copy_info)
-        elif info.tiger:
-            all_ids = info.tiger.get("services", [])
-            root_id = info.tiger["service_id"]
-            project_id = info.tiger["project_id"]
-            # Delete forks first, root last
-            for sname, (sid, pw) in all_ids:
-                if sid != root_id:
-                    try:
-                        TigerToolSuite.delete_tiger_service(project_id, sid)
-                    except Exception as e:
-                        print(f"Warning: failed to delete Tiger service {sid}: {e}")
-            TigerToolSuite.delete_tiger_service(project_id, root_id)
         elif self.config.backend == tp.Backend.DOLT_MYSQL and db_name:
             try:
                 dolt_mysql.drop_database(db_name)
@@ -533,16 +533,13 @@ class BackendManager:
                 seekdb.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.MATRIXONE and db_name:
+            try:
+                # Also drops every branch database and snapshot of the run.
+                matrixone.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
-            # Close TXN connection if exists
-            if info.txn_conn:
-                try:
-                    info.txn_conn.rollback()
-                except Exception:
-                    pass
-                info.txn_conn.close()
-
-            # Drop database
             try:
                 conn = psycopg2.connect(info.default_uri)
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -589,18 +586,14 @@ class BackendManager:
             return DoltMySQLToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.SEEKDB:
             return SeekDBToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.KPG:
-            return KpgToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.MATRIXONE:
+            return MatrixOneToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
             return FileCopyToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.TXN:
-            return TxnToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.NEON:
             return NeonToolSuite._get_neon_connection_uri(
                 info.neon_project_id, info.default_branch_id, db_name
             )
-        elif backend == tp.Backend.TIGER:
-            return info.default_uri
         elif backend == tp.Backend.XATA:
             return XataToolSuite._get_xata_connection_uri(
                 info.xata_project_id, info.default_branch_id, db_name
@@ -679,14 +672,6 @@ class SetupPhase:
             self.backend_info.default_branch_name = last_branch_name
             self.backend_info.default_branch_id = last_branch_id
 
-            # Store Tiger services if applicable
-            if self.config.backend == tp.Backend.TIGER:
-                self.backend_info.tiger["services"] = setup_ctx.db_tools._services
-
-            # Store TXN branch state if applicable
-            if self.config.backend == tp.Backend.TXN:
-                self.backend_info.txn_branch_state = setup_ctx.db_tools.get_branch_state()
-
         # Get all created branches
         setup_branches = setup_branch_manager.get_all_branches()
         self.backend_info.setup_branches = setup_branches
@@ -760,12 +745,11 @@ class SetupPhase:
             ctx.db_tools.get_current_connection(), benchmark_table
         )
 
-        _, root_branch_id = ctx.db_tools.get_current_branch()
-        current_parent_id = root_branch_id
-        root_branch_name = self.backend_info.default_branch_name
+        root_branch_name = ctx.current_branch
+        current_parent = root_branch_name
 
-        # Track branch IDs for BUSHY shape
-        branch_ids = [(root_branch_name, root_branch_id)]
+        # Branches created so far (parents for the BUSHY shape)
+        branches = [root_branch_name]
 
         # Perform setup on root branch
         print(f"Performing setup ops on root branch...")
@@ -773,40 +757,25 @@ class SetupPhase:
             ctx, benchmark_table, inserts, updates, deletes
         )
 
-        # Create branches with progress bar
+        # Create branches with progress bar. Branch creation is timed into
+        # the setup collector; the data ops on each branch are not.
         for i in tqdm(range(num_branches), desc="Creating branches"):
             branch_name = f"setup_branch_{i + 1}"
 
             if shape == tp.BranchShape.SPINE:
-                # Linear chain
-                ctx.db_tools.create_branch(
-                    branch_name, current_parent_id, timed=True,
-                    storage=self.config.measure_storage
-                )
-                ctx.db_tools.connect_branch(branch_name, timed=False)
-                _, current_parent_id = ctx.db_tools.get_current_branch()
-                branch_ids.append((branch_name, current_parent_id))
-
+                parent = current_parent  # Linear chain
             elif shape == tp.BranchShape.FAN_OUT:
-                # All from root
-                ctx.db_tools.create_branch(
-                    branch_name, root_branch_id, timed=True,
-                    storage=self.config.measure_storage
-                )
-                ctx.db_tools.connect_branch(branch_name, timed=False)
-                _, new_branch_id = ctx.db_tools.get_current_branch()
-                branch_ids.append((branch_name, new_branch_id))
-
+                parent = root_branch_name  # All from root
             else:  # BUSHY
-                # Random parent
-                parent_name, parent_id = ctx.rnd.choice(branch_ids)
-                ctx.db_tools.create_branch(
-                    branch_name, parent_id, timed=True,
-                    storage=self.config.measure_storage
-                )
-                ctx.db_tools.connect_branch(branch_name, timed=False)
-                _, new_branch_id = ctx.db_tools.get_current_branch()
-                branch_ids.append((branch_name, new_branch_id))
+                parent = ctx.rnd.choice(branches)  # Random parent
+
+            ctx.db_tools.branch(
+                branch_name, from_ref=parent,
+                storage=self.config.measure_storage,
+            ).raise_for_status()
+            ctx.connect(branch_name)
+            current_parent = branch_name
+            branches.append(branch_name)
 
             # Perform data operations on this branch
             self._perform_branch_data_ops(
@@ -816,18 +785,8 @@ class SetupPhase:
             # Track the branch
             ctx.add_branch(branch_name)
 
-        # Get last branch info
-        if self.config.backend == tp.Backend.FILE_COPY:
-            if num_branches > 0:
-                last_branch_name = f"setup_branch_{num_branches}"
-                last_branch_id = last_branch_name
-            else:
-                last_branch_name = root_branch_name
-                last_branch_id = root_branch_id
-        else:
-            last_branch_name, last_branch_id = ctx.db_tools.get_current_branch()
-
-        return last_branch_name, last_branch_id
+        last_branch_name = ctx.current_branch
+        return last_branch_name, last_branch_name
 
     def _perform_branch_data_ops(
         self,
@@ -842,9 +801,6 @@ class SetupPhase:
         for _ in range(inserts):
             ctx._insert_without_timing(table_name)
 
-        if not ctx.db_tools.autocommit:
-            ctx.db_tools.commit_changes(timed=False, message="setup_inserts")
-
         # Shuffle and perform updates/deletes
         ops = ["update"] * updates + ["delete"] * deletes
         ctx.rnd.shuffle(ops)
@@ -854,9 +810,6 @@ class SetupPhase:
                 ctx._update_without_timing(table_name)
             else:
                 ctx._delete_without_timing(table_name)
-
-        if not ctx.db_tools.autocommit and (updates > 0 or deletes > 0):
-            ctx.db_tools.commit_changes(timed=False, message="setup_updates_deletes")
 
 
 # ============================================================================
@@ -880,9 +833,10 @@ class SharedBranchManager:
             return current
 
     def add_branch(self, branch_name: str) -> None:
-        """Add a branch to the shared list."""
+        """Add a branch to the shared list (once)."""
         with self._lock:
-            self._branches.append(branch_name)
+            if branch_name not in self._branches:
+                self._branches.append(branch_name)
 
     def remove_branch(self, branch_name: str) -> None:
         """Remove a branch from the shared list."""
@@ -1031,120 +985,91 @@ class WorkerContext:
         result_collector = self.result_collector
 
         # Initialize backend-specific tools
-        db_name = config.db_name
-        default_branch_name = backend_info.default_branch_name
-        backend = config.backend
-
-        if backend == tp.Backend.DOLT:
-            self.db_tools = DoltToolSuite.init_for_bench(
-                result_collector, db_name, config.autocommit, default_branch_name
-            )
-        elif backend == tp.Backend.DOLT_MYSQL:
-            self.db_tools = DoltMySQLToolSuite.init_for_bench(
-                result_collector, db_name, config.autocommit, default_branch_name
-            )
-        elif backend == tp.Backend.SEEKDB:
-            self.db_tools = SeekDBToolSuite.init_for_bench(
-                result_collector, db_name, config.autocommit, default_branch_name
-            )
-        elif backend == tp.Backend.KPG:
-            self.db_tools = KpgToolSuite.init_for_bench(
-                result_collector, db_name, config.autocommit
-            )
-        elif backend == tp.Backend.TXN:
-            backend_info.txn_conn = TxnToolSuite.get_connection(
-                backend_info.txn_conn, db_name
-            )
-            self.db_tools = TxnToolSuite.init_for_bench(
-                result_collector,
-                db_name,
-                config.autocommit,
-                default_branch_name,
-                backend_info.setup_branches,
-                backend_info.txn_conn,
-                backend_info.txn_branch_state,
-            )
-        elif backend == tp.Backend.FILE_COPY:
-            self.db_tools = FileCopyToolSuite.init_for_bench(
-                result_collector,
-                db_name,
-                config.autocommit,
-                default_branch_name,
-                backend_info.file_copy_info.branches,
-                backend_info.file_copy_info.branches_lock,
-                backend_info.file_copy_info.create_db_lock,
-            )
-            # Worker threads connect to first setup branch
-            if config.num_threads > 1 and self.thread_id > 0:
-                if backend_info.setup_branches:
-                    self.db_tools.connect_branch(
-                        backend_info.setup_branches[0], timed=False
-                    )
-        elif backend == tp.Backend.NEON:
-            self.db_tools = NeonToolSuite.init_for_bench(
-                result_collector,
-                backend_info.neon_project_id,
-                backend_info.default_branch_id,
-                default_branch_name,
-                db_name,
-                config.autocommit,
-            )
-        elif backend == tp.Backend.TIGER:
-            if not backend_info.tiger:
-                raise Exception("Tiger backend info empty")
-            self.db_tools = TigerToolSuite.init_for_bench(
-                result_collector,
-                backend_info.tiger["project_id"],
-                backend_info.tiger["service_id"],
-                backend_info.tiger["service_name"],
-                backend_info.tiger["password"],
-                backend_info.tiger["region"],
-                config.autocommit,
-                backend_info.tiger["services"],
-            )
-        elif backend == tp.Backend.XATA:
-            self.db_tools = XataToolSuite.init_for_bench(
-                result_collector,
-                backend_info.xata_project_id,
-                backend_info.default_branch_id,
-                default_branch_name,
-                db_name,
-                config.autocommit,
-            )
-        else:
-            raise ValueError(f"Unsupported backend: {tp.Backend.Name(backend)}")
+        self.db_tools = create_db_tools(
+            config.backend, backend_info, config.db_name, result_collector,
+            measure_storage=self.measure_storage,
+        )
 
         # Add root branch to manager (except FILE_COPY)
-        if backend != tp.Backend.FILE_COPY:
-            self.branch_manager.add_branch(default_branch_name)
-
-        # Set storage function if measuring storage
-        if self.measure_storage:
-            self.db_tools.result_collector.set_storage_fn(
-                self.db_tools.get_total_storage_bytes
-            )
+        if config.backend != tp.Backend.FILE_COPY:
+            self.branch_manager.add_branch(backend_info.default_branch_name)
+        elif config.num_threads > 1 and self.thread_id > 0 and backend_info.setup_branches:
+            # CREATE DATABASE ... TEMPLATE needs no connections on the
+            # template, so idle workers move off the root database.
+            self.connect(backend_info.setup_branches[0], timed=False)
 
         # Connect to assigned branch if multi-threaded
         if self.assigned_branches:
             initial_branch = self.assigned_branches[0]
             if self.thread_id == 0:
                 print(f"Thread {self.thread_id} connecting to: {initial_branch}")
-            self.db_tools.connect_branch(initial_branch, timed=False)
+            self.connect(initial_branch, timed=False)
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Close database connection."""
-        if self.db_tools and not self.backend_info.txn_conn:
+        if self.db_tools:
             self.db_tools.close_connection()
-
-        # Update Tiger services info
-        if self.config.backend == tp.Backend.TIGER and self.backend_info.tiger:
-            self.backend_info.tiger["services"] = self.db_tools.get_all_services()
 
     # ========================================================================
     # Services for Operations
     # ========================================================================
+
+    @property
+    def current_ref(self) -> Ref:
+        """Ref the worker's connection is on."""
+        return self.db_tools.current_ref
+
+    @property
+    def current_branch(self) -> str:
+        ref = self.db_tools.current_ref
+        return ref.branch if ref else ""
+
+    def connect(self, branch: str, timed: bool = True) -> None:
+        """Switch to ``branch`` (an exec with an empty script, so the
+        CONNECT row carries the switch cost)."""
+        self.db_tools.exec([], refs=[branch], timed=timed).pop().raise_for_status()
+
+    async def connect_async(self, branch: str, timed: bool = True) -> None:
+        res = await self.db_tools.exec_async([], refs=[branch], timed=timed)
+        res[0].raise_for_status()
+
+    def run_sql(self, sql: str, params=None, timed: bool = True):
+        """Run one statement on the current branch through exec() and
+        return its rows. Raises if the statement failed."""
+        res = self.db_tools.exec(
+            [(sql, params)], refs=[self.current_ref], timed=timed,
+            storage=self.measure_storage if timed else False,
+        )[0]
+        res.raise_for_status()
+        return res.rows
+
+    async def run_sql_async(self, sql: str, params=None, timed: bool = True):
+        res = await self.db_tools.exec_async(
+            [(sql, params)], refs=[self.current_ref], timed=timed,
+            storage=self.measure_storage if timed else False,
+        )
+        res[0].raise_for_status()
+        return res[0].rows
+
+    def run_script(self, script, timed: bool = True):
+        """Run a multi-statement script (or Python source) on the current
+        branch as one exec(); raises if it failed."""
+        res = self.db_tools.exec(
+            script, refs=[self.current_ref], timed=timed,
+            storage=self.measure_storage if timed else False,
+        )[0]
+        res.raise_for_status()
+        return res
+
+    async def run_script_async(self, script, timed: bool = True):
+        res = await self.db_tools.exec_async(
+            script, refs=[self.current_ref], timed=timed,
+            storage=self.measure_storage if timed else False,
+        )
+        res[0].raise_for_status()
+        return res[0]
 
     def get_pk_columns(self, table_name: str) -> List[str]:
         """Get primary key column names for a table."""
@@ -1156,7 +1081,7 @@ class WorkerContext:
 
     def select_random_key(self, table_name: str) -> Optional[Tuple]:
         """Select a random primary key from the table."""
-        _, cur_branch_id = self.db_tools.get_current_branch()
+        cur_branch_id = self.current_branch
 
         pk_columns = self.get_pk_columns(table_name)
         existing_pks = self._existing_pks or dbh.get_pk_values(
@@ -1186,13 +1111,13 @@ class WorkerContext:
 
     def track_modified_key(self, key: Tuple) -> None:
         """Track a modified primary key."""
-        _, cur_branch_id = self.db_tools.get_current_branch()
+        cur_branch_id = self.current_branch
         if key not in self._modified_keys.get(cur_branch_id, []):
             self._modified_keys.setdefault(cur_branch_id, []).append(key)
 
     def untrack_modified_key(self, key: Tuple) -> None:
         """Remove a key from modified tracking (e.g., after delete)."""
-        _, cur_branch_id = self.db_tools.get_current_branch()
+        cur_branch_id = self.current_branch
         if cur_branch_id in self._modified_keys:
             if key in self._modified_keys[cur_branch_id]:
                 self._modified_keys[cur_branch_id].remove(key)
@@ -1220,6 +1145,11 @@ class WorkerContext:
     def get_all_branches(self) -> List[str]:
         """Get all branches."""
         return self.branch_manager.get_all_branches()
+
+    @property
+    def root_branch(self) -> str:
+        """The backend's default branch (never a deletion target)."""
+        return self.backend_info.root_branch_name
 
     def clear_pk_cache(self) -> None:
         """Clear cached primary keys (e.g., after branch switch)."""
@@ -1360,7 +1290,7 @@ class WorkerContext:
 
     def _insert_without_timing(self, table_name: str) -> None:
         """Insert without timing (for setup)."""
-        _, cur_branch_id = self.db_tools.get_current_branch()
+        cur_branch_id = self.current_branch
 
         col_names = dbh.get_all_columns(
             self.db_tools.get_current_connection(), table_name
@@ -1375,7 +1305,7 @@ class WorkerContext:
             pk_tuple = tuple(row_data[pk] for pk in pk_columns)
 
             try:
-                self.db_tools.execute_sql(insert_sql, row_data, timed=False)
+                self.run_sql(insert_sql, row_data, timed=False)
                 self._modified_keys.setdefault(cur_branch_id, []).append(pk_tuple)
                 return
             except Exception:
@@ -1408,7 +1338,7 @@ class WorkerContext:
         for i, pk_col in enumerate(pk_columns):
             row_data[pk_col] = key_to_update[i]
 
-        self.db_tools.execute_sql(update_sql, row_data, timed=False)
+        self.run_sql(update_sql, row_data, timed=False)
         self.track_modified_key(key_to_update)
 
     def _delete_without_timing(self, table_name: str) -> None:
@@ -1421,7 +1351,7 @@ class WorkerContext:
         where_clause = " AND ".join([f"{pk_name} = %s" for pk_name in pk_columns])
         delete_sql = f"DELETE FROM {table_name} WHERE {where_clause};"
 
-        self.db_tools.execute_sql(delete_sql, key_to_delete, timed=False)
+        self.run_sql(delete_sql, key_to_delete, timed=False)
         self.untrack_modified_key(key_to_delete)
 
 
@@ -1817,91 +1747,11 @@ class AsyncOperationRunner:
                 return {"status": "failed", "op_number": op_number, "error": str(e)}
 
     async def _ensure_async_pool(self):
-        """Ensure the async connection pool is open for the database tools.
-
-        The pool has one connection per concurrent request
-        (concurrent_requests), so a request never waits for a connection.
-        """
+        """Open the worker's async pool: one connection per concurrent
+        request, so a request never waits for a connection."""
         if self.context.db_tools.async_pool:
-            return  # Already initialized
-
-        pool_size = self.concurrent_limit
-
-        if self.config.backend in (tp.Backend.DOLT_MYSQL, tp.Backend.SEEKDB):
-            # MySQL protocol, so aiomysql instead of psycopg. Start every pool
-            # session on the branch the sync connection has checked out.
-            branch_name, _ = self.context.db_tools.get_current_branch()
-            await self.context.db_tools.open_async_pool(pool_size, branch_name)
             return
-
-        # Check psycopg and its pool are available for async connections
-        try:
-            import psycopg  # noqa: F401
-            import psycopg_pool  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "psycopg (v3) and psycopg-pool are required for async mode. "
-                "Install with: pip install 'psycopg[binary]>=3.0' psycopg-pool"
-            )
-
-        backend = self.config.backend
-        db_name = self.config.database_setup.db_name
-
-        # For Neon and Dolt, we need to get the full URI with credentials
-        # because DSN from psycopg2 doesn't include the password
-        if backend == tp.Backend.NEON:
-            from dblib.neon import NeonToolSuite
-
-            # NeonToolSuite stores project_id and current_branch_id
-            if not isinstance(self.context.db_tools, NeonToolSuite):
-                raise ValueError("Expected NeonToolSuite for Neon backend")
-
-            neon_tools = self.context.db_tools
-            uri = NeonToolSuite._get_neon_connection_uri(
-                project_id=neon_tools.project_id,
-                branch_id=neon_tools.current_branch_id,
-                db_name=db_name
-            )
-        elif backend == tp.Backend.DOLT:
-            # DoltgreSQL uses PostgreSQL protocol (psycopg2)
-            # Reconstruct URI with credentials from environment variables
-            from dblib.dolt import DoltToolSuite
-            uri = DoltToolSuite.get_initial_connection_uri(db_name)
-        elif backend == tp.Backend.KPG:
-            # KPG also needs full URI with credentials
-            from dblib.kpg import KpgToolSuite
-            uri = KpgToolSuite.get_initial_connection_uri(db_name)
-        else:
-            # For other backends, try to get DSN from connection
-            conn = self.context.db_tools.get_current_connection()
-
-            if not conn:
-                raise ValueError("No active connection found to create async connection from")
-
-            # Get DSN (Data Source Name) from the connection
-            # psycopg2 connections have a `dsn` attribute
-            if hasattr(conn, 'dsn'):
-                uri = conn.dsn
-            elif hasattr(conn, 'info') and hasattr(conn.info, 'dsn'):
-                uri = conn.info.dsn
-            else:
-                raise ValueError(
-                    f"Cannot determine connection URI for backend: {backend}. "
-                    f"Connection object has no DSN attribute."
-                )
-
-        configure = None
-        if backend == tp.Backend.DOLT:
-            # A new Dolt session starts on the default branch. Check out the
-            # branch the sync connection is on in every pool connection, or
-            # async ops would run on main.
-            branch_name, _ = self.context.db_tools.get_current_branch()
-
-            async def configure(conn):
-                await conn.execute("SELECT dolt_checkout(%s);", (branch_name,))
-
-        # Create the pool with the same URI as the sync connection
-        await self.context.db_tools.open_async_pool(uri, pool_size, configure)
+        await self.context.db_tools.open_async_pool(self.concurrent_limit)
 
     async def execute_multiple_async(
         self,
@@ -2054,7 +1904,7 @@ class AsyncOperationRunner:
             # before cancelling leftover tasks: the pool's background workers
             # are tasks on this loop, and close() waits for them to stop.
             try:
-                loop.run_until_complete(self.context.db_tools.close_connection_async())
+                loop.run_until_complete(self.context.db_tools.close_async_pool())
             except (Exception, asyncio.CancelledError) as e:
                 print(f"[Thread {self.context.thread_id}] Failed to close async pool: {e!r}")
             try:
@@ -2343,30 +2193,30 @@ class BenchmarkExecutor:
         Note: total_ops is the intended count (num_ops * num_threads).
         Actual successful operation count is len(self.result_collector.results).
         """
-        # Count actual successful operations (not intended count)
-        actual_ops = len(self.result_collector.results)
+        # One verb row (BRANCH, DELETE, ...) or one EXEC row per operation;
+        # the statement rows inside an exec are its breakdown.
+        rows = self.result_collector.results
+        ok_rows = [r for r in rows if r.status == rslt.OpStatus.OK]
+        actual_ops = sum(1 for r in ok_rows if r.op_type in rc.VERB_OP_TYPES)
         failed_ops = len(self.result_collector.failed_operations)
         throughput = actual_ops / elapsed_time if elapsed_time > 0 else 0
 
-        # Calculate data operation throughput (excluding branch ops)
-        data_ops = [
-            r
-            for r in self.result_collector.results
-            if r.op_type not in [rslt.OpType.BRANCH_CREATE, rslt.OpType.BRANCH_CONNECT]
-        ]
+        # Data operation throughput: the SQL statements themselves
+        data_ops = [r for r in ok_rows if r.op_type in rc.STATEMENT_OP_TYPES]
         data_ops_count = len(data_ops)
         data_ops_time = sum(r.latency for r in data_ops) if data_ops else 0
         data_throughput = data_ops_count / data_ops_time if data_ops_time > 0 else 0
 
         return {
             "intended_ops": total_ops,  # Intended number of operations
-            "total_ops": actual_ops,  # Actual successful operations (all types)
-            "failed_ops": failed_ops,  # Number of failed operations
+            "total_ops": actual_ops,  # Successful verb/exec operations
+            "failed_ops": failed_ops,  # Operations that raised in the runner
             "elapsed_time": elapsed_time,
             "throughput": throughput,  # Based on actual successful ops
             "data_ops_count": data_ops_count,
             "data_ops_time": data_ops_time,
             "data_throughput": data_throughput,
+            "support": self.result_collector.support_summary(),
         }
 
     def _print_aggregate_summary(self, thread_stats: list) -> None:
@@ -2419,10 +2269,13 @@ class BenchmarkExecutor:
         print(f"  Timed window: {metrics['elapsed_time']:.2f}s (all workers started together)")
         print(f"  Wall time incl. worker setup: {metrics['wall_time']:.2f}s")
         print(f"  Throughput: {metrics['throughput']:.2f} ops/sec (successful ops only)")
-        print(f"\n  Data operations only (excluding branch ops):")
+        print(f"\n  SQL statements only (excluding branch ops):")
         print(f"    Count: {metrics['data_ops_count']}")
         print(f"    Time: {metrics['data_ops_time']:.2f}s")
         print(f"    Throughput: {metrics['data_throughput']:.2f} ops/sec")
+        support = metrics.get("support", {})
+        if support and not support.get("workflow_supported", True):
+            print(f"  UNSUPPORTED on this backend: {support['unsupported_ops']}")
         print(f"{'='*60}\n")
 
 
@@ -2479,6 +2332,7 @@ class ResultManager:
             "data_ops_count": self.metrics["data_ops_count"],
             "data_ops_time": self.metrics["data_ops_time"],
             "data_throughput": self.metrics["data_throughput"],
+            "support": self.metrics.get("support", {}),
         }
 
         # Build filename
@@ -2539,9 +2393,6 @@ def register_all_operations() -> None:
     OperationRegistry.register(tp.OperationType.BRANCH_CREATE, BranchCreateOperation)
     OperationRegistry.register(tp.OperationType.BRANCH_CONNECT, BranchConnectOperation)
     OperationRegistry.register(tp.OperationType.BRANCH_DELETE, BranchDeleteOperation)
-    OperationRegistry.register(tp.OperationType.CONNECT_FIRST, ConnectFirstOperation)
-    OperationRegistry.register(tp.OperationType.CONNECT_MID, ConnectMidOperation)
-    OperationRegistry.register(tp.OperationType.CONNECT_LAST, ConnectLastOperation)
 
     # DDL operations
     OperationRegistry.register(tp.OperationType.DDL_ADD_INDEX, AddIndexOperation)

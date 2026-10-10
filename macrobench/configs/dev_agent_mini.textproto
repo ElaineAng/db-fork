@@ -1,0 +1,10 @@
+# S4 Development agent, smoke size.
+run_id: "macro_dev_agent_mini_dolt"
+backend: DOLT
+database_setup { db_name: "macro_dev_agent_mini" cleanup: true generated {} }
+schema { base: CH_BENCH scale_factor: 1 items: 1000 customers_per_district: 100 orders_per_district: 100 suppliers: 100 }
+workload {
+  branch_ops { commit_interval: 2 retention_steps: 2 }
+  data_ops { statements_per_step: 4 rows_per_write: 20 write_fraction: 0.8 spine_clients: 1 analytical_fraction: 0.1 }
+  dev_agent { dev_branches: 3 concurrent_branches: 2 dev_phase_steps: 4 review_phase_steps: 4 review_modification_prob: 0.5 rebases_per_branch: 2 spine_migration_interval: 3 key_overlap: 0.5 }
+}

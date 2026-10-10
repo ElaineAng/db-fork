@@ -1,117 +1,100 @@
 #!/usr/bin/env bash
-# Run a macrobenchmark experiment with custom backend, scale, and SQL path.
+# Run one macrobenchmark scenario on a backend.
 #
 # Usage:
-#   ./scripts/run_macrobench.sh [--mini] [--outdir DIR] <workflow> <backend> <db_scale> <sql_path>
+#   ./scripts/run_macrobench.sh [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] \
+#       [--branch-intensity X] [--data-intensity Y] \
+#       <scenario> <backend> [scale_factor]
 #
 # Arguments:
-#   --mini              Use the mini config (fewer workers/steps for Neon)
-#   --outdir DIR        Directory for output parquet files (default: run_stats/)
-#   --max-runtime-sec N Cap total workflow runtime in seconds (0 = no limit)
-#   workflow     One of: software_dev, failure_repro, data_cleaning, mcts, simulation
-#   backend      One of: dolt, dolt_mysql, seekdb, neon, kpg, xata, file_copy, txn
-#   db_scale     Integer scale factor (num warehouses)
-#   sql_path     Path to the schema SQL dump file
+#   scenario      rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent
+#   backend       dolt | dolt_mysql | seekdb | matrixone | neon | xata | file_copy
+#   scale_factor  W warehouses for the generated CH-benCHmark data (default: the config's)
 #
-# Example:
-#   ./scripts/run_macrobench.sh mcts neon 10 db_setup/ch_benchmark_schema.sql
-#   ./scripts/run_macrobench.sh --mini --outdir run_stats/neon_mini simulation neon 1 db_setup/ch-w1.sql
-#   ./scripts/run_macrobench.sh --max-runtime-sec 600 mcts neon 10 db_setup/ch_benchmark_schema.sql
+# The base config is macrobench/configs/<scenario>[_mini].textproto; run_id,
+# backend and scale_factor are patched into a temporary copy.
+#
+# Examples:
+#   ./scripts/run_macrobench.sh --mini rl_env dolt
+#   ./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 data_agent dolt 5
 
 set -euo pipefail
 
 MINI=false
-STORAGE=false
 MEASURE_STORAGE=false
 OUTDIR="run_stats/"
+BRANCH_INTENSITY=""
+DATA_INTENSITY=""
 MAX_RUNTIME_SEC=0
 
-# Parse optional flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mini)            MINI=true; shift ;;
-        --storage)         STORAGE=true; shift ;;
         --measure-storage) MEASURE_STORAGE=true; shift ;;
         --outdir)          OUTDIR="$2"; shift 2 ;;
+        --branch-intensity) BRANCH_INTENSITY="$2"; shift 2 ;;
+        --data-intensity)   DATA_INTENSITY="$2"; shift 2 ;;
         --max-runtime-sec) MAX_RUNTIME_SEC="$2"; shift 2 ;;
         *)                 break ;;
     esac
 done
 
-if [[ $# -ne 4 ]]; then
-    echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] <workflow> <backend> <db_scale> <sql_path>"
-    echo "  --mini:              use mini config (fewer workers/steps for Neon)"
-    echo "  --measure-storage:   enable Neon storage measurement (15-min sleep before/after)"
-    echo "  --outdir:            output directory for parquet files (default: run_stats/)"
-    echo "  --max-runtime-sec:   cap total workflow runtime in seconds (0 = no limit)"
-    echo "  workflow:    software_dev | failure_repro | data_cleaning | mcts | simulation"
-    echo "  backend:     dolt | dolt_mysql | seekdb | neon | kpg | xata | file_copy | txn"
-    echo "  db_scale:    integer scale factor (num warehouses)"
-    echo "  sql_path:    path to schema SQL dump"
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+    echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] [--measure-storage] [--branch-intensity X] [--data-intensity Y] <scenario> <backend> [scale_factor]"
+    echo "  scenario:  rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent"
+    echo "  backend:   dolt | dolt_mysql | seekdb | matrixone | neon | xata | file_copy"
     exit 1
 fi
 
-WORKFLOW="$1"
+SCENARIO="$1"
 BACKEND="$2"
-DB_SCALE="$3"
-SQL_PATH="$4"
+SCALE="${3:-}"
 
-# Validate workflow
-VALID_WORKFLOWS="software_dev failure_repro data_cleaning mcts simulation"
-if ! echo "$VALID_WORKFLOWS" | grep -qw "$WORKFLOW"; then
-    echo "Error: invalid workflow '$WORKFLOW'"
-    echo "Must be one of: $VALID_WORKFLOWS"
+VALID_SCENARIOS="rl_env context_mgmt multi_agent dev_agent ops_agent data_agent"
+if ! echo "$VALID_SCENARIOS" | grep -qw "$SCENARIO"; then
+    echo "Error: invalid scenario '$SCENARIO' (one of: $VALID_SCENARIOS)"
     exit 1
 fi
-
-# Validate backend
-VALID_BACKENDS="dolt dolt_mysql seekdb neon kpg xata file_copy txn"
+VALID_BACKENDS="dolt dolt_mysql seekdb matrixone neon xata file_copy"
 if ! echo "$VALID_BACKENDS" | grep -qw "$BACKEND"; then
-    echo "Error: invalid backend '$BACKEND'"
-    echo "Must be one of: $VALID_BACKENDS"
-    exit 1
-fi
-
-# Validate sql_path exists
-if [[ ! -f "$SQL_PATH" ]]; then
-    echo "Error: SQL file not found: $SQL_PATH"
+    echo "Error: invalid backend '$BACKEND' (one of: $VALID_BACKENDS)"
     exit 1
 fi
 
 BACKEND_UPPER=$(echo "$BACKEND" | tr '[:lower:]' '[:upper:]')
-
 if $MINI; then
     SUFFIX="_mini"
-    RUN_ID="macro_${WORKFLOW}_mini_${BACKEND}_${DB_SCALE}"
 else
     SUFFIX=""
-    RUN_ID="macro_${WORKFLOW}_${BACKEND}_${DB_SCALE}"
 fi
-
-BASE_CONFIG="macrobench/configs/${WORKFLOW}${SUFFIX}.textproto"
-
+RUN_ID="macro_${SCENARIO}${SUFFIX}_${BACKEND}${SCALE:+_w$SCALE}${BRANCH_INTENSITY:+_b$BRANCH_INTENSITY}${DATA_INTENSITY:+_d$DATA_INTENSITY}"
+BASE_CONFIG="macrobench/configs/${SCENARIO}${SUFFIX}.textproto"
 if [[ ! -f "$BASE_CONFIG" ]]; then
     echo "Error: base config not found: $BASE_CONFIG"
     exit 1
 fi
 
-# Build a temporary config by patching the base config
-# Use PID in the temp file name to avoid conflicts with concurrent runs
 TMP_CONFIG=$(mktemp /tmp/macrobench_$$_XXXXXX)
 trap 'rm -f "$TMP_CONFIG"' EXIT
 
-sed \
-    -e "s|^run_id:.*|run_id: \"${RUN_ID}\"|" \
-    -e "s|^backend:.*|backend: ${BACKEND_UPPER}|" \
-    -e "s|sql_dump_path:.*|sql_dump_path: \"${SQL_PATH}\"|" \
-    -e "s|db_scale:.*|db_scale: ${DB_SCALE}|" \
-    "$BASE_CONFIG" > "$TMP_CONFIG"
+SED_ARGS=(-e "s|^run_id:.*|run_id: \"${RUN_ID}\"|" -e "s|^backend:.*|backend: ${BACKEND_UPPER}|")
+if [[ -n "$SCALE" ]]; then
+    SED_ARGS+=(-e "s|scale_factor: [0-9]*|scale_factor: ${SCALE}|")
+fi
+sed "${SED_ARGS[@]}" "$BASE_CONFIG" > "$TMP_CONFIG"
+# Intensity multipliers are inserted as the first lines of the workload block.
+if [[ -n "$BRANCH_INTENSITY" || -n "$DATA_INTENSITY" ]]; then
+    INTENSITY_LINES=""
+    [[ -n "$BRANCH_INTENSITY" ]] && INTENSITY_LINES+="  branch_intensity: ${BRANCH_INTENSITY}\n"
+    [[ -n "$DATA_INTENSITY" ]] && INTENSITY_LINES+="  data_intensity: ${DATA_INTENSITY}\n"
+    sed -i -e "s|^workload {|workload {\n${INTENSITY_LINES%\\n}|" "$TMP_CONFIG"
+fi
 
 echo "=== Macrobench Run ==="
-echo "  Workflow:  $WORKFLOW${SUFFIX}"
+echo "  Scenario:  $SCENARIO${SUFFIX}"
 echo "  Backend:   $BACKEND_UPPER"
-echo "  Scale:     $DB_SCALE"
-echo "  SQL:       $SQL_PATH"
+echo "  Scale:     ${SCALE:-config default}"
+echo "  Intensity: branch x${BRANCH_INTENSITY:-1} data x${DATA_INTENSITY:-1}"
 echo "  Run ID:    $RUN_ID"
 echo "  Output:    $OUTDIR"
 echo "  Timeout:   ${MAX_RUNTIME_SEC}s (0 = no limit)"
@@ -123,7 +106,7 @@ if $MEASURE_STORAGE; then
     EXTRA_FLAGS+=(--measure-storage)
 fi
 
-uv run python -m macrobench.runner \
+PYTHONUNBUFFERED=1 uv run python -m macrobench.runner \
     --config "$TMP_CONFIG" \
     --outdir "$OUTDIR" \
     --max-runtime-sec "$MAX_RUNTIME_SEC" \

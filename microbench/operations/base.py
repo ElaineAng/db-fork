@@ -27,7 +27,7 @@ class Operation(ABC):
         class CustomOperation(Operation):
             def execute(self, context: WorkerContext) -> None:
                 # Your operation logic here
-                context.db_tools.execute_sql("...", timed=True)
+                context.run_sql("...")  # timed row per statement
 
             def requires_setup_data(self) -> bool:
                 return True  # If you need existing data
@@ -40,9 +40,9 @@ class Operation(ABC):
     def execute(self, context: 'WorkerContext') -> None:
         """Execute the operation with timing.
 
-        This method should perform the actual database operation and
-        use context.db_tools.execute_sql() with timed=True to record
-        timing information.
+        This method should perform the actual database operation through
+        context.run_sql() (which records a timed row per statement) or the
+        git-like verbs on context.db_tools, and raise on failure.
 
         Args:
             context: WorkerContext providing access to database connection,
@@ -58,7 +58,7 @@ class Operation(ABC):
 
         Default implementation runs the sync execute() in a thread pool.
         Override this method for true async support using await on
-        context.db_tools.*_async() methods.
+        context.run_sql_async().
 
         Args:
             context: WorkerContext providing access to database connection,

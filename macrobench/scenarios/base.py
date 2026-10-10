@@ -1,0 +1,390 @@
+"""Scenario framework for the macrobenchmark.
+
+A Scenario is one of the six workflows (S1-S6). It gets a ScenarioContext
+with the parsed config, a DBToolSuite factory, the shared ResultCollector,
+the invariant recorder and the stop event, and drives the backend through
+the git-like verbs and exec(). Scenarios never raise on a backend's
+UNSUPPORTED or FAILED result: they read the OpResult, record what they can
+and go on, so a backend lacking merge or rebase still runs the whole
+lifecycle and the support summary says what it could not do.
+"""
+
+import random
+import threading
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from dblib import result_collector as rc
+from dblib import result_pb2 as rslt
+from dblib.db_api import DBToolSuite, OpResult
+from macrobench import task_pb2 as tp
+from macrobench.datagen.ch import CHScale
+
+
+class ScenarioStopped(Exception):
+    """Raised inside workers when the runtime cap hits."""
+
+
+class InvariantFailed(Exception):
+    """Raised by the recorder in fail_fast mode."""
+
+
+@dataclass
+class InvariantResult:
+    name: str
+    passed: Optional[bool]   # None = not applicable (needs an unsupported verb)
+    detail: str = ""
+
+
+class InvariantRecorder:
+    """Collects sentinel checks. Thread-safe."""
+
+    def __init__(self, enabled: bool = True, fail_fast: bool = False):
+        self.enabled = enabled
+        self.fail_fast = fail_fast
+        self.results: list = []
+        self._lock = threading.Lock()
+
+    def check(self, name: str, passed: Optional[bool], detail: str = "") -> bool:
+        if not self.enabled:
+            return True
+        with self._lock:
+            self.results.append(InvariantResult(name, passed, detail))
+        if passed is False and self.fail_fast:
+            raise InvariantFailed(f"{name}: {detail}")
+        return bool(passed)
+
+    def expect(self, name: str, actual, expected, detail: str = "") -> bool:
+        ok = actual == expected
+        return self.check(name, ok, f"expected {expected!r}, got {actual!r}" + (f" ({detail})" if detail else ""))
+
+    def not_applicable(self, name: str, reason: str) -> None:
+        self.check(name, None, reason)
+
+    def summary(self) -> dict:
+        rs = self.results
+        return {
+            "enabled": self.enabled,
+            "checked": sum(1 for r in rs if r.passed is not None),
+            "passed": sum(1 for r in rs if r.passed is True),
+            "failed": sum(1 for r in rs if r.passed is False),
+            "not_applicable": sum(1 for r in rs if r.passed is None),
+            "all_passed": all(r.passed is not False for r in rs),
+            "results": [
+                {"name": r.name, "passed": r.passed, "detail": r.detail} for r in rs
+            ],
+        }
+
+
+def is_retryable_error(msg: str) -> bool:
+    """Neon/Xata rate- and resource-limit errors worth waiting out."""
+    msg = (msg or "").lower()
+    return any(p in msg for p in (
+        "429", "too many", "running operations", "branches limit",
+        "endpoints limit", "limit reached",
+    ))
+
+
+@dataclass
+class ScenarioContext:
+    config: tp.MacroBenchConfig
+    suite_factory: Callable[[], DBToolSuite]
+    collector: rc.ResultCollector
+    spine: str                      # the root/default branch name
+    invariants: InvariantRecorder
+    progress: object = None         # SharedProgress or None
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    log: Callable[[str], None] = print
+    metrics: dict = field(default_factory=dict)
+    worker_conns: dict = field(default_factory=dict)
+    _slots: Optional[threading.BoundedSemaphore] = None
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        self.seed = self.config.seed or 42
+        self.rng = random.Random(self.seed)
+        self.scale = CHScale.from_config(self.config.schema)
+        self.params = getattr(self.config.workload, self.scenario_key)
+        self.branch_ops = self.config.workload.branch_ops
+        self.data_ops = self.config.workload.data_ops
+        cap = self.branch_ops.max_live_branches
+        self._slots = threading.BoundedSemaphore(cap) if cap > 0 else None
+        self._branch_seq = 0
+
+    # -- config helpers ----------------------------------------------------
+
+    @property
+    def scenario_key(self) -> str:
+        return self.config.workload.WhichOneof("scenario")
+
+    @property
+    def commit_interval(self) -> int:
+        return max(1, self.branch_ops.commit_interval)
+
+    @property
+    def statements_per_step(self) -> int:
+        return max(1, self.data_ops.statements_per_step)
+
+    @property
+    def rows_per_write(self) -> int:
+        return max(1, self.data_ops.rows_per_write)
+
+    @property
+    def worker_threads(self) -> int:
+        return max(1, self.data_ops.worker_threads)
+
+    def worker_rng(self, index: int) -> random.Random:
+        return random.Random(self.seed * 7919 + index)
+
+    def should_commit(self, step: int, last_step: bool = False) -> bool:
+        """Commit after this (0-based) step per commit_interval."""
+        return last_step or (step + 1) % self.commit_interval == 0
+
+    # -- stop / progress ---------------------------------------------------
+
+    def check_stop(self) -> None:
+        if self.stop_event.is_set():
+            raise ScenarioStopped()
+
+    def tick(self, n: int = 1) -> None:
+        if self.progress is not None:
+            self.progress.update(n)
+
+    def note(self, msg: str) -> None:
+        if self.progress is not None:
+            self.progress.write(msg)
+        else:
+            self.log(msg)
+
+    def add_metric(self, key: str, value) -> None:
+        with self._lock:
+            self.metrics[key] = value
+
+    def bump_metric(self, key: str, by: int = 1) -> None:
+        with self._lock:
+            self.metrics[key] = self.metrics.get(key, 0) + by
+
+    # -- suites and workers ------------------------------------------------
+
+    def new_suite(self) -> DBToolSuite:
+        suite = self.suite_factory()
+        with self._lock:
+            self.worker_conns[id(suite)] = suite
+        return suite
+
+    def close_suite(self, suite: DBToolSuite) -> None:
+        with self._lock:
+            self.worker_conns.pop(id(suite), None)
+        try:
+            suite.close_connection()
+        except Exception:
+            pass
+
+    def cancel_all(self) -> None:
+        """Deadline hook: cancel in-flight statements on every suite."""
+        self.stop_event.set()
+        with self._lock:
+            suites = list(self.worker_conns.values())
+        for s in suites:
+            try:
+                s.conn.cancel()
+            except Exception:
+                pass
+
+    def run_workers(self, items: list, fn: Callable, threads: int = None,
+                    thread_base: int = 1) -> list:
+        """Run ``fn(worker, item)`` over ``items`` on a pool of threads, each
+        with its own suite (``worker.suite``), rng (``worker.rng``) and id.
+        Returns the list of return values (or exceptions) in item order."""
+        threads = threads or self.worker_threads
+        threads = max(1, min(threads, len(items) or 1))
+        results = [None] * len(items)
+        local = threading.local()
+
+        def init_worker():
+            idx = getattr(local, "idx", None)
+            if idx is None:
+                with self._lock:
+                    idx = self._worker_counter = getattr(self, "_worker_counter", 0) + 1
+                local.idx = idx
+                rc.set_current_thread_id(thread_base + idx)
+                local.worker = Worker(self, thread_base + idx, self.new_suite(),
+                                      self.worker_rng(idx))
+            return local.worker
+
+        def task(i, item):
+            w = init_worker()
+            try:
+                results[i] = fn(w, item)
+            except ScenarioStopped as e:
+                results[i] = e
+            except Exception as e:
+                results[i] = e
+                self.note(f"[W{w.id}] {type(e).__name__}: {e}")
+            return i
+
+        if threads == 1:
+            # Same thread as the caller keeps suites/thread ids simple.
+            w = init_worker()
+            for i, item in enumerate(items):
+                try:
+                    results[i] = fn(w, item)
+                except Exception as e:
+                    results[i] = e
+                    if not isinstance(e, ScenarioStopped):
+                        self.note(f"[W{w.id}] {type(e).__name__}: {e}")
+            self.close_suite(w.suite)
+            return results
+
+        workers_made = []
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            futures = [pool.submit(task, i, item) for i, item in enumerate(items)]
+            for f in futures:
+                f.result()
+            # Close suites on their own threads.
+            def closer():
+                w = getattr(local, "worker", None)
+                if w is not None:
+                    workers_made.append(w)
+                    self.close_suite(w.suite)
+            for _ in range(threads):
+                pool.submit(closer).result()
+        return results
+
+    # -- branch helpers ----------------------------------------------------
+
+    def next_branch_name(self, prefix: str) -> str:
+        with self._lock:
+            self._branch_seq += 1
+            return f"{prefix}_{self._branch_seq}"
+
+    def retry(self, fn: Callable[[], OpResult], max_retries: int = 8,
+              base_delay: float = 1.0) -> OpResult:
+        """Call ``fn`` again with backoff while it FAILS with a rate-limit
+        error; each wait is an API_RETRY_WAIT row."""
+        for attempt in range(max_retries):
+            result = fn()
+            if not result.failed or attempt == max_retries - 1:
+                return result
+            if not is_retryable_error(result.error):
+                return result
+            delay = base_delay * (2 ** attempt) * (0.5 + random.random())
+            with self.collector.timed(rslt.OpType.API_RETRY_WAIT, label="retry"):
+                if self.stop_event.wait(delay):
+                    raise ScenarioStopped()
+        return result
+
+    def branch(self, suite: DBToolSuite, name: str, from_ref, label: str = "branch") -> OpResult:
+        """branch() with slot accounting and rate-limit retry."""
+        if self._slots is not None:
+            while not self._slots.acquire(timeout=1.0):
+                self.check_stop()
+        res = self.retry(lambda: suite.branch(name, from_ref=from_ref, label=label))
+        if not res.ok and self._slots is not None:
+            self._slots.release()
+        return res
+
+    def delete(self, suite: DBToolSuite, name: str, label: str = "delete") -> OpResult:
+        """delete() honouring keep_branches; frees the branch slot."""
+        if self.branch_ops.keep_branches:
+            return OpResult(op="delete", ref=name, note="kept")
+        res = self.retry(lambda: suite.delete(name, label=label))
+        if self._slots is not None:
+            try:
+                self._slots.release()
+            except ValueError:
+                pass
+        return res
+
+    def cross_branch_exec(self, suite: DBToolSuite, script_for, refs: list,
+                          label: str) -> list:
+        """Run a cross-branch read: one multi-ref exec() when the backend
+        has multi-branch query semantics, else the script once per ref.
+        ``script_for(multi: bool)`` returns the script to run."""
+        if suite.SUPPORTS_MULTI_REF_EXEC and len(refs) > 1:
+            self.add_metric("cross_branch_mode", "multi")
+            return suite.exec(script_for(True), refs=refs, mode="multi", label=label)
+        self.add_metric("cross_branch_mode", "per_ref")
+        return suite.exec(script_for(False), refs=refs, mode="per_ref", label=label)
+
+
+@dataclass
+class Worker:
+    ctx: ScenarioContext
+    id: int
+    suite: DBToolSuite
+    rng: random.Random
+
+    def exec(self, script, ref, label: str = "", **kw):
+        """exec() on one ref; returns the ExecResult."""
+        return self.suite.exec(script, refs=[ref], label=label, **kw)[0]
+
+    def commit(self, ref, message: str, label: str = "commit") -> OpResult:
+        return self.suite.commit(ref, message, label=label)
+
+
+class Scenario(ABC):
+    """One benchmark workflow. Subclasses set ``key`` (the Workload oneof
+    field), ``name`` and ``extension`` and implement run()."""
+
+    key: str = ""
+    name: str = ""
+    # Does the scenario run the TPC-C spine load when spine_clients > 0?
+    uses_spine_load: bool = False
+    # Payment transactions rewrite customer.c_data (S4 rebase conflicts).
+    spine_touches_c_data: bool = False
+
+    def __init__(self, ctx: ScenarioContext):
+        self.ctx = ctx
+        self.params = ctx.params
+        self.spine_load = None  # set by the runner when started
+
+    def seed(self, suite: DBToolSuite) -> dict:
+        """Extension-table seed data on the spine (untimed). Returns
+        {table: rows} for the e2e stats."""
+        return {}
+
+    def total_units(self) -> int:
+        """Progress-bar units run() will tick."""
+        return 0
+
+    @abstractmethod
+    def run(self) -> None:
+        """The scenario lifecycle."""
+
+    def validate(self) -> None:
+        """Reject configs the scenario cannot run (raise ValueError)."""
+
+    # -- helpers shared by scenarios --------------------------------------
+
+    def quiesced(self):
+        """Context manager pausing the spine load (no-op without one) so a
+        spine commit is transaction-consistent."""
+        if self.spine_load is not None:
+            return self.spine_load.pause()
+        return _NullContext()
+
+
+class _NullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+SCENARIOS: dict = {}
+
+
+def register(cls):
+    SCENARIOS[cls.key] = cls
+    return cls
+
+
+def create_scenario(ctx: ScenarioContext) -> Scenario:
+    key = ctx.scenario_key
+    if key not in SCENARIOS:
+        raise ValueError(f"No scenario for workload.{key}; known: {sorted(SCENARIOS)}")
+    return SCENARIOS[key](ctx)

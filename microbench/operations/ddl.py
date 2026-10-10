@@ -70,7 +70,7 @@ class AddIndexOperation(Operation):
         create_index_sql, index_name = self._prepare_index_creation(context)
 
         # Create the index (timed)
-        context.db_tools.execute_sql(create_index_sql, timed=True)
+        context.run_sql(create_index_sql)
 
         # Track the created index
         context.track_created_index(self.table_name, index_name)
@@ -80,7 +80,7 @@ class AddIndexOperation(Operation):
         create_index_sql, index_name = self._prepare_index_creation(context)
 
         # Create the index asynchronously (timed)
-        await context.db_tools.execute_sql_async(create_index_sql, timed=True)
+        await context.run_sql_async(create_index_sql)
 
         # Track the created index
         context.track_created_index(self.table_name, index_name)
@@ -112,7 +112,7 @@ class RemoveIndexOperation(Operation):
 
         # Drop the index (timed)
         drop_index_sql = f"DROP INDEX {index_name}"
-        context.db_tools.execute_sql(drop_index_sql, timed=True)
+        context.run_sql(drop_index_sql)
 
         # Remove from tracking
         context.untrack_index(self.table_name, index_name)
@@ -149,7 +149,7 @@ class VacuumOperation(Operation):
 
         try:
             # Execute the timed vacuum
-            context.db_tools.execute_sql(vacuum_sql, timed=True)
+            context.run_sql(vacuum_sql)
         except Exception as e:
             # Some databases or configurations may not support VACUUM
             # Log and re-raise with more context
@@ -200,7 +200,7 @@ class AddColumnOperation(Operation):
             f"ALTER TABLE {self.table_name} "
             f"ADD COLUMN {column_name} {self.column_type}"
         )
-        context.db_tools.execute_sql(add_column_sql, timed=True)
+        context.run_sql(add_column_sql)
 
         # Track it so REMOVE_COLUMN only ever drops benchmark-created columns
         context.track_created_column(self.table_name, column_name)
@@ -218,7 +218,7 @@ class AddColumnOperation(Operation):
             f"ALTER TABLE {self.table_name} "
             f"ADD COLUMN {column_name} {self.column_type}"
         )
-        await context.db_tools.execute_sql_async(add_column_sql, timed=True)
+        await context.run_sql_async(add_column_sql)
         context.track_created_column(self.table_name, column_name)
 
     def requires_setup_data(self) -> bool:
@@ -267,7 +267,7 @@ class RemoveColumnOperation(Operation):
         drop_column_sql = (
             f"ALTER TABLE {self.table_name} DROP COLUMN {column_name}"
         )
-        context.db_tools.execute_sql(drop_column_sql, timed=True)
+        context.run_sql(drop_column_sql)
 
         context.untrack_column(self.table_name, column_name)
 
@@ -278,7 +278,7 @@ class RemoveColumnOperation(Operation):
         drop_column_sql = (
             f"ALTER TABLE {self.table_name} DROP COLUMN {column_name}"
         )
-        await context.db_tools.execute_sql_async(drop_column_sql, timed=True)
+        await context.run_sql_async(drop_column_sql)
 
         context.untrack_column(self.table_name, column_name)
 
@@ -396,12 +396,12 @@ class BackfillOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         """Execute a timed backfill over a fraction of the table."""
         sql, params, rows = self._prepare_backfill(context)
-        context.db_tools.execute_sql(sql, params, timed=True)
+        context.run_sql(sql, params)
  
     async def execute_async(self, context: 'WorkerContext') -> None:
         """Async version of the backfill."""
         sql, params, rows = self._prepare_backfill(context)
-        await context.db_tools.execute_sql_async(sql, params, timed=True)
+        await context.run_sql_async(sql, params)
  
     def requires_setup_data(self) -> bool:
         return True  # Needs rows to rewrite
@@ -451,7 +451,7 @@ class AddColumnWithDefaultOperation(Operation):
             f"ADD COLUMN {column_name} {self.column_type} "
             f"DEFAULT {self.default_value}"
         )
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
         context.track_created_column(self.table_name, column_name)
  
     async def execute_async(self, context: 'WorkerContext') -> None:
@@ -462,7 +462,7 @@ class AddColumnWithDefaultOperation(Operation):
             f"ADD COLUMN {column_name} {self.column_type} "
             f"DEFAULT {self.default_value}"
         )
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
         context.track_created_column(self.table_name, column_name)
  
     def requires_setup_data(self) -> bool:
@@ -500,12 +500,12 @@ class TypeChangeOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} TYPE {self.new_type}"
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} TYPE {self.new_type}"
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
 
     def requires_setup_data(self) -> bool:
         return True
@@ -535,7 +535,7 @@ class RenameColumnOperation(Operation):
         old = self._resolve_column(context)
         new = self.new_column_name or f"{old}_renamed"
         sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {old} TO {new}"
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
         context.untrack_column(self.table_name, old)
         context.track_created_column(self.table_name, new)
 
@@ -543,7 +543,7 @@ class RenameColumnOperation(Operation):
         old = self._resolve_column(context)
         new = self.new_column_name or f"{old}_renamed"
         sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {old} TO {new}"
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
         context.untrack_column(self.table_name, old)
         context.track_created_column(self.table_name, new)
 
@@ -571,12 +571,12 @@ class SetNotNullOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET NOT NULL"
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET NOT NULL"
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
 
     def requires_setup_data(self) -> bool:
         return True
@@ -591,11 +591,11 @@ class RenameTableOperation(Operation):
 
     def execute(self, context: 'WorkerContext') -> None:
         sql = f"ALTER TABLE {self.table_name} RENAME TO {self.new_table_name}"
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         sql = f"ALTER TABLE {self.table_name} RENAME TO {self.new_table_name}"
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
 
     def requires_setup_data(self) -> bool:
         return True
@@ -639,11 +639,11 @@ class AddForeignKeyOperation(Operation):
 
     def execute(self, context: 'WorkerContext') -> None:
         sql = self._build_sql(context)
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         sql = self._build_sql(context)
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
 
     def requires_setup_data(self) -> bool:
         return True
@@ -671,10 +671,10 @@ class AddCheckOperation(Operation):
         )
 
     def execute(self, context: 'WorkerContext') -> None:
-        context.db_tools.execute_sql(self._build_sql(), timed=True)
+        context.run_sql(self._build_sql())
 
     async def execute_async(self, context: 'WorkerContext') -> None:
-        await context.db_tools.execute_sql_async(self._build_sql(), timed=True)
+        await context.run_sql_async(self._build_sql())
 
     def requires_setup_data(self) -> bool:
         return True
@@ -700,12 +700,12 @@ class SetDefaultOperation(Operation):
     def execute(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET DEFAULT {self.default_value}"
-        context.db_tools.execute_sql(sql, timed=True)
+        context.run_sql(sql)
 
     async def execute_async(self, context: 'WorkerContext') -> None:
         column_name = self._resolve_column(context)
         sql = f"ALTER TABLE {self.table_name} ALTER COLUMN {column_name} SET DEFAULT {self.default_value}"
-        await context.db_tools.execute_sql_async(sql, timed=True)
+        await context.run_sql_async(sql)
 
     def requires_setup_data(self) -> bool:
         return True
@@ -736,23 +736,23 @@ class ExpandContractOperation(Operation):
             n = ExpandContractOperation._column_counter
         return f"seq_col_{n}"
 
-    def execute(self, context: 'WorkerContext') -> None:
+    def _statements(self) -> list:
         col = self._next_column_name()
         renamed = f"{col}_renamed"
-        stage = "add"
-        try:
-            add_sql = f"ALTER TABLE {self.table_name} ADD COLUMN {col} {self.column_type}"
-            context.db_tools.execute_sql(add_sql, timed=True)
+        return [
+            f"ALTER TABLE {self.table_name} ADD COLUMN {col} {self.column_type}",
+            f"ALTER TABLE {self.table_name} RENAME COLUMN {col} TO {renamed}",
+            f"ALTER TABLE {self.table_name} DROP COLUMN {renamed}",
+        ]
 
-            stage = "rename"
-            rename_sql = f"ALTER TABLE {self.table_name} RENAME COLUMN {col} TO {renamed}"
-            context.db_tools.execute_sql(rename_sql, timed=True)
+    def execute(self, context: 'WorkerContext') -> None:
+        """One exec() with the three statements: one DDL row per stage and
+        one EXEC row for the sequence, so a failure is attributable to a
+        stage without counting the sequence as three operations."""
+        context.run_script(self._statements())
 
-            stage = "drop"
-            drop_sql = f"ALTER TABLE {self.table_name} DROP COLUMN {renamed}"
-            context.db_tools.execute_sql(drop_sql, timed=True)
-        except Exception as e:
-            raise ValueError(f"Sequence failed at stage '{stage}': {e}")
+    async def execute_async(self, context: 'WorkerContext') -> None:
+        await context.run_script_async(self._statements())
 
     def requires_setup_data(self) -> bool:
         return True
