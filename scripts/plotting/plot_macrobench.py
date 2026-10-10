@@ -766,6 +766,140 @@ def _bar_panel(ax, runs, scenario, backends, keys, stats_for, title):
     ax.grid(axis="y", alpha=0.3)
 
 
+# ── Cross-branch reads as one logical step ────────────────────────────
+
+# Script labels the scenarios issue through ScenarioContext.cross_branch_exec:
+# one multi-ref exec() on a backend with multi-branch query semantics, else
+# the same read once per ref (recorded as cross_branch_mode per_ref).
+CROSS_BRANCH_LABELS = ["score", "policy_check"]
+
+
+def cross_branch_steps(run: Run, label: str) -> pd.DataFrame:
+    """One row per logical cross-branch read: wall-clock span (first row
+    to last row of everything the step issued: EXEC, CONNECT, statements),
+    summed exec latency, refs addressed, physical execs, and the mode.
+
+    multi: the one EXEC row with several refs is the step.
+    per_ref: the consecutive EXEC rows with this label on one thread form
+    the step; any other agent operation of that thread in between (a
+    diff, a commit, another script) starts the next step. CONNECT and
+    statement rows join through exec_id."""
+    df = run.ops
+    if df.empty or "exec_id" not in df:
+        return pd.DataFrame(columns=["span", "exec_latency", "refs", "execs", "mode"])
+    ex = df[(df["op_name"] == "EXEC") & (df["label"] == label)].sort_values(["thread_id", "start_time"])
+    if ex.empty:
+        return pd.DataFrame(columns=["span", "exec_latency", "refs", "execs", "mode"])
+    groups: list[list] = []
+    nrefs = ex["refs"].map(lambda r: len(r) if r is not None else 0)
+    if (nrefs > 1).any():
+        mode = "multi"
+        for _, row in ex[nrefs > 1].iterrows():
+            groups.append([row])
+    else:
+        mode = "per_ref"
+        # Start times of the thread's other agent operations (verbs and
+        # scripts under another label); one of them between two reads
+        # separates two logical steps.
+        others = df[df["op_name"].isin(BRANCH_VERBS + ["EXEC"]) & (df["label"] != label)]
+        other_starts = {t: np.sort(g["start_time"].to_numpy(dtype=float))
+                        for t, g in others.groupby("thread_id")}
+        cur, thread, prev_end = [], None, None
+        for _, row in ex.iterrows():
+            boundary = row["thread_id"] != thread
+            if not boundary and prev_end is not None:
+                st = other_starts.get(row["thread_id"])
+                if st is not None:
+                    lo = np.searchsorted(st, prev_end, side="right")
+                    hi = np.searchsorted(st, row["start_time"], side="left")
+                    boundary = hi > lo
+            if boundary and cur:
+                groups.append(cur)
+                cur = []
+            cur.append(row)
+            thread, prev_end = row["thread_id"], row["end_time"]
+        if cur:
+            groups.append(cur)
+    by_exec = df.groupby("exec_id").agg(start=("start_time", "min"), end=("end_time", "max"))
+    out = []
+    for g in groups:
+        ids = [r["exec_id"] for r in g]
+        w = by_exec.loc[[i for i in ids if i in by_exec.index]]
+        span = float(w["end"].max() - w["start"].min()) if not w.empty else sum(r["latency"] for r in g)
+        refs = sum(len(r["refs"]) if r["refs"] is not None and len(r["refs"]) > 1 else 1 for r in g)
+        out.append({"span": span, "exec_latency": float(sum(r["latency"] for r in g)),
+                    "refs": refs, "execs": len(g), "mode": mode})
+    return pd.DataFrame(out)
+
+
+def cross_branch_table(runs: list[Run]) -> pd.DataFrame:
+    rows = []
+    for r in runs:
+        for lab in CROSS_BRANCH_LABELS:
+            st = cross_branch_steps(r, lab)
+            if st.empty:
+                continue
+            rows.append({"scenario": r.scenario, "backend": r.backend, "label": lab,
+                         "mode": st["mode"].iloc[0], "steps": len(st),
+                         "refs_per_step": float(st["refs"].median()),
+                         "execs_per_step": float(st["execs"].median()),
+                         "median_ms": st["span"].median() * 1000, "p90_ms": st["span"].quantile(0.9) * 1000,
+                         "p95_ms": st["span"].quantile(0.95) * 1000, "max_ms": st["span"].max() * 1000,
+                         "exec_latency_median_ms": st["exec_latency"].median() * 1000,
+                         "per_ref_ms": st["span"].median() * 1000 / max(1.0, float(st["refs"].median()))})
+    return pd.DataFrame(rows)
+
+
+def plot_cross_branch(runs: list[Run], outdir: str) -> None:
+    """latency_cross_branch.png: one panel per (scenario, label), one bar
+    per backend: median wall-clock latency of one logical cross-branch
+    read (whisker to p90), annotated with how it ran (multi, or per_ref x
+    refs). data/cross_branch.md/.csv hold the numbers."""
+    table = cross_branch_table(runs)
+    if table.empty:
+        return
+    table.to_csv(_data_path(outdir, "cross_branch.csv"), index=False)
+    with open(_data_path(outdir, "cross_branch.md"), "w") as f:
+        f.write("# Cross-branch reads as one logical step\n\n")
+        f.write("A step is one scenario-level read over several branches: one multi-ref "
+                "exec() where the backend has multi-branch query semantics (mode multi), "
+                "else the same read once per branch (mode per_ref, execs_per_step physical "
+                "execs, each with its connection switch). Latency is the wall-clock span of "
+                "the whole step on its thread; per_ref_ms divides it by the refs read.\n\n")
+        cols = ["scenario", "backend", "label", "mode", "steps", "refs_per_step", "execs_per_step",
+                "median_ms", "p90_ms", "p95_ms", "max_ms", "exec_latency_median_ms", "per_ref_ms"]
+        f.write("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols) + "\n")
+        for _, r in table.iterrows():
+            f.write("| " + " | ".join(f"{r[c]:.1f}" if isinstance(r[c], float) else str(r[c]) for c in cols) + " |\n")
+    panels = sorted({(r["scenario"], r["label"]) for _, r in table.iterrows()},
+                    key=lambda k: (SCENARIO_ORDER.index(k[0]) if k[0] in SCENARIO_ORDER else 99, k[1]))
+    _, backends = _grid(runs)
+    fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 4.5), squeeze=False)
+    for ax, (sc, lab) in zip(axes[0], panels):
+        sub = table[(table["scenario"] == sc) & (table["label"] == lab)].set_index("backend")
+        xs = [b for b in backends if b in sub.index]
+        med = np.array([sub.loc[b, "median_ms"] for b in xs])
+        p90 = np.array([sub.loc[b, "p90_ms"] for b in xs])
+        ax.bar(np.arange(len(xs)), med, 0.6, yerr=[np.zeros_like(med), np.maximum(p90 - med, 0)],
+               color=[PALETTE(backends.index(b)) for b in xs], capsize=3, error_kw={"lw": 0.8})
+        for i, b in enumerate(xs):
+            m = sub.loc[b, "mode"]
+            note = "multi" if m == "multi" else f"per_ref x{sub.loc[b, 'refs_per_step']:.0f}"
+            ax.annotate(f"{note}\n{med[i]:.0f} ms", (i, max(med[i], 1e-3)), textcoords="offset points",
+                        xytext=(0, 4), ha="center", va="bottom", fontsize=7)
+        ax.set_yscale("log")
+        ax.set_xticks(np.arange(len(xs)))
+        ax.set_xticklabels(xs, rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("median ms per logical read (whisker to p90)")
+        refs = sub["refs_per_step"].median()
+        ax.set_title(f"{SCENARIO_TITLES.get(sc, sc)}: {lab} over {refs:.0f} branches")
+        ax.grid(axis="y", alpha=0.3)
+    fig.suptitle("One cross-branch read as a single logical step: one multi-ref exec() vs the same read once per branch")
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "latency_cross_branch.png"), dpi=150)
+    plt.close(fig)
+
+
 def plot_exec_by_label(runs: list[Run], outdir: str) -> None:
     """One panel per scenario: exec() latency per script label."""
     scenarios, backends = _grid(runs)
@@ -1044,6 +1178,7 @@ def main() -> None:
     write_latency_by_op(runs, args.outdir)
     write_data_ops_table(runs, args.outdir)
     plot_exec_by_label(runs, args.outdir)
+    plot_cross_branch(runs, args.outdir)
     plot_exec_time_by_op(runs, args.outdir)
     write_exec_by_label(runs, args.outdir)
     plot_latency_cdf(runs, args.outdir)
