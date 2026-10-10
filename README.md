@@ -233,7 +233,7 @@ workload {
 | `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 | `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
-| `--op-stall-sec N` | stall limit for one operation: when a verb or an exec has been running longer than this (default 600 s, 0 = off), the run is stopped the same way, and the e2e stats' `stop_reason` names the operation |
+| `--op-stall-sec N` | stall limit for one operation: a verb or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too, and the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed) |
 | `--storage-sample-interval SEC` | seconds between background storage samples (default 5, 0 = off) |
 | `--measure-storage` | also measure storage around every operation |
 

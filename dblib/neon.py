@@ -219,8 +219,10 @@ def api_request(method: str, endpoint: str, record=None, max_retries: int = 8, *
     raise NeonAPIError(0, "retries exhausted")
 
 
-def wait_operations(project_id: str, operations, record=None, timeout: float = _OP_TIMEOUT_SEC) -> float:
-    """Poll each operation until it finishes; returns seconds spent."""
+def wait_operations(project_id: str, operations, record=None, timeout: float = _OP_TIMEOUT_SEC,
+                    check=None) -> float:
+    """Poll each operation until it finishes; returns seconds spent.
+    ``check()`` runs before each poll (a cancellation hook)."""
     t0 = time.perf_counter()
     for op in operations or []:
         op_id = op.get("id") if isinstance(op, dict) else op
@@ -229,6 +231,8 @@ def wait_operations(project_id: str, operations, record=None, timeout: float = _
         if isinstance(op, dict) and op.get("status") == "finished":
             continue
         while True:
+            if check is not None:
+                check()
             o = api_request("GET", f"projects/{project_id}/operations/{op_id}", record=record)["operation"]
             status = o.get("status")
             if status == "finished":
@@ -460,6 +464,7 @@ class NeonToolSuite(DBToolSuite):
     # ------------------------------------------------------------------
 
     def _wait_row(self, seconds: float, label: str = "api_wait") -> None:
+        self._check_cancel()
         self.observe(f"{label}_sec", seconds)
         self.observe(f"{label}_count", 1)
         now = time.time()
@@ -471,7 +476,8 @@ class NeonToolSuite(DBToolSuite):
         return api_request(method, endpoint, record=self._wait_row, **kwargs)
 
     def _wait(self, operations) -> float:
-        return wait_operations(self.project_id, operations, record=self._wait_row)
+        return wait_operations(self.project_id, operations, record=self._wait_row,
+                               check=self._check_cancel)
 
     # ------------------------------------------------------------------
     # Branch registry
@@ -642,6 +648,7 @@ class NeonToolSuite(DBToolSuite):
         t0 = time.perf_counter()
         attempt = 0
         while True:
+            self._check_cancel()
             try:
                 conn = psycopg2.connect(uri, connect_timeout=30)
                 conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
@@ -748,6 +755,7 @@ class NeonToolSuite(DBToolSuite):
     _LOG_COLS = ("seq", "id", "kind", "message", "lsn", "branch_id", "prev_lsn", "prev_branch_id", "ts")
 
     def _exec(self, conn, sql: str, args=None):
+        self._check_cancel()
         with conn.cursor() as cur:
             cur.execute(sql, args)
             if cur.description is not None:

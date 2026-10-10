@@ -192,9 +192,12 @@ class ResultCollector:
         self._spilled_rows = 0
         # Per-op-type status counts over every row emitted (spilled or not)
         self._status_counts: dict = {}
-        # Operations in flight: token -> (op name, ref, label, thread id, start)
+        # Operations in flight: token -> {op, ref, label, thread_id, start,
+        # cancel (callable or None), note (set when a watchdog cancelled it)}
         self._in_flight: dict = {}
         self._next_token = 1
+        # Operations a watchdog cancelled, with their outcome
+        self.stalls: list = []
 
         self._lock = threading.Lock()
 
@@ -334,26 +337,58 @@ class ResultCollector:
     # Operations in flight (for a stall watchdog)
     # ------------------------------------------------------------------
 
-    def begin_op(self, op_name: str, ref: str = "", label: str = "") -> int:
-        """Register an operation that just started; returns its token."""
+    def begin_op(self, op_name: str, ref: str = "", label: str = "", cancel=None) -> int:
+        """Register an operation that just started; returns its token.
+        ``cancel()`` is what a watchdog may call to abort it."""
         with self._lock:
             token = self._next_token
             self._next_token += 1
-            self._in_flight[token] = (op_name, ref or "", label or "",
-                                      get_current_thread_id(), time.time())
+            self._in_flight[token] = {"op": op_name, "ref": ref or "", "label": label or "",
+                                      "thread_id": get_current_thread_id(), "start": time.time(),
+                                      "cancel": cancel, "note": None}
         return token
 
-    def end_op(self, token: int) -> None:
+    def end_op(self, token: int, failed: bool = False):
+        """Unregister an operation; returns the watchdog's note if it was
+        cancelled while running, else None. ``failed`` records the
+        outcome of a cancelled operation (one that finished anyway stays
+        OK and is listed as "completed")."""
         with self._lock:
-            self._in_flight.pop(token, None)
+            entry = self._in_flight.pop(token, None)
+            if entry and entry["note"] is not None and entry.get("stall") is not None:
+                entry["stall"]["outcome"] = "failed" if failed else "completed"
+        return entry["note"] if entry else None
+
+    def cancel_op(self, token: int, note: str) -> bool:
+        """Abort an operation in flight (its cancel callback, outside the
+        lock), attach ``note`` to it and list it in ``stalls``. False if
+        it already finished."""
+        with self._lock:
+            entry = self._in_flight.get(token)
+            if entry is None:
+                return False
+            entry["note"] = note
+            entry["stall"] = {"op": entry["op"], "ref": entry["ref"], "label": entry["label"],
+                              "thread_id": entry["thread_id"],
+                              "elapsed_sec": round(time.time() - entry["start"], 1),
+                              "time": round(time.time(), 3), "note": note, "outcome": "pending"}
+            self.stalls.append(entry["stall"])
+            cancel = entry["cancel"]
+        if cancel is not None:
+            try:
+                cancel()
+            except Exception:
+                pass
+        return True
 
     def in_flight_ops(self) -> list:
-        """Operations running now, as dicts with their elapsed seconds."""
+        """Operations running now, with their elapsed seconds and token."""
         now = time.time()
         with self._lock:
-            items = list(self._in_flight.values())
-        return [{"op": op, "ref": ref, "label": label, "thread_id": tid,
-                 "elapsed_sec": now - start} for op, ref, label, tid, start in items]
+            items = [(t, dict(e)) for t, e in self._in_flight.items()]
+        return [{"token": t, "op": e["op"], "ref": e["ref"], "label": e["label"],
+                 "thread_id": e["thread_id"], "elapsed_sec": now - e["start"],
+                 "cancelled": e["note"] is not None} for t, e in items]
 
     def stalled_ops(self, threshold_sec: float) -> list:
         """Operations in flight for longer than ``threshold_sec``."""

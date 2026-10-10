@@ -94,6 +94,10 @@ _VERB_OP_TYPES = {
 }
 
 
+class OperationCancelled(RuntimeError):
+    """The operation was aborted (a stall watchdog cancelled it)."""
+
+
 class UnsupportedOperation(Exception):
     """The backend cannot perform this operation at all."""
 
@@ -294,6 +298,7 @@ class Session(_SessionBase):
         re-raises on error."""
         if timed is not None:
             saved, self.timed = self.timed, timed
+        self.suite._check_cancel()   # a stall watchdog cancelled this exec
         rows, error, status, touched = None, "", OpStatus.OK, 0
         start_wall = time.time()
         start = time.perf_counter()
@@ -564,6 +569,42 @@ class DBToolSuite(ABC):
                 return cur.fetchall()
             return None
 
+    # ------------------------------------------------------------------
+    # Cancelling the operation in flight (stall watchdog)
+    # ------------------------------------------------------------------
+
+    def cancel_current_op(self) -> None:
+        """Abort the operation this suite is running: cancel the statement
+        on its connection (where the driver supports it) and make the
+        backend's wait loops raise OperationCancelled at their next check.
+        The verb or exec then fails and the workflow goes on."""
+        self._cancel_requested = True
+        conn = getattr(self, "conn", None)
+        cancel = getattr(conn, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:
+                pass
+
+    def _check_cancel(self) -> None:
+        """Backends call this inside waits and between statements."""
+        if getattr(self, "_cancel_requested", False):
+            raise OperationCancelled("operation cancelled")
+
+    def _begin_op(self, op_name: str, ref: str, label: str) -> int:
+        self._cancel_requested = False
+        return self.result_collector.begin_op(op_name, ref, label, cancel=self.cancel_current_op)
+
+    def _end_op(self, token: int, error: str) -> str:
+        """Unregister the operation; a watchdog note is prefixed to the
+        error of a failed operation."""
+        note = self.result_collector.end_op(token, failed=bool(error))
+        self._cancel_requested = False
+        if note and error:
+            return f"{note}; {error}"
+        return error
+
     def _safe_storage(self) -> int:
         try:
             return int(self._storage_bytes() or 0)
@@ -607,7 +648,7 @@ class DBToolSuite(ABC):
         status, value, error, exc = OpStatus.OK, None, "", None
         start_wall = time.time()
         start = time.perf_counter()
-        token = self.result_collector.begin_op(verb.upper(), str(ref) if ref else "", label)
+        token = self._begin_op(verb.upper(), str(ref) if ref else "", label)
         try:
             value = fn()
         except UnsupportedOperation as e:
@@ -615,7 +656,7 @@ class DBToolSuite(ABC):
         except Exception as e:
             status, error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
         finally:
-            self.result_collector.end_op(token)
+            error = self._end_op(token, error)
         latency = time.perf_counter() - start if status != OpStatus.UNSUPPORTED else 0.0
         end_wall = time.time()
         after = self._safe_storage() if storage and status != OpStatus.UNSUPPORTED else 0
@@ -893,7 +934,7 @@ class DBToolSuite(ABC):
         exc = None
         start_wall = time.time()
         start = time.perf_counter()
-        token = self.result_collector.begin_op("EXEC", result.ref, label)
+        token = self._begin_op("EXEC", result.ref, label)
         try:
             result.value = self._run_script(script, session, params, self)
         except UnsupportedOperation as e:
@@ -901,7 +942,7 @@ class DBToolSuite(ABC):
         except Exception as e:
             result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
         finally:
-            self.result_collector.end_op(token)
+            result.error = self._end_op(token, result.error)
         result.latency = time.perf_counter() - start
         result.statements = session.statements
         result.storage_after = self._safe_storage() if storage else 0

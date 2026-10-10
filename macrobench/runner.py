@@ -77,33 +77,31 @@ DEFAULT_OP_STALL_SEC = 600.0
 
 
 class StallWatchdog(threading.Thread):
-    """Stops the scenario when one operation (a verb or an exec) has been
-    running for longer than ``threshold``: a run-wide cap says little
-    about a single diff or rebase that never returns. Checks every
-    ``interval`` seconds; the first stall names the operation in the
-    stop reason."""
+    """Cancels any single operation (a verb or an exec) that has been
+    running for longer than ``threshold``: the operation fails with a
+    note naming the stall, and the workflow goes on, so what follows
+    (later failures, invariant results) is recorded too. Checks every
+    ``interval`` seconds; the collector's ``stalls`` list what it
+    cancelled and whether each failed or completed anyway."""
 
-    def __init__(self, collector, ctx, threshold: float, interval: float = None):
+    def __init__(self, collector, threshold: float, interval: float = None, log=print):
         super().__init__(daemon=True, name="stall-watchdog")
         self.collector = collector
-        self.ctx = ctx
         self.threshold = threshold
         # A quarter of the threshold, between 0.5 s and 5 s.
         self.interval = interval if interval is not None else min(5.0, max(0.5, threshold / 4.0))
-        self.fired = None
+        self.log = log
         self._stop = threading.Event()
 
     def run(self):
         while not self._stop.wait(self.interval):
-            stalled = self.collector.stalled_ops(self.threshold)
-            if not stalled:
-                continue
-            worst = max(stalled, key=lambda o: o["elapsed_sec"])
-            desc = f"{worst['op']} on {worst['ref'] or '?'}" + (f" ({worst['label']})" if worst["label"] else "")
-            self.fired = f"operation stalled: {desc} running for {worst['elapsed_sec']:.0f}s (limit {self.threshold:.0f}s)"
-            print(f"\nStall watchdog: {self.fired}; stopping the scenario...", flush=True)
-            self.ctx.cancel_all(self.fired)
-            return
+            for o in self.collector.stalled_ops(self.threshold):
+                if o["cancelled"]:
+                    continue
+                desc = f"{o['op']} on {o['ref'] or '?'}" + (f" ({o['label']})" if o["label"] else "")
+                note = f"stalled: cancelled after {o['elapsed_sec']:.0f}s (limit {self.threshold:.0f}s)"
+                if self.collector.cancel_op(o["token"], note):
+                    self.log(f"Stall watchdog: {desc} {note}; the operation fails and the run goes on")
 
     def stop(self):
         self._stop.set()
@@ -251,8 +249,9 @@ def main(argv=None):
     parser.add_argument("--max-runtime-sec", type=int, default=0,
                         help="Cap the scenario runtime in seconds (0 = no limit).")
     parser.add_argument("--op-stall-sec", type=float, default=DEFAULT_OP_STALL_SEC,
-                        help="Stop the run when one operation (verb or exec) runs longer "
-                             f"than this many seconds (default {DEFAULT_OP_STALL_SEC:g}; 0 = off).")
+                        help="Cancel one operation (verb or exec) once it has run longer than "
+                             "this many seconds; it fails and the run goes on "
+                             f"(default {DEFAULT_OP_STALL_SEC:g}; 0 = off).")
     parser.add_argument("--storage-sample-interval", type=float, default=None,
                         help="Seconds between background storage samples during the "
                              f"scenario (default {DEFAULT_STORAGE_SAMPLE_SEC:g}; 0 = off).")
@@ -362,7 +361,7 @@ def main(argv=None):
         deadline_timer.start()
     watchdog = None
     if args.op_stall_sec > 0:
-        watchdog = StallWatchdog(collector, ctx, args.op_stall_sec)
+        watchdog = StallWatchdog(collector, args.op_stall_sec, log=ctx.note)
         watchdog.start()
 
     # An interrupt (Ctrl-C, SIGTERM) stops the scenario the way the runtime
@@ -455,6 +454,7 @@ def main(argv=None):
             "timed_out": timed_out,
             "stop_reason": ctx.stop_reason if stopped else "",
             "op_stall_sec": args.op_stall_sec,
+            "stalls": list(collector.stalls),
             "seed": ctx.seed,
             "schema": MessageToDict(config.schema),
             "workload": MessageToDict(config.workload),
@@ -505,6 +505,10 @@ def main(argv=None):
                 print(f"  FAILED {r['name']}: {r['detail']}")
         if ctx.metrics:
             print(f"Metrics: {json.dumps(ctx.metrics, default=str)}")
+        if collector.stalls:
+            print(f"Stalled operations cancelled: {len(collector.stalls)}")
+            for st in collector.stalls:
+                print(f"  {st['op']} on {st['ref'] or '?'} ({st['label']}) after {st['elapsed_sec']}s: {st['outcome']}")
 
         collector.write_to_parquet(append=False)
 

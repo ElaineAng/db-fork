@@ -225,6 +225,64 @@ def test_in_flight_ops_and_stall_detection(tmp_path):
     live = c.in_flight_ops()
     assert [(o["op"], o["ref"], o["label"]) for o in live] == [("REBASE", "dev_1", "dev_rebase")]
     assert c.stalled_ops(0.01) and not c.stalled_ops(60)
+    token = live[0]["token"]
+    assert c.cancel_op(token, "stalled: cancelled after 1s") is True
+    assert c.in_flight_ops()[0]["cancelled"] is True
     release.set()
     th.join(2)
     assert c.in_flight_ops() == []
+    assert c.cancel_op(token, "x") is False
+
+
+def test_cancelled_op_is_failed_and_noted(tmp_path):
+    """A watchdog cancel makes the running verb fail with the stall note
+    and leaves the suite usable for the next operation."""
+    import threading
+    from dblib.result_collector import ResultCollector
+    from dblib.db_api import DBToolSuite, OperationCancelled
+
+    class Slow(DBToolSuite):
+        BACKEND_NAME = "slow"
+
+        def __init__(self, collector):
+            super().__init__(None, collector)
+            self.gate = threading.Event()
+
+        def _connect_impl(self, ref):
+            pass
+
+        def _storage_bytes(self):
+            return 0
+
+        def _branch_impl(self, name, from_ref):
+            self.gate.wait(2)
+            self._check_cancel()
+
+        def _commit_impl(self, ref, message):
+            return "c1"
+
+    c = ResultCollector(run_id="t", output_dir=str(tmp_path))
+    s = Slow(c)
+    out = {}
+
+    def run():
+        out["res"] = s.branch("b", "main", label="lbl")
+
+    th = threading.Thread(target=run)
+    th.start()
+    for _ in range(50):
+        live = c.in_flight_ops()
+        if live:
+            break
+        threading.Event().wait(0.02)
+    assert live and live[0]["op"] == "BRANCH"
+    assert c.cancel_op(live[0]["token"], "stalled: cancelled after 9s")
+    s.gate.set()
+    th.join(3)
+    res = out["res"]
+    assert not res.ok
+    assert res.error.startswith("stalled: cancelled after 9s; OperationCancelled")
+    row = [r for r in c.results if r.op_type == rslt.OpType.BRANCH][-1]
+    assert row.status == rslt.OpStatus.FAILED and "stalled" in row.error_message
+    assert s.commit("main", "after").ok
+    assert [(st["op"], st["outcome"]) for st in c.stalls] == [("BRANCH", "failed")]

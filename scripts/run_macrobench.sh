@@ -23,7 +23,8 @@
 # intensity 1); a run that reaches the cap is stopped and recorded as
 # interrupted, with its rows and stats written. --max-runtime-sec 0 lifts it.
 # Independently, one operation (a verb or an exec) running for more than
-# --op-stall-sec (default 600) stops the run the same way, naming it.
+# --op-stall-sec (default 600) is cancelled: it is recorded FAILED with a
+# stall note and the run goes on (the e2e stats list the stalls).
 
 set -euo pipefail
 
