@@ -281,10 +281,13 @@ run_stats/
 ```
 
 The e2e stats carry the workload parameters, the seed statistics,
-`capabilities`, `workflow_supported` with `unsupported_ops` and
-`op_status_counts`, the `invariants` results, the scenario's own `metrics`
-(e.g. S3 merge order and conflicts, S5 time to recovery, S6 fast-forward vs
-three-way merges) and the spine load's transaction counts.
+`capabilities` and `implementation` (how the backend realises each verb:
+native, composed or simulated), `workflow_supported` with `unsupported_ops`
+and `op_status_counts`, the `invariants` results, the scenario's own
+`metrics` (e.g. S3 merge order and conflicts, S5 time to recovery, S6
+fast-forward vs three-way merges), the spine load's transaction counts and
+the `storage` block (the four workflow-level points, the GC status, the
+sampled series; see [Storage](#storage)).
 
 ---
 
@@ -480,7 +483,7 @@ uv run python scripts/plotting/plot_macrobench.py \
 | `exec_time_by_op.png` | per scenario, one horizontal 100% bar per script label and backend (adjacent rows) showing where `exec()` time goes: statement types, CONNECT, and `other` (untimed BEGIN/COMMIT/ROLLBACK round trips plus the Python between statements); mean ms and count at the bar end |
 | `data/data_ops.md/.csv` | data statements (READ/INSERT/UPDATE/DELETE_ROWS/DDL) split by workload role: spine traffic vs. the agent's own statements (ingest, backfill, rollout_step, ...) |
 | `cdf/latency_cdf_<scenario>.png` | latency CDF of each branch verb and data statement type (agent rows only), one line per backend |
-| `storage.png` | database size over the run (runs made with `--measure-storage`) |
+| `storage.png` | storage over the run: the 5 s sampled series (or the per-operation sizes of runs made with `--measure-storage`) with the four workflow-level points as markers; log axis when database-scope and server-scope backends share a panel |
 
 Only the newest run per (scenario, backend) is used unless `--all-runs` is
 given; `--run-glob` narrows by run id (e.g. `'macro_*_mini_*'`).
