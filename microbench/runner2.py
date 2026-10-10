@@ -50,6 +50,7 @@ from dblib import seekdb
 from dblib.seekdb import SeekDBToolSuite
 from dblib import matrixone
 from dblib.matrixone import MatrixOneToolSuite
+from dblib import neon as neon_mod
 from dblib.neon import NeonToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.xata import XataToolSuite
@@ -447,6 +448,10 @@ class BackendManager:
 
         elif backend == tp.Backend.NEON:
             if require_db_setup:
+                # Leftovers of interrupted runs keep billing: drop them first.
+                stale = neon_mod.delete_stale_projects()
+                if stale:
+                    print(f"Deleted stale Neon projects: {stale}")
                 neon_project = NeonToolSuite.create_neon_project(f"project_{db_name}")
                 info.neon_project_id = neon_project["project"]["id"]
                 info.default_uri = (

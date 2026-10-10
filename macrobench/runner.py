@@ -399,6 +399,9 @@ def main(argv=None):
             "metrics": ctx.metrics,
         }
         e2e.update(collector.support_summary())
+        observed = getattr(type(setup_suite), "OBSERVED", None)
+        if observed:
+            e2e["backend_observations"] = dict(observed)
         if spine_load is not None:
             e2e["spine_load"] = {"transactions": spine_load.counts,
                                  "failures": spine_load.failures}
