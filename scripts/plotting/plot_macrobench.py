@@ -948,14 +948,21 @@ def plot_storage(runs: list[Run], outdir: str) -> None:
                 if points.get(name) is not None:
                     ax.plot([x_end + (j + 1) * max(1.0, x_end * 0.02)], [points[name] / 1e6],
                             marker=m, color=PALETTE(i), linestyle="none", markersize=6)
-        ax.set_xlabel("seconds into run (markers right of the series: setup o, workflow s, gc ^, cleanup x)")
+        ax.set_xlabel("seconds into run")
         ax.set_ylabel("MB")
         ax.set_title(SCENARIO_TITLES.get(s, s))
-        ax.grid(alpha=0.3)
+        ax.grid(alpha=0.3, which="both")
+        # Database-scope and server-scope series differ by orders of
+        # magnitude; a log axis keeps both readable.
+        ys = [y for y in ax.get_lines() for y in [y.get_ydata()] if len(y)]
+        lo = min((float(np.nanmin(y)) for y in ys if np.nanmax(y) > 0), default=0)
+        hi = max((float(np.nanmax(y)) for y in ys), default=0)
+        if lo > 0 and hi / lo > 20:
+            ax.set_yscale("log")
         ax.legend(fontsize=8)
     for idx in range(len(scenarios), nrows * ncols):
         axes[idx // ncols][idx % ncols].axis("off")
-    fig.suptitle("Storage over the run")
+    fig.suptitle("Storage over the run (markers right of each series: setup o, workflow s, gc ^, cleanup x)")
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, "storage.png"), dpi=150)
     plt.close(fig)
