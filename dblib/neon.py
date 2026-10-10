@@ -627,8 +627,20 @@ class NeonToolSuite(DBToolSuite):
         self.conn = self._open(target)
         self._conn_branch_id = target
 
+    def _connect(self, ref: Ref, exec_id: int, timed: bool, label: str, fallback: bool):
+        """A branch restore or a compute restart closes existing
+        connections; a dead connection is reopened on the next exec and
+        recorded as a CONNECT like any other switch."""
+        if self.conn is not None and getattr(self.conn, "closed", 0):
+            self._current_ref = None
+            self._conn_branch_id = None
+        return super()._connect(ref, exec_id, timed, label, fallback)
+
     def _on(self, ref: Ref) -> str:
         """Point self.conn at the branch head; returns its id."""
+        if self.conn is not None and getattr(self.conn, "closed", 0):
+            self._current_ref = None
+            self._conn_branch_id = None
         if self._current_ref != Ref(ref.branch) or self.conn is None:
             self._connect_impl(Ref(ref.branch))
             self._current_ref = Ref(ref.branch)
