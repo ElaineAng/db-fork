@@ -400,7 +400,14 @@ def main(argv=None):
         timed_out = bool(args.max_runtime_sec) and stopped and elapsed >= args.max_runtime_sec
         if status == "completed" and stopped:
             status = "interrupted"
+        # The scenario ran to its end, but an operation the watchdog
+        # cancelled never finished: the workflow is incomplete.
+        stalled_failed = [st for st in collector.stalls if st["outcome"] == "failed"]
+        if status == "completed" and stalled_failed:
+            status = "incomplete"
         print(f"\nScenario {status} in {elapsed:.1f}s")
+        if status == "incomplete":
+            print(f"{len(stalled_failed)} operation(s) stalled and were cancelled (see 'stalls' in the e2e stats)")
         if stopped:
             print(f"Run stopped early: {ctx.stop_reason or 'stop requested'}")
 
