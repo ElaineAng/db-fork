@@ -929,18 +929,29 @@ class DBToolSuite(ABC):
                 raise connect._exc
             return result
 
-        session = Session(self, self.conn, ref, all_refs, exec_id, timed,
-                          label, keys)
         exc = None
         start_wall = time.time()
         start = time.perf_counter()
         token = self._begin_op("EXEC", result.ref, label)
         try:
-            result.value = self._run_script(script, session, params, self)
-        except UnsupportedOperation as e:
-            result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
-        except Exception as e:
-            result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+            attempt = 0
+            while True:
+                session = Session(self, self.conn, ref, all_refs, exec_id, timed,
+                                  label, keys)
+                try:
+                    result.value = self._run_script(script, session, params, self)
+                    self._exec_finish(session)
+                except Exception as e:
+                    self._exec_abort(session)
+                    # A script the watchdog cancelled is not run again.
+                    if not self._cancel_requested and self._exec_retry(e, attempt):
+                        attempt += 1
+                        continue
+                    if isinstance(e, UnsupportedOperation):
+                        result.status, result.error, exc = OpStatus.UNSUPPORTED, e.reason or str(e), e
+                    else:
+                        result.status, result.error, exc = OpStatus.FAILED, f"{type(e).__name__}: {e}", e
+                break
         finally:
             result.error = self._end_op(token, result.error)
         result.latency = time.perf_counter() - start
@@ -951,6 +962,22 @@ class DBToolSuite(ABC):
         if raise_on_error and exc is not None:
             raise exc
         return result
+
+    # Hooks around one run of an exec() script. A backend that buffers a
+    # script's writes (instead of autocommitting each statement) publishes
+    # them in _exec_finish, which is part of the EXEC row's latency, and
+    # discards them in _exec_abort. When _exec_retry returns True for the
+    # exception a run raised, the script is run again from the start (e.g.
+    # a publish lost a race with another writer).
+
+    def _exec_finish(self, session: "Session") -> None:
+        """The script ran without raising."""
+
+    def _exec_abort(self, session: "Session") -> None:
+        """The script, or _exec_finish, raised."""
+
+    def _exec_retry(self, exc: Exception, attempt: int) -> bool:
+        return False
 
     def _emit_exec(self, result: ExecResult, timed, exec_id, label, text,
                    fallback, start_wall, end_wall, pool_wait: float = 0.0):

@@ -361,7 +361,9 @@ class SpineLoad:
             self._threads.append(t)
         return self
 
-    def stop(self, timeout: float = 60.0):
+    def stop(self, timeout: float = 900.0):
+        # Generous: each client finishes its transaction in flight, which
+        # takes minutes on a slow backend, before the run moves on.
         self._stop.set()
         for t in self._threads:
             t.join(timeout)

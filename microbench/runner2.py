@@ -51,6 +51,8 @@ from dblib import seekdb
 from dblib.seekdb import SeekDBToolSuite
 from dblib import matrixone
 from dblib.matrixone import MatrixOneToolSuite
+from dblib import bauplan
+from dblib.bauplan import BauplanToolSuite
 from dblib import neon as neon_mod
 from dblib.neon import NeonToolSuite
 from dblib.file_copy import FileCopyToolSuite
@@ -329,6 +331,10 @@ def create_db_tools(
         return MatrixOneToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
+    if backend == tp.Backend.BAUPLAN:
+        return BauplanToolSuite.init_for_bench(
+            result_collector, db_name, default_branch, measure_storage
+        )
     if backend == tp.Backend.FILE_COPY:
         return FileCopyToolSuite.init_for_bench(
             result_collector,
@@ -441,6 +447,12 @@ class BackendManager:
             info.default_branch_id = db_name
             print(f"Default MatrixOne connection URI: {info.default_uri}")
 
+        elif backend == tp.Backend.BAUPLAN:
+            info.default_uri = BauplanToolSuite.get_default_connection_uri()
+            info.default_branch_name = bauplan.MAIN_BRANCH
+            # The run's root branch is <user>.<db_name>.
+            info.default_branch_id = db_name
+
         elif backend == tp.Backend.FILE_COPY:
             info.file_copy_info = FileCopyToolSuite.FileCopyInfo(db_name)
             info.default_uri = FileCopyToolSuite.get_default_connection_uri()
@@ -501,6 +513,8 @@ class BackendManager:
             seekdb.setup_database(db_name, sql_dump_path)
         elif require_db_setup and backend == tp.Backend.MATRIXONE:
             matrixone.setup_database(db_name, sql_dump_path)
+        elif require_db_setup and backend == tp.Backend.BAUPLAN:
+            bauplan.setup_database(db_name, sql_dump_path)
         elif require_db_setup:
             self._create_database(info.default_uri, db_name)
 
@@ -544,6 +558,12 @@ class BackendManager:
             try:
                 # Also drops every branch database and snapshot of the run.
                 matrixone.drop_database(db_name)
+            except Exception as e:
+                print(f"Error deleting database: {e}")
+        elif self.config.backend == tp.Backend.BAUPLAN and db_name:
+            try:
+                # The run's branches, tags and S3 files.
+                bauplan.drop_database(db_name)
             except Exception as e:
                 print(f"Error deleting database: {e}")
         elif info.default_uri and db_name:
@@ -598,6 +618,8 @@ class BackendManager:
             return SeekDBToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.MATRIXONE:
             return MatrixOneToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.BAUPLAN:
+            return BauplanToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.FILE_COPY:
             return FileCopyToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.NEON:

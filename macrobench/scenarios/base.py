@@ -80,10 +80,11 @@ class InvariantRecorder:
 
 def is_retryable_error(msg: str) -> bool:
     """Errors worth retrying after a wait: Neon/Xata rate- and
-    resource-limit errors, and a connection the server dropped (a compute
-    restarted or suspended under it). A verb that failed this way left no
-    partial state (the composed merges run in one transaction), so the
-    retry repeats the whole operation; the failed attempt stays recorded."""
+    resource-limit errors, a connection the server dropped (a compute
+    restarted or suspended under it), and Bauplan's branch moving while an
+    operation ran. A verb that failed this way left no partial state (the
+    composed merges run in one transaction, or on a temporary branch), so
+    the retry repeats the whole operation; the failed attempt stays recorded."""
     msg = (msg or "").lower()
     return any(p in msg for p in (
         "429", "too many", "running operations", "branches limit",
@@ -91,6 +92,8 @@ def is_retryable_error(msg: str) -> bool:
         "ssl connection has been closed", "connection already closed",
         "server closed the connection", "ssl syscall error",
         "terminating connection", "could not connect to server",
+        # Bauplan: the branch moved while the operation ran.
+        "branch_head_changed",
     ))
 
 

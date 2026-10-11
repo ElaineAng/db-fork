@@ -26,6 +26,9 @@ dependencies = [
     "tqdm",
     "setuptools",
     "pandas>=2.3,<3",  # pandas 3 has breaking API changes (plot scripts)
+    "bauplan>=0.3.4",
+    "duckdb>=1.5.6",
+    "sqlglot>=30.22.0",
 ]
 
 [dependency-groups]

@@ -102,7 +102,9 @@ class DevAgentScenario(Scenario):
                             threads=max(1, p.concurrent_branches or ctx.worker_threads))
         finally:
             done.set()
-            prod.join(60)
+            # Wait out the step in flight (a migration takes minutes on a
+            # slow backend), so it cannot outlive the run and its cleanup.
+            prod.join(900)
         ctx.add_metric("dev_steps", self._dev_steps)
         ctx.add_metric("spine_migrations", self._migrations)
 

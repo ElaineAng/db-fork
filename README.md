@@ -1,7 +1,8 @@
 # Database Benchmarking Framework
 
 A parametrized and extensible benchmarking framework for branchable database
-backends (Dolt, Neon, Xata, SeekDB, plain Postgres copies, ...). Every backend
+backends (Dolt, Neon, Xata, SeekDB, MatrixOne, Bauplan, plain Postgres copies,
+...). Every backend
 is driven through one git-like API (`dblib/db_api.py`): `branch`, `commit`,
 `diff`, `log`, `merge`, `rebase`, `revert`, `reset`, `delete`, plus `exec()`
 to run a workload script on one or more branches. Each operation is timed and
@@ -113,6 +114,7 @@ both under `capabilities` and `implementation`.
 | `xata` | yes | | | | | yes | | | yes |
 | `seekdb` | yes | yes (SCN snapshots) | yes (SQL three-way) | yes | yes | yes | yes | yes | yes |
 | `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes (diff-driven) | yes | yes | yes | yes |
+| `bauplan` | yes | yes (tags) | yes (native; row-level on conflict) | yes | yes (branch from tag) | yes | yes | | |
 | `file_copy` | yes | | | | | yes | | | yes |
 
 ### exec()
@@ -230,7 +232,7 @@ workload {
 | Argument | Description |
 |----------|-------------|
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
-| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `neon`, `xata`, `file_copy` |
+| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `bauplan`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 | `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
 | `--op-stall-sec N` | stall limit for one operation: a verb or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
@@ -771,6 +773,105 @@ the run (`bb_<db>_*`). Async mode uses an aiomysql pool, like `dolt_mysql`.
 
 ---
 
+## Bauplan backend — `bauplan`
+
+Runs against a [Bauplan](https://www.bauplanlabs.com/) lakehouse (Iceberg
+tables over S3, with git-like branches, commits, tags and merges in its
+catalog). Macrobench only for now: no SQL dump loading (so no microbench) and
+no `exec_async`.
+
+### Setup
+
+1. A Bauplan API key (Settings → API Keys), either as `BAUPLAN_API_KEY` in
+   `.env` or in a `~/.bauplan/config.yaml` profile (the default profile is
+   used; pick another with `BAUPLAN_PROFILE`). The branch prefix is the key's
+   user (`client.info()`), or `BAUPLAN_USERNAME`.
+2. An S3 bucket the Bauplan deployment can read. The public sandbox only
+   imports from a **public, listable** bucket, so use a dedicated bucket:
+   everything the benchmark writes there is world-readable.
+   ```json
+   {"Statement": [{"Effect": "Allow", "Principal": "*",
+     "Action": ["s3:GetObject", "s3:ListBucket"],
+     "Resource": ["arn:aws:s3:::<bucket>", "arn:aws:s3:::<bucket>/*"]}]}
+   ```
+3. AWS credentials allowed to write and delete under that prefix, and the
+   location, in `.env` (see [Environment Variables](#environment-variables)).
+   The bucket's region is looked up, so `AWS_REGION` need not match it.
+
+`uv run pytest tests/test_bauplan_live.py` checks the setup (slow: tens of
+minutes; skipped when `BAUPLAN_S3_URI` is unset). The local parts are
+covered offline by `tests/test_bauplan_workspace.py`.
+
+### How it works
+
+A non-admin user can only write branches named `<user>.<name>`, so a run's
+root branch (the benchmark's `main`) is `<user>.<db_name>`, created from
+`BAUPLAN_SOURCE_REF` (default `main`), branch `x` is `<user>.<db_name>__x`,
+and the run's tables live in their own namespace, `bb_<db_name>`.
+
+Bauplan has no SQL writes (`query()` is read-only), so `exec()` works on a
+local copy: reads go to `query()` on the branch's head as of the script's
+first statement; a statement that writes runs on local DuckDB copies of the
+tables it touches (pulled with `scan()`, primary key enforced), and reads of
+those tables then run locally too. When the script ends, each changed table
+is written to S3 as Parquet and loaded with `create_table(replace=True)` +
+`import_data` on a temporary branch, which is merged into the branch: one
+atomic commit per `exec()`. If another writer changed one of those tables
+meanwhile, the merge conflicts and the script runs again from the new head
+(up to `BAUPLAN_PUBLISH_RETRIES` times), so no update is lost. Writes are
+therefore visible to other sessions when the script ends, not per
+statement; per-statement rows time only the local work, and the EXEC row
+includes the publish.
+
+Iceberg keeps neither primary keys nor declared types the way merge needs
+them, so each table version (a replaced table gets a new id) has a schema
+sidecar in S3, `<BAUPLAN_S3_URI>/<db>/_schema/<id>.json`.
+
+- `branch()` (native): `create_branch`, from a branch or a commit's tag.
+- `commit()` (composed): every Bauplan write is already a commit, so a
+  commit tags the branch head: `<user>.<db>.c<id>[.m<base32 message>]`.
+- `log()` (composed): `get_commits`, keeping the commits the run's tags point
+  at, plus the commits a merge carried over (listed in its `bb_commits`
+  commit property).
+- `diff()` (simulated): tables whose ids differ are row-diffed locally.
+- `merge()` (native): `merge_branch`. Bauplan detects conflicts per table;
+  on a `MergeConflictError` the conflicting tables are merged row by row
+  locally (three-way, base = the newest shared commit), tables only the
+  source changed are copied with `revert_table`, and the result is merged in.
+  `on_conflict` ("ours", "theirs" or a callable getting Dolt-shaped rows)
+  applies to rows both sides changed.
+- `rebase()` (composed): a branch from the upstream gets the branch's
+  changes as above (`"ours"` = the upstream, as in Dolt), then replaces the
+  branch (`delete_branch` + `rename_branch`).
+- `reset()` (composed): a branch from the commit's tag replaces the branch.
+- `revert()` (simulated): the commit's row changes, inverted locally and
+  published.
+- `delete()` (native): `delete_branch`.
+
+A deleted or renamed branch's `<name>@<hash>` refs stop resolving, so commit
+refs resolve through tags. Commit refs are read-only in `exec()`. Multi-branch
+scripts are not supported (`query()` reads one ref). `drop_database()`
+deletes the run's branches, tags and S3 files.
+
+### Behaviour to expect
+
+- Each `exec()` that writes costs a temporary branch, an S3 upload plus
+  `create_table` and `import_data` jobs per changed table (about 10 s each;
+  tables are published in parallel), and a merge. Reads through `query()`
+  take about 2 s. Start with `--mini`.
+- Every write rewrites the whole table.
+- Conflicts are detected per table, so concurrent writers to one table
+  (the TPC-C spine load) often re-run their scripts.
+- FOREIGN KEY and CHECK constraints are accepted and ignored; indexes are
+  not supported.
+- Bauplan stores tables only, so a view's definition is kept in the
+  branch's `_bb_views` table (published, branched and merged like a table)
+  and the view is recreated locally over the tables it reads; a statement
+  that reads a view therefore runs locally.
+- Per-operation storage is not measured (`--measure-storage` is ignored).
+
+---
+
 ## Neon backend — `neon` (Lakebase Postgres on Neon)
 
 Runs against Neon's API (`console.neon.tech/api/v2`) with `NEON_API_KEY_ORG`
@@ -857,6 +958,13 @@ NEON_API_KEY_ORG=your_key_here
 # Database connection strings (if needed)
 DOLT_CONNECTION_STRING=postgresql://user:pass@localhost:5432/dbname
 NEON_CONNECTION_STRING=postgresql://user:pass@host.neon.tech/dbname
+
+# Bauplan (see "Bauplan backend"); the key can instead come from ~/.bauplan/config.yaml
+BAUPLAN_API_KEY=...
+BAUPLAN_S3_URI=s3://<bucket>/<prefix>
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-2
 ```
 
 ---
