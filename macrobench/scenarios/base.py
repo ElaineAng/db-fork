@@ -94,6 +94,8 @@ def is_retryable_error(msg: str) -> bool:
         "terminating connection", "could not connect to server",
         # Bauplan: the branch moved while the operation ran.
         "branch_head_changed",
+        # DuckDB/MotherDuck: another transaction changed the same rows first.
+        "conflict on tuple", "transaction conflict",
     ))
 
 

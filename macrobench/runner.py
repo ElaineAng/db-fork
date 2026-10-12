@@ -148,6 +148,7 @@ def _capabilities_for(backend) -> dict:
     from dblib.seekdb import SeekDBToolSuite
     from dblib.matrixone import MatrixOneToolSuite
     from dblib.bauplan import BauplanToolSuite
+    from dblib.motherduck import MotherDuckToolSuite
     from dblib.xata import XataToolSuite
     from dblib.file_copy import FileCopyToolSuite
 
@@ -157,6 +158,7 @@ def _capabilities_for(backend) -> dict:
         tp.Backend.SEEKDB: SeekDBToolSuite,
         tp.Backend.MATRIXONE: MatrixOneToolSuite,
         tp.Backend.BAUPLAN: BauplanToolSuite,
+        tp.Backend.MOTHERDUCK: MotherDuckToolSuite,
         tp.Backend.NEON: NeonToolSuite,
         tp.Backend.XATA: XataToolSuite,
         tp.Backend.FILE_COPY: FileCopyToolSuite,
@@ -172,6 +174,7 @@ def _implementation_for(backend) -> dict:
     from dblib.seekdb import SeekDBToolSuite
     from dblib.matrixone import MatrixOneToolSuite
     from dblib.bauplan import BauplanToolSuite
+    from dblib.motherduck import MotherDuckToolSuite
     from dblib.xata import XataToolSuite
     from dblib.file_copy import FileCopyToolSuite
 
@@ -181,6 +184,7 @@ def _implementation_for(backend) -> dict:
         tp.Backend.SEEKDB: SeekDBToolSuite,
         tp.Backend.MATRIXONE: MatrixOneToolSuite,
         tp.Backend.BAUPLAN: BauplanToolSuite,
+        tp.Backend.MOTHERDUCK: MotherDuckToolSuite,
         tp.Backend.NEON: NeonToolSuite,
         tp.Backend.XATA: XataToolSuite,
         tp.Backend.FILE_COPY: FileCopyToolSuite,
@@ -300,10 +304,11 @@ def main(argv=None):
     # the parquet file as they come so the run's memory stays bounded.
     collector = rc.ResultCollector(run_id=config.run_id, output_dir=args.outdir,
                                    spill_rows=int(os.environ.get("MACRO_SPILL_ROWS", "200000")))
-    # Per-op storage is too expensive on Neon (pg_database_size per branch)
-    # and Bauplan (table metadata calls per branch).
+    # Per-op storage is too expensive on Neon (pg_database_size per branch),
+    # Bauplan (table metadata calls per branch) and MotherDuck (a size
+    # pragma over every database of the run).
     measure_storage = config.measure_storage and config.backend not in (
-        tp.Backend.NEON, tp.Backend.BAUPLAN)
+        tp.Backend.NEON, tp.Backend.BAUPLAN, tp.Backend.MOTHERDUCK)
     db_name = config.database_setup.db_name
 
     def suite_factory():

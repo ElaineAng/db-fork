@@ -364,6 +364,13 @@ class DevAgentScenario(Scenario):
                          "WHERE table_name = %s AND table_schema = DATABASE()",
                          ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
         if not r.ok:
+            # Postgres and DuckDB: information_schema can span several
+            # databases (DuckDB lists every attached one), so filter on the
+            # current one.
+            r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables "
+                             "WHERE table_name = %s AND table_catalog = current_database()",
+                             ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
+        if not r.ok:
             r = suite.exec([("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = %s",
                              ("loyalty_tier",))], refs=[ctx.spine], label="invariant")[0]
         if r.ok and r.rows:

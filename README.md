@@ -1,7 +1,7 @@
 # Database Benchmarking Framework
 
 A parametrized and extensible benchmarking framework for branchable database
-backends (Dolt, Neon, Xata, SeekDB, MatrixOne, Bauplan, plain Postgres copies,
+backends (Dolt, Neon, Xata, SeekDB, MatrixOne, Bauplan, MotherDuck, plain Postgres copies,
 ...). Every backend
 is driven through one git-like API (`dblib/db_api.py`): `branch`, `commit`,
 `diff`, `log`, `merge`, `rebase`, `revert`, `reset`, `delete`, plus `exec()`
@@ -114,6 +114,7 @@ both under `capabilities` and `implementation`.
 | `xata` | yes | | | | | yes | | | yes |
 | `seekdb` | yes | yes (SCN snapshots) | yes (SQL three-way) | yes | yes | yes | yes | yes | yes |
 | `matrixone` | yes | yes (snapshots) | yes (DATA BRANCH MERGE) | yes | yes (diff-driven) | yes | yes | yes | yes |
+| `motherduck` | yes | yes (frozen clones) | yes (SQL three-way) | yes | yes (COPY ... OVERWRITE) | yes | yes | yes | |
 | `bauplan` | yes | yes (tags) | yes (native; row-level on conflict) | yes | yes (branch from tag) | yes | yes | | |
 | `file_copy` | yes | | | | | yes | | | yes |
 
@@ -232,7 +233,7 @@ workload {
 | Argument | Description |
 |----------|-------------|
 | `scenario` | `rl_env`, `context_mgmt`, `multi_agent`, `dev_agent`, `ops_agent`, `data_agent` |
-| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `bauplan`, `neon`, `xata`, `file_copy` |
+| `backend` | `dolt`, `dolt_mysql`, `seekdb`, `matrixone`, `bauplan`, `motherduck`, `neon`, `xata`, `file_copy` |
 | `scale_factor` | W warehouses for the generated data (default: the config's) |
 | `--max-runtime-sec N` | runtime cap; default one hour times the largest of the scale factor and the intensity multipliers (3600 s at scale 1, intensity 1), 0 = no cap. A run that reaches it (or gets Ctrl-C / SIGTERM) is recorded as `interrupted` with its rows and stats written |
 | `--op-stall-sec N` | stall limit for one operation: a verb or an exec that has been running longer than this (default 600 s, 0 = off) is cancelled and recorded `FAILED` with a `stalled: cancelled after Ns` note; the run goes on, so later failures and invariant results are recorded too; the e2e stats list the cancelled operations under `stalls` with their outcome (`failed`, or `completed` when it finished before the cancel landed), and a run with a cancelled operation that failed ends with status `incomplete` instead of `completed` |
@@ -872,6 +873,78 @@ deletes the run's branches, tags and S3 files.
 
 ---
 
+## MotherDuck backend — `motherduck`
+
+Runs against [MotherDuck](https://motherduck.com/) (DuckDB in the cloud).
+Macrobench only for now: no SQL dump loading (so no microbench) and no
+`exec_async` (the DuckDB Python client has no asyncio).
+
+### Setup
+
+1. Sign up at motherduck.com; the free Lite plan (no card: 10 GB storage,
+   10 Pulse CU-hours a month) is enough for the mini scenarios.
+2. Create a service account (Settings → Service Accounts) and a read/write
+   access token for it (a personal access token also works).
+3. Put it in `.env` as `MOTHERDUCK_TOKEN` (see [Environment
+   Variables](#environment-variables)). `MOTHERDUCK_HOME_DB` (default
+   `my_db`) names a database of the account the cleanup switches to.
+
+`uv run pytest tests/test_motherduck_live.py` checks the setup (about 1.5
+minutes; skipped when `MOTHERDUCK_TOKEN` is unset). The DuckDB client must
+be a version MotherDuck accepts (1.4.x to 1.5.6, pinned in `pyproject.toml`).
+
+### How the verbs map
+
+Each branch is its own database (`main` is `<db_name>`, branch `x` is
+`<db_name>__x`) and a multi-branch script addresses another branch as
+`"<db>__x".main."<table>"`. MotherDuck clones databases zero-copy
+(`CREATE DATABASE b FROM a`, metadata only) and overwrites one with another
+in place (`COPY FROM DATABASE a (OVERWRITE) TO b`). The free plan keeps no
+snapshot history, so a commit is a **frozen clone**, `<db_name>__c_<id>`,
+taken after the commit's `_bb_commits` row is written (the clone carries the
+log as of the commit; branches inherit their parent's log through clones).
+Commits never expire and outlive their branch.
+
+- `branch()` (native): `CREATE DATABASE ... FROM` the branch or a commit's
+  clone, plus a fork commit whose clone is the merge base later.
+- `commit()` (composed): the log row, then the frozen clone.
+  `log()` (simulated) reads the table.
+- `diff()` (simulated): one primary-key `FULL OUTER JOIN` per table across
+  the two databases.
+- `merge()` (simulated): SQL three-way merge run on MotherDuck in one
+  transaction (`dblib/duckdb_common.py`, shared with Bauplan), with its
+  working tables in a `_bb` schema of the target. The base is the newest
+  commit both logs have, or the fork point. Tables the source added are
+  created from their DDL, added columns are added; a differing primary key
+  or column type is a schema conflict that fails before any data changes.
+- `rebase()` (composed): the upstream is cloned (frozen as the branch's new
+  fork point, and as the starting point of a temporary clone), the branch's
+  changes are merged into the clone (`"ours"` = the upstream, as in Dolt),
+  and `COPY FROM DATABASE ... (OVERWRITE)` puts it in place.
+- `reset()` (composed): `COPY FROM DATABASE <commit clone> (OVERWRITE)`.
+- `revert()` (simulated): the inverse of the commit's row changes.
+- `delete()` (native): `DROP DATABASE`.
+
+A commit ref used with `exec()` gets a temporary clone (writes cannot touch
+the commit). `drop_database()` drops every database of the run.
+
+### Behaviour to expect
+
+- Statements take tens of milliseconds and a clone a fraction of a second.
+- DuckDB uses optimistic concurrency: a transaction that changes rows
+  another one changed first fails ("Conflict on tuple deletion") rather
+  than waiting. The spine load sees these as failed transactions.
+- `ALTER TABLE ... ADD FOREIGN KEY` is not supported (the CH schema's
+  foreign-key statements fail), and `DROP COLUMN` fails on a table that has
+  a secondary index.
+- Each connection has its own catalog, so a database another worker created
+  must be attached before use; the backend does this, retrying briefly
+  because a database created under concurrent clones can take a moment to
+  bind.
+- Per-operation storage is not measured (`--measure-storage` is ignored).
+
+---
+
 ## Neon backend — `neon` (Lakebase Postgres on Neon)
 
 Runs against Neon's API (`console.neon.tech/api/v2`) with `NEON_API_KEY_ORG`
@@ -965,6 +1038,9 @@ BAUPLAN_S3_URI=s3://<bucket>/<prefix>
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-2
+
+# MotherDuck (see "MotherDuck backend")
+MOTHERDUCK_TOKEN=...
 ```
 
 ---

@@ -467,7 +467,7 @@ dev = [
 requires-dist = [
     { name = "aiomysql" },
     { name = "bauplan", specifier = ">=0.3.4" },
-    { name = "duckdb", specifier = ">=1.5.6" },
+    { name = "duckdb", specifier = ">=1.5.6,<1.6" },
     { name = "faker", specifier = ">=37,<38" },
     { name = "matplotlib" },
     { name = "neon-api" },

@@ -67,6 +67,7 @@ from dotenv import load_dotenv
 from sqlglot import exp
 
 from dblib.db_api import DBToolSuite, Ref
+from dblib import duckdb_common as ddb
 import dblib.result_collector as rc
 from util.sql_parse import get_sql_operation_keyword
 
@@ -102,7 +103,6 @@ _MESSAGE_BYTES = 120
 # Commit property listing the commit ids a merge carried over
 # (merge_branch keeps commit properties but drops the commit body).
 _CARRIED = "bb_commits"
-_CONFLICT_ROW_LIMIT = 1000
 _PUBLISH_THREADS = 8
 
 _TXN_KEYWORDS = ("BEGIN", "START", "COMMIT", "END", "ROLLBACK", "ABORT")
@@ -296,21 +296,10 @@ def drop_database(db_name: str) -> None:
 # SQL helpers
 # ----------------------------------------------------------------------
 
-_PLACEHOLDER_RE = re.compile(r"%\((\w+)\)s|%s|%%")
-
-
-def to_duckdb(sql: str, vars=None):
-    """pyformat SQL (%s, %(name)s) -> DuckDB SQL (?, $name) and parameters.
-    As with the DB-API drivers, nothing is substituted when vars is None."""
-    if vars is None:
-        return sql, None
-
-    def sub(m):
-        if m.group(0) == "%%":
-            return "%"
-        return f"${m.group(1)}" if m.group(1) else "?"
-    params = dict(vars) if isinstance(vars, dict) else list(vars)
-    return _PLACEHOLDER_RE.sub(sub, sql), params
+# pyformat placeholders, and the SQL fragment helpers, shared with MotherDuck.
+_PLACEHOLDER_RE = ddb._PLACEHOLDER_RE
+to_duckdb = ddb.to_duckdb
+_q, _cols, _join, _same = ddb.q, ddb.cols_sql, ddb.join_sql, ddb.same_sql
 
 
 def literal(value) -> str:
@@ -390,24 +379,6 @@ def arrow_rows(table: pa.Table) -> list:
     return list(zip(*[c.to_pylist() for c in table.columns]))
 
 
-def _q(ident: str) -> str:
-    return '"' + ident.replace('"', '""') + '"'
-
-
-def _cols(alias, cols) -> str:
-    return ", ".join(f"{alias}.{_q(c)}" if alias else _q(c) for c in cols)
-
-
-def _join(a, b, cols) -> str:
-    return " AND ".join(f"{a}.{_q(c)} = {b}.{_q(c)}" for c in cols)
-
-
-def _same(a, b, cols) -> str:
-    if not cols:
-        return "TRUE"
-    return " AND ".join(f"{a}.{_q(c)} IS NOT DISTINCT FROM {b}.{_q(c)}" for c in cols)
-
-
 def local_schema(db, table: str) -> dict:
     """{"columns": [[name, type]], "pk": [names]} of a DuckDB table."""
     cols = db.execute(
@@ -461,123 +432,34 @@ def _project(db, name: str, data: pa.Table, cols: list, like: str) -> None:
 def three_way_local(db, table: str, base: pa.Table, theirs: pa.Table, pk: list,
                     on_conflict="ours") -> dict:
     """Apply theirs' changes since base to local DuckDB table ``table``
-    (ours), matching rows by ``pk``. Rows both sides changed differently
-    are conflicts: "ours" keeps ours, "theirs" takes theirs, and for a
-    callable the conflict rows (Dolt's base_*/our_*/their_* shape) are
-    returned under "rows" for the caller to resolve. Without a primary key,
-    only theirs' new rows are added."""
+    (ours), matching rows by ``pk`` (see duckdb_common.three_way)."""
     cols = [c for c, _ in local_schema(db, table)["columns"] if c in set(theirs.column_names)]
     _project(db, "__bb_t", theirs, cols, table)
     _project(db, "__bb_b", base, cols, table)
-    db.execute(f"CREATE OR REPLACE TEMP TABLE __bb_o AS SELECT {_cols(None, cols)} FROM {_q(table)}")
-    info = {"ours_changes": 0, "theirs_changes": 0, "conflicts": 0, "rows": []}
-    if not pk:
-        n = db.execute(f"INSERT INTO {_q(table)} ({_cols(None, cols)}) "
-                       f"SELECT * FROM __bb_t EXCEPT ALL SELECT * FROM __bb_b").fetchall()[0][0]
-        info["theirs_changes"] = n
-        info["no_primary_key"] = True
-        return info
-    rest = [c for c in cols if c not in pk]
-    keys = _cols(None, pk)
-    for side, src in (("t", "__bb_t"), ("o", "__bb_o")):
-        db.execute(
-            f"CREATE OR REPLACE TEMP TABLE __bb_{side}k AS "
-            f"SELECT {_cols('x', pk)}, 'u' AS side FROM {src} x WHERE NOT EXISTS "
-            f"(SELECT 1 FROM __bb_b b WHERE {_join('b', 'x', pk)} AND {_same('b', 'x', rest)}) "
-            f"UNION ALL SELECT {_cols('b', pk)}, 'd' FROM __bb_b b WHERE NOT EXISTS "
-            f"(SELECT 1 FROM {src} x WHERE {_join('b', 'x', pk)})")
-    info["theirs_changes"] = db.execute("SELECT COUNT(*) FROM __bb_tk").fetchall()[0][0]
-    info["ours_changes"] = db.execute("SELECT COUNT(*) FROM __bb_ok").fetchall()[0][0]
-    db.execute(
-        f"CREATE OR REPLACE TEMP TABLE __bb_ck AS SELECT {_cols('a', pk)} FROM __bb_tk a "
-        f"JOIN __bb_ok b ON {_join('a', 'b', pk)} "
-        f"LEFT JOIN __bb_o o ON {_join('a', 'o', pk)} LEFT JOIN __bb_t t ON {_join('a', 't', pk)} "
-        f"WHERE NOT (a.side = 'd' AND b.side = 'd') "
-        f"AND NOT (a.side = 'u' AND b.side = 'u' AND {_same('o', 't', rest)})")
-    info["conflicts"] = db.execute("SELECT COUNT(*) FROM __bb_ck").fetchall()[0][0]
-
-    def apply(conflicting: bool):
-        pick = "IN" if conflicting else "NOT IN"
-        db.execute(
-            f"DELETE FROM {_q(table)} WHERE ({keys}) IN "
-            f"(SELECT {keys} FROM __bb_tk WHERE side = 'd') "
-            f"AND ({keys}) {pick} (SELECT {keys} FROM __bb_ck)")
-        upsert = (f"INSERT INTO {_q(table)} ({_cols(None, cols)}) "
-                  f"SELECT {_cols('t', cols)} FROM __bb_t t WHERE ({_cols('t', pk)}) IN "
-                  f"(SELECT {keys} FROM __bb_tk WHERE side = 'u') "
-                  f"AND ({_cols('t', pk)}) {pick} (SELECT {keys} FROM __bb_ck) "
-                  f"ON CONFLICT ({keys}) DO ")
-        sets = ", ".join(f"{_q(c)} = excluded.{_q(c)}" for c in rest)
-        db.execute(upsert + (f"UPDATE SET {sets}" if rest else "NOTHING"))
-
-    if info["conflicts"] and callable(on_conflict):
-        info["rows"] = _conflict_rows(db, cols, pk)
-    apply(conflicting=False)
-    if info["conflicts"] and on_conflict == "theirs":
-        apply(conflicting=True)
-    return info
-
-
-def _conflict_rows(db, cols, pk) -> list:
-    p0 = _q(pk[0])
-    rows = db.execute(
-        f"SELECT {_cols('b', cols)}, {_cols('o', cols)}, {_cols('t', cols)}, "
-        f"b.{p0} IS NULL, o.{p0} IS NULL, t.{p0} IS NULL FROM __bb_ck c "
-        f"LEFT JOIN __bb_b b ON {_join('c', 'b', pk)} "
-        f"LEFT JOIN __bb_o o ON {_join('c', 'o', pk)} "
-        f"LEFT JOIN __bb_t t ON {_join('c', 't', pk)} LIMIT {_CONFLICT_ROW_LIMIT}").fetchall()
-    lower = [c.lower() for c in cols]
-    names = [f"base_{c}" for c in lower] + [f"our_{c}" for c in lower] + [f"their_{c}" for c in lower]
-    out = []
-    for r in rows:
-        d = dict(zip(names, r[:len(names)]))
-        no_base, no_ours, no_theirs = r[len(names):]
-
-        def diff_type(missing):
-            if missing:
-                return "removed"
-            return "added" if no_base else "modified"
-        d["our_diff_type"] = diff_type(no_ours)
-        d["their_diff_type"] = diff_type(no_theirs)
-        out.append(d)
-    return out
+    scratch = ddb.Scratch(db)
+    try:
+        return ddb.three_way(db, _q(table), "__bb_b", "__bb_t", cols, pk, on_conflict, scratch)
+    finally:
+        scratch.drop()
 
 
 def revert_local(db, table: str, before: pa.Table, after: pa.Table, pk: list) -> None:
     """Undo, in local table ``table``, the row changes between ``before``
-    and ``after`` (rows added are deleted, rows changed or deleted are put
-    back as they were)."""
+    and ``after`` (see duckdb_common.revert)."""
     cols = [c for c, _ in local_schema(db, table)["columns"]]
     _project(db, "__bb_s", before, cols, table)
     _project(db, "__bb_e", after, cols, table)
-    rest = [c for c in cols if c not in pk]
-    keys = _cols(None, pk)
-    db.execute(f"DELETE FROM {_q(table)} WHERE ({keys}) IN (SELECT {_cols('e', pk)} FROM __bb_e e "
-               f"WHERE NOT EXISTS (SELECT 1 FROM __bb_s s WHERE {_join('s', 'e', pk)}))")
-    sets = ", ".join(f"{_q(c)} = excluded.{_q(c)}" for c in rest)
-    db.execute(
-        f"INSERT INTO {_q(table)} ({_cols(None, cols)}) SELECT {_cols('s', cols)} FROM __bb_s s "
-        f"WHERE NOT EXISTS (SELECT 1 FROM __bb_e e WHERE {_join('s', 'e', pk)} AND {_same('s', 'e', rest)}) "
-        f"ON CONFLICT ({keys}) DO " + (f"UPDATE SET {sets}" if rest else "NOTHING"))
+    ddb.revert(db, _q(table), "__bb_s", "__bb_e", cols, pk)
 
 
 def diff_counts(a: pa.Table, b: pa.Table, pk: list) -> tuple:
     """(added, deleted, modified) rows from a to b."""
     db = duckdb.connect()
     try:
-        cols = [c for c in a.column_names if c in set(b.column_names)]
         db.register("a_src", a)
         db.register("b_src", b)
-        db.execute(f"CREATE TABLE a AS SELECT TRUE AS __p, {_cols(None, cols)} FROM a_src")
-        db.execute(f"CREATE TABLE b AS SELECT TRUE AS __p, {_cols(None, cols)} FROM b_src")
-        keys = [c for c in pk if c in cols]
-        rest = [c for c in cols if c not in keys]
-        on = _join("x", "y", keys) if keys else _same("x", "y", cols)
-        modified = (f"COUNT(*) FILTER (WHERE x.__p AND y.__p AND NOT ({_same('x', 'y', rest)}))"
-                    if keys and rest else "0")
-        return tuple(int(v) for v in db.execute(
-            f"SELECT COUNT(*) FILTER (WHERE x.__p IS NULL), COUNT(*) FILTER (WHERE y.__p IS NULL), "
-            f"{modified} FROM a x FULL OUTER JOIN b y ON {on}").fetchall()[0])
+        cols = [c for c in a.column_names if c in set(b.column_names)]
+        return ddb.diff_counts(db, "a_src", "b_src", cols, pk)
     finally:
         db.close()
 

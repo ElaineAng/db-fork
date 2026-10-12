@@ -27,7 +27,7 @@ dependencies = [
     "setuptools",
     "pandas>=2.3,<3",  # pandas 3 has breaking API changes (plot scripts)
     "bauplan>=0.3.4",
-    "duckdb>=1.5.6",
+    "duckdb>=1.5.6,<1.6",  # MotherDuck accepts client versions 1.4.x-1.5.6 and blocks others
     "sqlglot>=30.22.0",
 ]
 
