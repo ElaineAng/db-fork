@@ -119,6 +119,56 @@ both under `capabilities` and `implementation`.
 | `file_copy` | yes (CREATE DATABASE clone) | yes (clone per commit + log table) | yes (SQL three-way over postgres_fdw) | yes | yes (drop + clone from the snapshot) | yes | yes | yes (postgres_fdw) | yes |
 | `chronos` | yes (interval fork, metadata only) | yes (checkpoint + log table) | yes (three-way over Chronos diffs) | yes | yes (diff-driven) | yes (deferred while children live) | yes (checkpoints) | yes (interval views) | |
 | `terminusdb` (microbench only) | yes | commit: reads the head (every write commits); diff, log: yes | yes (`apply` of the diff since the common ancestor) | rebase: yes; revert: `apply` of the inverse diff | yes | yes | yes | | |
+| `machine_fork` | yes (fork of the whole machine) | yes (commit = a forked machine + log table) | | | yes (fork from the commit's machine) | yes (lazy: a fork base waits for its clones) | yes | | |
+
+### machine_fork: every branch is a forked microVM
+
+`dblib/machine_fork.py` runs PostgreSQL inside a [smolvm](https://github.com/smol-machines/smolvm)
+microVM started as a branch source. `branch` is one engine call,
+`smolvm machine branch`: a copy-on-write fork of the parent branch's whole
+machine (RAM, disk, the running postmaster and its buffer cache), given its
+own host port, so every branch is a plain PostgreSQL server at
+`127.0.0.1:<port>` with native branch-local performance. `commit` records a
+row in `_bb_commits` and forks the branch machine as the commit's machine
+(readable through `branch@commit`, forkable for historical forks and
+`reset`). `diff` hashes rows per key bucket on both servers and compares
+the differing buckets on the host. `merge`, `rebase` and `revert` are
+unsupported (the SQL three-way merge in `pg_merge.py` needs `postgres_fdw`
+between two servers, i.e. guest-to-host networking between machines, which
+is not wired up).
+
+A machine other machines were forked from cannot be deleted while they
+exist (its disk layers back theirs), so `delete` and `reset` retire a
+machine and delete it as soon as its last clone is gone.
+
+Requirements: `smolvm` 1.27+ on PATH (or `SMOLVM_BIN`), `/dev/kvm` on Linux
+or Hypervisor.framework on macOS, and network the first time the image is
+pulled. No PostgreSQL server on the host is needed: the golden machine is
+created per run and everything is removed at cleanup.
+
+```bash
+# mini scenario (a handful of machines)
+./scripts/run_macrobench.sh --mini --outdir run_stats rl_env machine_fork
+
+# a run with many commits: pause commit machines instead of keeping them running
+MACHINE_FORK_COMMIT_MODE=pause MACHINE_FORK_MEM_MIB=512 \
+  ./scripts/run_macrobench.sh --outdir run_stats --max-runtime-sec 7200 rl_env machine_fork
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MACHINE_FORK_IMAGE` | `postgres:18` | image of the golden machine |
+| `MACHINE_FORK_MEM_MIB` | `2048` | guest RAM per machine (copy-on-write shared between a fork and its parent) |
+| `MACHINE_FORK_CPUS` | `2` | vCPUs per machine |
+| `MACHINE_FORK_PORT_BASE` | `55000` | host ports for the machines are taken from here up |
+| `MACHINE_FORK_COMMIT_MODE` | `machine` | `machine`: a commit's machine keeps running (~120 MB of host memory each, fastest); `pause`: it is paused after the fork (RAM saved to disk, no VMM process) and resumed when a ref needs it |
+| `MACHINE_FORK_PG_USER` / `MACHINE_FORK_PG_PASSWORD` | `postgres` / `branchbench` | superuser of the golden server |
+| `MACHINE_FORK_NET` | `1` | give the machines outbound network (needed to pull the image the first time) |
+| `SMOLVM_BIN` | `smolvm` | engine binary |
+| `MACHINE_FORK_CLI_TIMEOUT` | `300` | seconds per engine call |
+
+Storage (`_storage_bytes`) is the disk usage of every live machine's data
+directory (a fork adds only the blocks it has written).
 
 ### exec()
 
