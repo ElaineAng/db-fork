@@ -57,6 +57,7 @@ from dblib import neon as neon_mod
 from dblib.neon import NeonToolSuite
 from dblib.file_copy import FileCopyToolSuite
 from dblib.chronos import ChronosToolSuite
+from dblib.machine_fork import MachineForkToolSuite
 from dblib import chronos as chronos_mod
 from dblib.xata import XataToolSuite
 from dblib import terminusdb
@@ -326,6 +327,7 @@ class BackendInfo:
     xata_project_id: Optional[str] = None
     file_copy_info: Optional[FileCopyToolSuite.FileCopyInfo] = None
     chronos_info: Optional[ChronosToolSuite.ChronosInfo] = None
+    machine_fork_info: Optional[MachineForkToolSuite.MachineForkInfo] = None
     setup_branches: list = None
 
 
@@ -378,6 +380,8 @@ def create_db_tools(
         )
     if backend == tp.Backend.TERMINUSDB:
         return TerminusDBToolSuite.init_for_bench(
+    if backend == tp.Backend.MACHINE_FORK:
+        return MachineForkToolSuite.init_for_bench(
             result_collector, db_name, default_branch, measure_storage
         )
     if backend == tp.Backend.NEON:
@@ -505,6 +509,12 @@ class BackendManager:
             info.default_uri = TerminusDBToolSuite.get_default_connection_uri()
             info.default_branch_name = terminusdb.MAIN_BRANCH
             print(f"Default TerminusDB server: {info.default_uri}")
+        elif backend == tp.Backend.MACHINE_FORK:
+            # Boots the golden PostgreSQL machine; branches are forks of it.
+            info.machine_fork_info = MachineForkToolSuite.MachineForkInfo(db_name)
+            info.default_uri = MachineForkToolSuite.get_default_connection_uri()
+            info.default_branch_name = db_name
+            print(f"Default MACHINE_FORK connection URI: {re.sub(r'://([^:/]+):[^@]*@', r'://\1:***@', info.default_uri)}")
 
         elif backend == tp.Backend.NEON:
             if require_db_setup:
@@ -599,6 +609,8 @@ class BackendManager:
             FileCopyToolSuite.cleanup(info.file_copy_info)
         elif info.chronos_info:
             ChronosToolSuite.cleanup(info.chronos_info)
+        elif info.machine_fork_info:
+            MachineForkToolSuite.cleanup(info.machine_fork_info)
         elif self.config.backend == tp.Backend.DOLT_MYSQL and db_name:
             try:
                 dolt_mysql.drop_database(db_name)
@@ -687,6 +699,8 @@ class BackendManager:
             return FileCopyToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.CHRONOS:
             return ChronosToolSuite.get_initial_connection_uri(db_name)
+        elif backend == tp.Backend.MACHINE_FORK:
+            return MachineForkToolSuite.get_initial_connection_uri(db_name)
         elif backend == tp.Backend.NEON:
             return NeonToolSuite._get_neon_connection_uri(
                 info.neon_project_id, info.default_branch_id, db_name

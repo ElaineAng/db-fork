@@ -9,7 +9,7 @@
 #
 # Arguments:
 #   scenario      rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent
-#   backend       dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos
+#   backend       dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos | machine_fork
 #   scale_factor  W warehouses for the generated CH-benCHmark data (default: the config's)
 #
 # The base config is macrobench/configs/<scenario>[_mini].textproto; run_id,
@@ -78,7 +78,7 @@ done
 if [[ $# -lt 2 || $# -gt 3 ]]; then
     echo "Usage: $0 [--mini] [--outdir DIR] [--max-runtime-sec N] [--op-stall-sec N] [--measure-storage] [--native-only] [--storage-sample-interval SEC] [--branch-intensity X] [--data-intensity Y] [--seed N] <scenario> <backend> [scale_factor]"
     echo "  scenario:  rl_env | context_mgmt | multi_agent | dev_agent | ops_agent | data_agent"
-    echo "  backend:   dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos"
+    echo "  backend:   dolt | dolt_mysql | seekdb | matrixone | bauplan | neon | xata | file_copy | chronos | machine_fork"
     exit 1
 fi
 
@@ -91,7 +91,7 @@ if ! echo "$VALID_SCENARIOS" | grep -qw "$SCENARIO"; then
     echo "Error: invalid scenario '$SCENARIO' (one of: $VALID_SCENARIOS)"
     exit 1
 fi
-VALID_BACKENDS="dolt dolt_mysql seekdb matrixone bauplan neon xata file_copy chronos"
+VALID_BACKENDS="dolt dolt_mysql seekdb matrixone bauplan neon xata file_copy chronos machine_fork"
 if ! echo "$VALID_BACKENDS" | grep -qw "$BACKEND"; then
     echo "Error: invalid backend '$BACKEND' (one of: $VALID_BACKENDS)"
     exit 1

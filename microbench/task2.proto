@@ -14,7 +14,7 @@ enum Backend {
   CHRONOS = 10;
   BAUPLAN = 11;
   TERMINUSDB = 12;
-  
+    MACHINE_FORK = 13;
 }
 
 // Operation types for benchmarking
